@@ -40,7 +40,12 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --features prod
         env:
+          # `cc` crate vars so aws-lc-sys (pulled via reqwest 0.13's rustls
+          # feature) builds its C sources with the aarch64 cross-toolchain
+          # instead of the host compiler.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
 
       - name: Prepare artifact
         shell: bash
