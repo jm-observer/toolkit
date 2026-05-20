@@ -3,7 +3,6 @@ use futures::future;
 use log::{info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::time::Duration;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -63,9 +62,9 @@ impl GitHubClient {
             .user_agent("github-commit-info")
             .build()
             .expect("Failed to create HTTP client");
-        
+
         let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
-        
+
         Self { client, token }
     }
 
@@ -166,7 +165,10 @@ impl GitHubClient {
         if owner.is_empty() || repo.is_empty() {
             return Err("owner and repo are required".to_string());
         }
-        let url = format!("https://api.github.com/repos/{}/{}/commits/{}", owner, repo, sha);
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/commits/{}",
+            owner, repo, sha
+        );
 
         let response = self
             .client
@@ -210,10 +212,8 @@ impl Default for GitHubClient {
 }
 
 pub fn parse_start_date(date_str: &str) -> Result<String, String> {
-    let naive_date =
-        NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
-            format!("日期格式错误: {}, 期望格式: yyyy-MM-dd", date_str)
-        })?;
+    let naive_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .map_err(|_| format!("日期格式错误: {}, 期望格式: yyyy-MM-dd", date_str))?;
 
     let datetime = naive_date.and_hms_opt(0, 0, 0).ok_or("日期解析失败")?;
 
@@ -222,10 +222,8 @@ pub fn parse_start_date(date_str: &str) -> Result<String, String> {
 }
 
 pub fn calculate_until_date(start_date: &str, days: i64) -> Result<String, String> {
-    let naive_date =
-        NaiveDate::parse_from_str(start_date, "%Y-%m-%d").map_err(|_| {
-            format!("日期格式错误: {}", start_date)
-        })?;
+    let naive_date = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
+        .map_err(|_| format!("日期格式错误: {}", start_date))?;
 
     let end_date = naive_date + chrono::Duration::days(days);
 
@@ -241,7 +239,6 @@ pub async fn run(
     branch: Option<&str>,
     start_date: &str,
     days: i64,
-    output: Option<&str>,
 ) -> Result<(), String> {
     let client = GitHubClient::new();
 
@@ -280,9 +277,9 @@ pub async fn run(
     info!("找到 {} 个提交", commits.len());
     info!("正在并发获取提交详情...");
 
-    let futures = commits.into_iter().map(|commit| {
-        client.get_commit_info(&owner, &repo, commit)
-    });
+    let futures = commits
+        .into_iter()
+        .map(|commit| client.get_commit_info(&owner, &repo, commit));
     let results = future::join_all(futures).await;
 
     let mut success_count = 0;
@@ -296,16 +293,10 @@ pub async fn run(
             Err(e) => warn!("获取提交详情失败: {}", e),
         }
     }
-    info!("成功获取 {} 个提交详情", success_count);
-
     let json = serde_json::to_string_pretty(&commit_infos).map_err(|e| e.to_string())?;
+    info!("成功获取 {} 个提交详情: {}", success_count, json);
 
-    if let Some(path) = output {
-        tokio::fs::write(path, &json).await.map_err(|e| e.to_string())?;
-        info!("结果已保存到 {}", path);
-    } else {
-        println!("{}", json);
-    }
+    println!("{}", json);
 
     Ok(())
 }
