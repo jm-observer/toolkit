@@ -17,10 +17,42 @@ use anyhow::{Context, Result};
 use api::{ApiError, DouyinClient};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn api_error_json(e: &ApiError) -> Value {
     json!({ "error": e.message, "error_kind": e.kind })
+}
+
+/// zero 工作区根：来自 `ZERO_WORKSPACE` 环境变量（systemd 注入）。路径不暴露给 LLM，
+/// 工具自行派生 cookie / tasks / downloads 子路径（沿用 v1 约定）。
+pub fn workspace_dir() -> Result<PathBuf> {
+    std::env::var_os("ZERO_WORKSPACE")
+        .map(PathBuf::from)
+        .context("未显式传路径且 ZERO_WORKSPACE 未设置")
+}
+
+/// cookie 文件：显式路径优先，否则 `$ZERO_WORKSPACE/douyin/cookies.json`。
+pub fn resolve_cookie_file(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("douyin").join("cookies.json")),
+    }
+}
+
+/// 任务目录：显式优先，否则 `$ZERO_WORKSPACE/douyin/tasks`。
+pub fn resolve_task_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("douyin").join("tasks")),
+    }
+}
+
+/// 下载输出目录：显式优先，否则 `$ZERO_WORKSPACE/downloads/douyin`。
+pub fn resolve_out_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("downloads").join("douyin")),
+    }
 }
 
 /// 读 cookie 文件。支持 v1 结构 `{updated_at, value:{...}}` 或裸 `{...}`。

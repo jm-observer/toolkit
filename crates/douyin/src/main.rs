@@ -20,13 +20,14 @@ struct Args {
 enum Command {
     /// cookie 自检：字段完整性 + 登录态实测。
     CookieStatus {
+        /// cookie 文件路径（缺省取 $ZERO_WORKSPACE/douyin/cookies.json）。
         #[arg(long)]
-        cookie_file: PathBuf,
+        cookie_file: Option<PathBuf>,
     },
     /// 写入 cookies.json（接受浏览器 Cookie 头串或 JSON 对象）。
     SetCookie {
         #[arg(long)]
-        cookie_file: PathBuf,
+        cookie_file: Option<PathBuf>,
         /// cookie 原文：`k=v; k=v` 或 `{"k":"v"}`。
         #[arg(long)]
         raw: String,
@@ -34,7 +35,7 @@ enum Command {
     /// 按昵称/抖音号搜博主（v2 已知被风控，多返回 anti_bot 引导用主页 URL）。
     SearchUser {
         #[arg(long)]
-        cookie_file: PathBuf,
+        cookie_file: Option<PathBuf>,
         #[arg(long)]
         keyword: String,
         #[arg(long, default_value_t = 15)]
@@ -43,14 +44,14 @@ enum Command {
     /// URL / 短链 / sec_uid → 博主资料（含 aweme_count）。
     ResolveUser {
         #[arg(long)]
-        cookie_file: PathBuf,
+        cookie_file: Option<PathBuf>,
         #[arg(long)]
         input: String,
     },
     /// 列博主作品元数据（含 throttled / pages_fetched 信号）。
     ListWorks {
         #[arg(long)]
-        cookie_file: PathBuf,
+        cookie_file: Option<PathBuf>,
         #[arg(long)]
         input: String,
         #[arg(long, default_value_t = 60)]
@@ -59,11 +60,11 @@ enum Command {
     /// 异步入队下载，立即返回 task_id。
     DownloadSubmit {
         #[arg(long)]
-        cookie_file: PathBuf,
+        cookie_file: Option<PathBuf>,
         #[arg(long)]
-        task_dir: PathBuf,
+        task_dir: Option<PathBuf>,
         #[arg(long)]
-        out_dir: PathBuf,
+        out_dir: Option<PathBuf>,
         /// 逗号分隔的 aweme_id。
         #[arg(long, value_delimiter = ',')]
         ids: Vec<String>,
@@ -71,7 +72,7 @@ enum Command {
     /// 查下载任务进度。
     DownloadStatus {
         #[arg(long)]
-        task_dir: PathBuf,
+        task_dir: Option<PathBuf>,
         #[arg(long)]
         task_id: String,
     },
@@ -117,31 +118,51 @@ async fn main() -> Result<()> {
     }
 
     let value = match args.command {
-        Command::CookieStatus { cookie_file } => douyin::run_cookie_status(&cookie_file).await?,
+        Command::CookieStatus { cookie_file } => {
+            douyin::run_cookie_status(&douyin::resolve_cookie_file(cookie_file)?).await?
+        }
         Command::SetCookie { cookie_file, raw } => {
-            douyin::run_set_cookie(&cookie_file, &raw).await?
+            douyin::run_set_cookie(&douyin::resolve_cookie_file(cookie_file)?, &raw).await?
         }
         Command::SearchUser {
             cookie_file,
             keyword,
             count,
-        } => douyin::run_search_user(&cookie_file, &keyword, count).await?,
+        } => {
+            douyin::run_search_user(&douyin::resolve_cookie_file(cookie_file)?, &keyword, count)
+                .await?
+        }
         Command::ResolveUser { cookie_file, input } => {
-            douyin::run_resolve_user(&cookie_file, &input).await?
+            douyin::run_resolve_user(&douyin::resolve_cookie_file(cookie_file)?, &input).await?
         }
         Command::ListWorks {
             cookie_file,
             input,
             max_pages,
-        } => douyin::run_list_works(&cookie_file, &input, max_pages).await?,
+        } => {
+            douyin::run_list_works(
+                &douyin::resolve_cookie_file(cookie_file)?,
+                &input,
+                max_pages,
+            )
+            .await?
+        }
         Command::DownloadSubmit {
             cookie_file,
             task_dir,
             out_dir,
             ids,
-        } => douyin::run_download_submit(&cookie_file, &task_dir, &out_dir, ids).await?,
+        } => {
+            douyin::run_download_submit(
+                &douyin::resolve_cookie_file(cookie_file)?,
+                &douyin::resolve_task_dir(task_dir)?,
+                &douyin::resolve_out_dir(out_dir)?,
+                ids,
+            )
+            .await?
+        }
         Command::DownloadStatus { task_dir, task_id } => {
-            douyin::run_download_status(&task_dir, &task_id).await?
+            douyin::run_download_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
         }
         Command::DownloadWorker { .. } | Command::Update { .. } => {
             unreachable!("已在上面处理")
