@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod download;
+pub mod list_works_task;
 pub mod sign;
 
 use anyhow::{Context, Result};
@@ -195,7 +196,7 @@ pub async fn run_search_user(cookie_file: &Path, keyword: &str, count: i64) -> R
     }
 }
 
-async fn resolve_to_sec_uid(
+pub(crate) async fn resolve_to_sec_uid(
     client: &DouyinClient,
     input: &str,
 ) -> Result<Option<String>, ApiError> {
@@ -313,6 +314,34 @@ pub async fn run_download_submit(
 /// `download_status`：查任务进度。
 pub async fn run_download_status(task_dir: &Path, task_id: &str) -> Result<Value> {
     match download::read_status(task_dir, task_id)? {
+        Some(st) => Ok(serde_json::to_value(st)?),
+        None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
+    }
+}
+
+/// `list_works_submit`：异步入队列博主作品，立即返回 task_id（不阻塞）。
+/// 之后调用方应等 5s 再首次 `list_works_status` 轮询。
+pub async fn run_list_works_submit(
+    cookie_file: &Path,
+    task_dir: &Path,
+    input: &str,
+    max_pages: usize,
+) -> Result<Value> {
+    if input.trim().is_empty() {
+        return Ok(json!({ "error": "input 为空", "error_kind": "invalid_input" }));
+    }
+    let st = list_works_task::submit(task_dir, cookie_file, input.to_string(), max_pages)?;
+    Ok(json!({
+        "task_id": st.task_id,
+        "state": st.state,
+        "max_pages": st.max_pages,
+    }))
+}
+
+/// `list_works_status`：查列博主作品任务进度。
+/// 终态 succeeded/partial 的 status 含完整 `works[]` + `aweme_count` + `throttled`。
+pub async fn run_list_works_status(task_dir: &Path, task_id: &str) -> Result<Value> {
+    match list_works_task::read_status(task_dir, task_id)? {
         Some(st) => Ok(serde_json::to_value(st)?),
         None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
     }

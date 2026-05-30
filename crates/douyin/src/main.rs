@@ -84,6 +84,32 @@ enum Command {
         #[arg(long)]
         task_id: String,
     },
+    /// 异步入队列博主作品，立即返回 task_id。
+    ListWorksSubmit {
+        #[arg(long)]
+        cookie_file: Option<PathBuf>,
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        input: String,
+        #[arg(long, default_value_t = 60)]
+        max_pages: usize,
+    },
+    /// 查列博主作品任务进度。
+    ListWorksStatus {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 内部：后台 list-works worker（由 list-works-submit spawn，勿手动调）。
+    #[command(hide = true)]
+    ListWorksWorker {
+        #[arg(long)]
+        task_dir: PathBuf,
+        #[arg(long)]
+        task_id: String,
+    },
     /// 从 GitHub Release 自更新当前可执行文件。
     Update {
         #[arg(short, long, help = "即使版本未升级也强制更新")]
@@ -102,6 +128,10 @@ async fn main() -> Result<()> {
     match &args.command {
         Command::DownloadWorker { task_dir, task_id } => {
             douyin::download::run_worker(task_dir, task_id).await?;
+            return Ok(());
+        }
+        Command::ListWorksWorker { task_dir, task_id } => {
+            douyin::list_works_task::run_worker(task_dir, task_id).await?;
             return Ok(());
         }
         Command::Update { force } => {
@@ -164,7 +194,26 @@ async fn main() -> Result<()> {
         Command::DownloadStatus { task_dir, task_id } => {
             douyin::run_download_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
         }
-        Command::DownloadWorker { .. } | Command::Update { .. } => {
+        Command::ListWorksSubmit {
+            cookie_file,
+            task_dir,
+            input,
+            max_pages,
+        } => {
+            douyin::run_list_works_submit(
+                &douyin::resolve_cookie_file(cookie_file)?,
+                &douyin::resolve_task_dir(task_dir)?,
+                &input,
+                max_pages,
+            )
+            .await?
+        }
+        Command::ListWorksStatus { task_dir, task_id } => {
+            douyin::run_list_works_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
+        }
+        Command::DownloadWorker { .. }
+        | Command::ListWorksWorker { .. }
+        | Command::Update { .. } => {
             unreachable!("已在上面处理")
         }
     };
