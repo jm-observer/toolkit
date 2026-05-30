@@ -23,12 +23,16 @@ fn api_error_json(e: &ApiError) -> Value {
     json!({ "error": e.message, "error_kind": e.kind })
 }
 
-/// zero 工作区根：来自 `ZERO_WORKSPACE` 环境变量（systemd 注入）。路径不暴露给 LLM，
-/// 工具自行派生 cookie / tasks / downloads 子路径（沿用 v1 约定）。
+/// zero 工作区根：优先 `ZERO_WORKSPACE` 环境变量；未设置时回退到 `$HOME/.config/zero`
+/// （v1 既定布局——zero 服务未注入 ZERO_WORKSPACE，沿用此 fallback）。路径不暴露给 LLM。
 pub fn workspace_dir() -> Result<PathBuf> {
-    std::env::var_os("ZERO_WORKSPACE")
-        .map(PathBuf::from)
-        .context("未显式传路径且 ZERO_WORKSPACE 未设置")
+    if let Some(ws) = std::env::var_os("ZERO_WORKSPACE") {
+        return Ok(PathBuf::from(ws));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("ZERO_WORKSPACE 与 HOME/USERPROFILE 均未设置，无法定位工作区")?;
+    Ok(PathBuf::from(home).join(".config").join("zero"))
 }
 
 /// cookie 文件：显式路径优先，否则 `$ZERO_WORKSPACE/douyin/cookies.json`。
