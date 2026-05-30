@@ -15,10 +15,10 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact_name: github-commit-info_x86_64-pc-windows-msvc.exe
+            ext: ".exe"
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact_name: github-commit-info_aarch64-unknown-linux-gnu
+            ext: ""
 
     runs-on: ${{ matrix.os }}
 
@@ -37,8 +37,14 @@ jobs:
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
+      # 本仓是 virtual workspace，必须逐 crate 指定 -p 才能带各自的 prod feature
+      # （workspace 根直接 `--features prod` 会报错）。prod feature 让 custom-utils
+      # 日志写文件而非 stdout，保持各工具的 stdout JSON 契约干净。
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --features prod
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p github_commit_info --features prod
+          cargo build --release --target ${{ matrix.target }} -p hf_watcher --features prod
         env:
           # `cc` crate vars so aws-lc-sys (pulled via reqwest 0.13's rustls
           # feature) builds its C sources with the aarch64 cross-toolchain
@@ -47,21 +53,23 @@ jobs:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
 
-      - name: Prepare artifact
+      # 资产命名 <bin>_<target>[.exe]，与 custom_utils::updater 的
+      # `name.contains(bin) && name.contains(target)` 匹配规则对齐。
+      - name: Prepare artifacts
         shell: bash
         run: |
           mkdir -p dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/${{ matrix.target }}/release/github-commit-info.exe dist/${{ matrix.artifact_name }}
-          else
-            cp target/${{ matrix.target }}/release/github-commit-info dist/${{ matrix.artifact_name }}
-          fi
+          for bin in github-commit-info hf-watcher; do
+            cp "target/${{ matrix.target }}/release/${bin}${{ matrix.ext }}" \
+               "dist/${bin}_${{ matrix.target }}${{ matrix.ext }}"
+          done
+          ls -la dist
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.artifact_name }}
+          name: dist-${{ matrix.target }}
+          path: dist/*
 
   release:
     needs: build

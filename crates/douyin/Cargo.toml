@@ -1,0 +1,24 @@
+[package]
+name = "douyin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["time", "fs"] }
+log = { workspace = true }
+clap = { workspace = true }
+custom-utils = { workspace = true }
+anyhow = { workspace = true }
+sm3 = { workspace = true }
+
+[[bin]]
+name = "douyin"
+path = "src/main.rs"
+
+[features]
+default = []
+prod = ["custom-utils/prod"]

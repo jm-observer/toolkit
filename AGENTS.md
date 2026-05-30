@@ -7,7 +7,40 @@
 - 单次变更保持小而聚焦，不将重构混入功能修改
 
 ## 项目概述
-Rust 异步应用程序。<!-- 补充具体业务功能描述 -->
+
+zero 的 **Rust 工具集合 workspace**。每个工具是一个独立 crate，编译出一个 CLI 二进制，
+由 zero 经 `.zero/tools.d/*.toml` 以子命令形式调用。当前成员：
+
+- `crates/github-commit-info`：GitHub 仓库指定时间窗 commit 抓取。
+- `crates/hf-watcher`：HuggingFace 按类型 trending 监听（`trending` / `model-card` 两子命令）。
+
+新增工具一律新建 `crates/<tool>`，并遵守下方「工具实现规约」。
+
+## 工具实现规约（所有工具必须遵守）
+
+参照 `github-commit-info` / `hf-watcher` 的既定形态，集成 `custom-utils`：
+
+1. **依赖 custom-utils**：统一在根 `[workspace.dependencies]` 声明，工具 crate 以
+   `custom-utils = { workspace = true }` 引入。它提供日志、自更新（updater），以及按需的
+   Linux 能力（常驻服务可启用 `daemon-async` / `daemon-sync` 接 systemd）。
+2. **日志走 custom-utils**：`main` 入口用
+   `custom_utils::logger::logger_feature("<bin>", "<spec>", Info, false).build()` 初始化；
+   业务代码一律用 `log::info!/debug!/warn!` 宏，**禁止** `println!` 输出日志。
+3. **prod feature 必备**：每个工具 crate 暴露 `prod = ["custom-utils/prod"]`。
+   **dev 构建**日志输出到控制台（会占用 stdout，仅供本地调试）；
+   **prod 构建**日志写入 `{home}/log/{app}` 文件，**stdout 保持干净**。
+   因此部署/发布构建必须带 `--features prod`。
+4. **stdout 输出契约**：正常路径仅 `println!` 一行**紧凑 JSON**；业务失败（网络 / 404 /
+   解析等可恢复错误）输出 `{error, error_kind}` 且**退出码 0**；仅进程级异常退出码非 0。
+   日志绝不写 stdout（见第 2、3 条）。
+5. **自更新子命令**：提供 `update`（`custom_utils::updater::UpdateConfig`），指向承载本 workspace
+   的 GitHub 仓库；`bin_name` 用各自二进制名。
+6. **部署**：开发在 Windows、目标设备是 G10（aarch64 Linux）。用 `deploy-g10.ps1` 在交叉编译
+   镜像 `huangjiemin/rust_aarch64-gcc_openssl` 的 Docker 容器内逐 crate
+   `cargo build --release --target aarch64-unknown-linux-gnu -p <crate> --features prod`，
+   再 scp 到 G10 的 `~/.local/bin/`（与 updater 自更新目标一致）。新增工具时在脚本的 `$Bins`
+   列表追加 `(crate, bin)` 一行即可。CI（`.github/workflows/release.yml`）走相同的 per-crate
+   prod 构建，推 `v*` tag 产出 `<bin>_<target>[.exe]` 资产供 `update` 子命令自更新。
 
 ## 技术栈
 
