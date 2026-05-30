@@ -1,6 +1,7 @@
 //! 每类型一份的 trending 快照：读 / 写 / 与本次结果对比。
 //!
-//! 快照落在 `<workspace>/hf-watcher/snapshot-<sanitized-tag>.json`。
+//! 快照落在 `<snapshot_dir>/snapshot-<sanitized-tag>.json`。`snapshot_dir` 由
+//! 调用方（zero agent）传入，工具不做默认值/回退。
 //! 对比产出 newcomers（新进榜）与 updated（在榜且 lastModified 变新）。
 
 use crate::api::TrendingEntry;
@@ -50,10 +51,8 @@ fn sanitize_tag(tag: &str) -> String {
         .collect()
 }
 
-pub fn snapshot_path(workspace: &Path, pipeline_tag: &str) -> PathBuf {
-    workspace
-        .join("hf-watcher")
-        .join(format!("snapshot-{}.json", sanitize_tag(pipeline_tag)))
+pub fn snapshot_path(snapshot_dir: &Path, pipeline_tag: &str) -> PathBuf {
+    snapshot_dir.join(format!("snapshot-{}.json", sanitize_tag(pipeline_tag)))
 }
 
 pub fn load(path: &Path) -> Result<Option<Snapshot>> {

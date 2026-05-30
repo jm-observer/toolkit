@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use custom_utils::updater::UpdateConfig;
 use hf_watcher::{run_model_card, run_trending};
 use log::LevelFilter::Info;
+use std::path::PathBuf;
 
 // 自更新指向承载本工具集的同一 GitHub 仓库（与 github-commit-info 同仓）。
 const REPO_OWNER: &str = "jm-observer";
@@ -34,9 +35,10 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         top_n: usize,
 
-        /// workspace 目录；缺省读环境变量 ZERO_WORKSPACE，再缺省 ./.zero。
+        /// 快照目录的**绝对路径**，必填。本工具不做任何回退/默认值——目录归属由
+        /// 调用方（zero agent）按 config.toml 配置决定。
         #[arg(long)]
-        workspace: Option<String>,
+        snapshot_dir: PathBuf,
 
         /// 只对比、不回写快照（试跑用）。
         #[arg(long, default_value_t = false)]
@@ -85,9 +87,9 @@ async fn main() -> Result<()> {
         Command::Trending {
             pipeline_tag,
             top_n,
-            workspace,
+            snapshot_dir,
             no_write,
-        } => run_trending(&pipeline_tag, top_n, workspace.as_deref(), !no_write).await?,
+        } => run_trending(&pipeline_tag, top_n, &snapshot_dir, !no_write).await?,
         Command::ModelCard {
             model_id,
             max_bytes,

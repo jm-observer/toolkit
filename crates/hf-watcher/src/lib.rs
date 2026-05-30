@@ -13,20 +13,7 @@ pub mod snapshot;
 use anyhow::Result;
 use api::{ApiError, HfClient};
 use serde_json::{json, Value};
-use std::path::PathBuf;
-
-/// 解析 workspace：显式参数 > 环境变量 `ZERO_WORKSPACE` > `./.zero`。
-pub fn resolve_workspace(explicit: Option<&str>) -> PathBuf {
-    if let Some(p) = explicit.filter(|s| !s.is_empty()) {
-        return PathBuf::from(p);
-    }
-    if let Ok(env) = std::env::var("ZERO_WORKSPACE") {
-        if !env.is_empty() {
-            return PathBuf::from(env);
-        }
-    }
-    PathBuf::from("./.zero")
-}
+use std::path::Path;
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -37,10 +24,13 @@ fn api_error_json(e: &ApiError) -> Value {
 }
 
 /// `trending` 子命令：取榜 + 对比快照 + （默认）回写快照。
+///
+/// `snapshot_dir` 由调用方（zero agent）传入，工具本身**不做任何默认值 / 环境变量 /
+/// cwd 回退**——目录归属由 agent 决定。
 pub async fn run_trending(
     pipeline_tag: &str,
     top_n: usize,
-    workspace: Option<&str>,
+    snapshot_dir: &Path,
     write: bool,
 ) -> Result<Value> {
     let client = HfClient::new()?;
@@ -56,8 +46,7 @@ pub async fn run_trending(
         }
     };
 
-    let ws = resolve_workspace(workspace);
-    let path = snapshot::snapshot_path(&ws, pipeline_tag);
+    let path = snapshot::snapshot_path(snapshot_dir, pipeline_tag);
     let prev = snapshot::load(&path)?;
     let diff = snapshot::diff(prev.as_ref(), &entries);
     log::info!(
@@ -172,16 +161,6 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resolve_workspace_prefers_explicit() {
-        assert_eq!(resolve_workspace(Some("/tmp/ws")), PathBuf::from("/tmp/ws"));
-    }
-
-    #[test]
-    fn resolve_workspace_default_when_empty() {
-        assert_eq!(resolve_workspace(Some("")), PathBuf::from("./.zero"));
-    }
 
     #[test]
     fn truncate_no_cut_when_short() {
