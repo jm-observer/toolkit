@@ -37,7 +37,8 @@ $Image = "huangjiemin/rust_aarch64-gcc_openssl:1.94.0_9.4.0_1.1.0l_llvm12.0.1"
 # (crate package 名, 产物二进制名) —— 新增工具时在此追加一行即可。
 $Bins = @(
     @{ Crate = "github_commit_info"; Bin = "github-commit-info" },
-    @{ Crate = "hf_watcher";         Bin = "hf-watcher" }
+    @{ Crate = "hf_watcher";         Bin = "hf-watcher" },
+    @{ Crate = "douyin";             Bin = "douyin" }
 )
 
 if (-not $SkipBuild) {

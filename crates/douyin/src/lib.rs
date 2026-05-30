@@ -229,6 +229,7 @@ pub async fn run_resolve_user(cookie_file: &Path, input: &str) -> Result<Value> 
         Ok((nickname, aweme_count, user)) => Ok(json!({
             "sec_uid": sec_uid,
             "nickname": nickname,
+            "unique_id": user.get("unique_id"),
             "aweme_count": aweme_count,
             "following_count": user.get("following_count"),
             "follower_count": user.get("follower_count"),
@@ -266,10 +267,15 @@ pub async fn run_list_works(cookie_file: &Path, input: &str, max_pages: usize) -
             let items: Vec<Value> = works
                 .iter()
                 .map(|a| {
+                    let ts = a.get("create_time").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let ym = chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|d| d.format("%Y-%m").to_string())
+                        .unwrap_or_default();
                     json!({
                         "aweme_id": a.get("aweme_id"),
                         "desc": a.get("desc"),
                         "create_time": a.get("create_time"),
+                        "create_ym": ym,
                     })
                 })
                 .collect();
