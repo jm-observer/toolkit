@@ -94,6 +94,11 @@ enum Command {
         input: String,
         #[arg(long, default_value_t = 60)]
         max_pages: usize,
+        /// 回调寻址 handle（从主 Agent prompt 头部 `[Delivery]` 行原样取）。
+        /// worker 跑完时携带此 handle POST gateway 触发第二轮 LLM 周期。
+        /// 缺失则 worker 跑完只落 status，不发回调（CLI 手测场景）。
+        #[arg(long)]
+        delivery_handle: Option<String>,
     },
     /// 查列博主作品任务进度。
     ListWorksStatus {
@@ -199,12 +204,14 @@ async fn main() -> Result<()> {
             task_dir,
             input,
             max_pages,
+            delivery_handle,
         } => {
             douyin::run_list_works_submit(
                 &douyin::resolve_cookie_file(cookie_file)?,
                 &douyin::resolve_task_dir(task_dir)?,
                 &input,
                 max_pages,
+                delivery_handle.as_deref(),
             )
             .await?
         }

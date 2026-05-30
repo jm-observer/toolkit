@@ -24,6 +24,10 @@ pub struct TaskStatus {
     pub task_id: String,
     pub state: String,
     pub sec_uid: Option<String>,
+    /// 博主昵称，worker resolve_user 后写入；让回调路径不必再调 resolve_user
+    /// 拿名字（避免一次 30s API 调用）。
+    #[serde(default)]
+    pub nickname: Option<String>,
     pub pages_fetched: usize,
     pub max_pages: usize,
     pub aweme_count: i64,
@@ -32,6 +36,11 @@ pub struct TaskStatus {
     pub works: Vec<Value>,
     pub error: Option<String>,
     pub updated_at: String,
+    /// 是否已经成功 POST gateway 通知 zero。`false` = 业务回调通道还没成功
+    /// （worker 未到 POST 步、或 POST 3 次都失败），`true` = 已成功通知。
+    /// alarm 兜底子 Agent 据此判定"补救下发"还是"静默退出"。
+    #[serde(default)]
+    pub notified: bool,
 }
 
 /// 任务作业描述（submit 写、worker 读）。
@@ -41,6 +50,11 @@ pub struct Job {
     pub handle: String,
     pub max_pages: usize,
     pub cookie_file: PathBuf,
+    /// delivery_handle（dh_xxx）—— worker 跑完 POST gateway 时携带，让回包能
+    /// 投递回原发起者（与 alarm 老路径同款）。`None` 时 worker 仍跑完业务，
+    /// 但不发回调（适合 CLI 手动 submit 测试场景）。
+    #[serde(default)]
+    pub delivery_handle: Option<String>,
 }
 
 fn now() -> String {
@@ -90,6 +104,7 @@ pub fn submit(
     cookie_file: &Path,
     handle: String,
     max_pages: usize,
+    delivery_handle: Option<String>,
 ) -> Result<TaskStatus> {
     std::fs::create_dir_all(task_dir)
         .with_context(|| format!("建任务目录 {}", task_dir.display()))?;
@@ -104,6 +119,7 @@ pub fn submit(
         handle: handle.clone(),
         max_pages,
         cookie_file: cookie_file.to_path_buf(),
+        delivery_handle,
     };
     atomic_write(&job_path(task_dir, &task_id), &serde_json::to_string(&job)?)?;
 
@@ -111,6 +127,7 @@ pub fn submit(
         task_id: task_id.clone(),
         state: "queued".into(),
         sec_uid: None,
+        nickname: None,
         pages_fetched: 0,
         max_pages,
         aweme_count: -1,
@@ -119,6 +136,7 @@ pub fn submit(
         works: vec![],
         error: None,
         updated_at: now(),
+        notified: false,
     };
     write_status(task_dir, &st)?;
 
@@ -193,17 +211,19 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let aweme_count = client
+    // 同时拿 nickname + aweme_count，写入 TaskStatus 让回调路径不必再 resolve_user。
+    let (nickname, aweme_count) = client
         .user_profile(&sec_uid)
         .await
-        .map(|(_, c, _)| c)
-        .unwrap_or(-1);
+        .map(|(name, c, _)| (Some(name), c))
+        .unwrap_or((None, -1));
 
     // ===== 切到 running，开始翻页 =====
     let mut st = TaskStatus {
         task_id: task_id.into(),
         state: "running".into(),
         sec_uid: Some(sec_uid.clone()),
+        nickname,
         pages_fetched: 0,
         max_pages: job.max_pages,
         aweme_count,
@@ -212,6 +232,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         works: vec![],
         error: None,
         updated_at: now(),
+        notified: false,
     };
     write_status(task_dir, &st)?;
 
@@ -302,7 +323,90 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     };
     st.updated_at = now();
     write_status(task_dir, &st)?;
+
+    // ===== 业务回调：成功通知 zero gateway，让第二轮 LLM 周期接管 =====
+    // 详见 docs/2026-05-31-callback-driven-async-tasks/。
+    // delivery_handle 缺失时（CLI 手测场景）跳过回调，只落 status。
+    if let Some(handle) = &job.delivery_handle {
+        let kind = if st.state == "failed" {
+            "douyin-list-works-failed"
+        } else {
+            "douyin-list-works-done"
+        };
+        match post_gateway_callback(handle, kind, &st.task_id).await {
+            Ok(()) => {
+                // 持久化 notified=true 让 alarm 兜底子 Agent 据此走"静默退出"。
+                st.notified = true;
+                st.updated_at = now();
+                let _ = write_status(task_dir, &st);
+                log::info!(
+                    "[list-works callback] notified=true persisted task_id={}",
+                    st.task_id
+                );
+            }
+            Err(e) => {
+                // notified 保持 false，等 alarm 10min 兜底子 Agent 走"补救下发"分支。
+                log::warn!(
+                    "[list-works callback] all retries failed task_id={} kind={}: {e}",
+                    st.task_id,
+                    kind
+                );
+            }
+        }
+    }
     Ok(())
+}
+
+/// 业务回调专用 POST。3 次重试，每次间隔 5s；全失败仅 log warn，由 alarm 兜底承接。
+/// gateway 是本机 LAN（与 alarm-server 同款 hardcode 风险，详见
+/// docs/adr/2026-05-18-reminder-callback-delivery.md）。
+const GATEWAY_CALLBACK_URL: &str = "http://127.0.0.1:9001/messages";
+
+async fn post_gateway_callback(
+    delivery_handle: &str,
+    kind: &str,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "sender_id": "system:callback",
+        "text": format!("<callback kind=\"{kind}\" task_id=\"{task_id}\"/>"),
+        "metadata": {
+            "callback": {
+                "kind": kind,
+                "payload": { "task_id": task_id }
+            },
+            "delivery_handle": delivery_handle
+        }
+    });
+    let client = reqwest::Client::new();
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        match client
+            .post(GATEWAY_CALLBACK_URL)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                log::info!(
+                    "[list-works callback] posted task_id={task_id} kind={kind} attempt={}",
+                    attempt + 1
+                );
+                return Ok(());
+            }
+            Ok(resp) => {
+                last_err = Some(anyhow::anyhow!("gateway returned HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                last_err = Some(e.into());
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown post error")))
 }
 
 /// 写一条 failed 终态，不返回错误（保证 worker 进程干净退出）。
@@ -311,6 +415,7 @@ fn write_failed(task_dir: &Path, task_id: &str, max_pages: usize, error: String)
         task_id: task_id.into(),
         state: "failed".into(),
         sec_uid: None,
+        nickname: None,
         pages_fetched: 0,
         max_pages,
         aweme_count: -1,
@@ -319,6 +424,7 @@ fn write_failed(task_dir: &Path, task_id: &str, max_pages: usize, error: String)
         works: vec![],
         error: Some(error),
         updated_at: now(),
+        notified: false,
     };
     write_status(task_dir, &st)
 }
@@ -359,6 +465,7 @@ mod tests {
             task_id: "dylwtest".into(),
             state: "running".into(),
             sec_uid: Some("MS4wTEST".into()),
+            nickname: Some("熊猫怪兽AI日记".into()),
             pages_fetched: 3,
             max_pages: 60,
             aweme_count: 81,
@@ -367,6 +474,7 @@ mod tests {
             works: vec![],
             error: None,
             updated_at: "2026-05-31T00:00:00Z".into(),
+            notified: false,
         };
         write_status(&dir, &st).unwrap();
         let read = read_status(&dir, "dylwtest").unwrap().unwrap();
@@ -374,8 +482,59 @@ mod tests {
         assert_eq!(read.state, "running");
         assert_eq!(read.pages_fetched, 3);
         assert_eq!(read.sec_uid.as_deref(), Some("MS4wTEST"));
+        assert_eq!(read.nickname.as_deref(), Some("熊猫怪兽AI日记"));
         assert_eq!(read.aweme_count, 81);
         assert_eq!(read.count, 54);
+        assert!(!read.notified);
+        cleanup(&dir);
+    }
+
+    /// Plan 2 新增：Job 携带 delivery_handle 时 submit 应原样写入 job 文件。
+    #[test]
+    fn submit_persists_delivery_handle_in_job() {
+        let dir = tempdir();
+        let cookie = dir.join("fake-cookie.json");
+        std::fs::write(&cookie, "{}").unwrap();
+        // submit 会 spawn worker——但 worker 父进程退出后子进程靠 stdin/job 文件跑，
+        // 测试只关心 job 文件落盘内容（worker 跑不跑通是集成测试范畴）。
+        let st = submit(
+            &dir,
+            &cookie,
+            "https://example.com/user/x".into(),
+            60,
+            Some("dh_test_handle".into()),
+        )
+        .unwrap();
+        let job_str = std::fs::read_to_string(job_path(&dir, &st.task_id)).unwrap();
+        let job: Job = serde_json::from_str(&job_str).unwrap();
+        assert_eq!(job.delivery_handle.as_deref(), Some("dh_test_handle"));
+        cleanup(&dir);
+    }
+
+    /// Plan 3 新增：TaskStatus 序列化/反序列化往返保留 notified=true 与 nickname。
+    #[test]
+    fn task_status_serde_with_notified_and_nickname() {
+        let dir = tempdir();
+        let st = TaskStatus {
+            task_id: "dylwfull".into(),
+            state: "succeeded".into(),
+            sec_uid: Some("MS4w".into()),
+            nickname: Some("Nick".into()),
+            pages_fetched: 5,
+            max_pages: 60,
+            aweme_count: 81,
+            count: 81,
+            throttled: false,
+            works: vec![serde_json::json!({"aweme_id": "1"})],
+            error: None,
+            updated_at: "2026-05-31T00:00:00Z".into(),
+            notified: true,
+        };
+        write_status(&dir, &st).unwrap();
+        let read = read_status(&dir, "dylwfull").unwrap().unwrap();
+        assert!(read.notified);
+        assert_eq!(read.nickname.as_deref(), Some("Nick"));
+        assert_eq!(read.works.len(), 1);
         cleanup(&dir);
     }
 
@@ -400,6 +559,7 @@ mod tests {
             task_id: "dy1780000000".into(),
             state: "succeeded".into(),
             sec_uid: None,
+            nickname: None,
             pages_fetched: 0,
             max_pages: 0,
             aweme_count: -1,
@@ -408,6 +568,7 @@ mod tests {
             works: vec![],
             error: None,
             updated_at: "2026-05-31T00:00:00Z".into(),
+            notified: false,
         };
         write_status(&dir, &st).unwrap();
         // list-works 查 dylw* 应该 None（即便 dir 里有 dy* 文件）

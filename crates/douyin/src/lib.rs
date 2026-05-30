@@ -320,17 +320,26 @@ pub async fn run_download_status(task_dir: &Path, task_id: &str) -> Result<Value
 }
 
 /// `list_works_submit`：异步入队列博主作品，立即返回 task_id（不阻塞）。
-/// 之后调用方应等 5s 再首次 `list_works_status` 轮询。
+/// `delivery_handle` 透传给 worker，worker 跑完时携带它 POST gateway 触发回调路径
+/// （[ADR docs/adr/2026-05-31-callback-driven-async-tasks.md]）；
+/// 缺失时 worker 只落 status 不发回调。
 pub async fn run_list_works_submit(
     cookie_file: &Path,
     task_dir: &Path,
     input: &str,
     max_pages: usize,
+    delivery_handle: Option<&str>,
 ) -> Result<Value> {
     if input.trim().is_empty() {
         return Ok(json!({ "error": "input 为空", "error_kind": "invalid_input" }));
     }
-    let st = list_works_task::submit(task_dir, cookie_file, input.to_string(), max_pages)?;
+    let st = list_works_task::submit(
+        task_dir,
+        cookie_file,
+        input.to_string(),
+        max_pages,
+        delivery_handle.map(str::to_string),
+    )?;
     Ok(json!({
         "task_id": st.task_id,
         "state": st.state,
