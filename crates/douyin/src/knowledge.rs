@@ -200,6 +200,13 @@ fn title_from_desc(desc: &str) -> String {
     }
 }
 
+/// `mm:ss` 格式化秒。
+fn fmt_ts(sec: f64) -> String {
+    let total = sec.max(0.0) as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_transcript_md(
     aweme_id: &str,
     unique_id: &str,
@@ -208,6 +215,7 @@ fn render_transcript_md(
     tags: &[String],
     desc: &str,
     title: &str,
+    transcript: Option<&crate::process::Transcript>,
 ) -> String {
     let tags_yaml = tags
         .iter()
@@ -219,6 +227,48 @@ fn render_transcript_md(
     } else {
         desc.trim()
     };
+
+    // ASR / 字幕回填：有 transcript 缓存则填实，否则留「（待转写）」占位。
+    let (has_transcript, has_subtitle, asr_model_yaml, asr_body, subtitle_body) = match transcript {
+        Some(t) => {
+            let asr_body = if t.text.trim().is_empty() {
+                "（转写为空）".to_string()
+            } else {
+                t.text.trim().to_string()
+            };
+            let subtitle_body = if t.has_segments && !t.segments.is_empty() {
+                t.segments
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "- [{}-{}] {}",
+                            fmt_ts(s.start),
+                            fmt_ts(s.end),
+                            s.text.trim()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                "（无字幕时间轴：转写未开启 VAD 切段）".to_string()
+            };
+            (
+                true,
+                t.has_segments,
+                format!("\"{}\"", t.asr_model.replace('"', "'")),
+                asr_body,
+                subtitle_body,
+            )
+        }
+        None => (
+            false,
+            false,
+            "null".to_string(),
+            "（待转写）".to_string(),
+            "（待转写）".to_string(),
+        ),
+    };
+
     format!(
         "---\n\
 aweme_id: \"{aweme_id}\"\n\
@@ -226,15 +276,15 @@ unique_id: \"{unique_id}\"\n\
 nickname: \"{nickname}\"\n\
 create_ym: \"{create_ym}\"\n\
 tags: [{tags_yaml}]\n\
-has_transcript: false\n\
-has_subtitle: false\n\
-asr_model: null\n\
+has_transcript: {has_transcript}\n\
+has_subtitle: {has_subtitle}\n\
+asr_model: {asr_model_yaml}\n\
 ingested_at: \"{date}\"\n\
 ---\n\n\
 # {title}\n\n\
 ## 文案\n{desc_body}\n\n\
-## 视频内容（ASR）\n（待转写）\n\n\
-## 字幕（时间轴）\n（待转写）\n",
+## 视频内容（ASR）\n{asr_body}\n\n\
+## 字幕（时间轴）\n{subtitle_body}\n",
         date = today(),
     )
 }
@@ -302,6 +352,7 @@ fn today() -> String {
 pub fn run_publish_knowledge(
     works_dir: &Path,
     knowledge_dir: &Path,
+    transcript_dir: &Path,
     unique_id: &str,
     only_ids: &[String],
 ) -> Result<Value> {
@@ -322,6 +373,8 @@ pub fn run_publish_knowledge(
 
     let nickname = cache.nickname.as_deref().unwrap_or("");
     let mut written = 0usize;
+    let mut with_transcript = 0usize;
+    let mut with_subtitle = 0usize;
     // 时间倒序排索引行（works 已按抓取顺序，create_ym 倒序更友好）。
     let mut rows: Vec<(String, String)> = Vec::new(); // (create_ym, row)
     for w in &cache.works {
@@ -338,7 +391,24 @@ pub fn run_publish_knowledge(
         let ym = w.get("create_ym").and_then(|v| v.as_str()).unwrap_or("");
         let tags = work_tags(w);
         let title = title_from_desc(desc);
-        let md = render_transcript_md(id, unique_id, nickname, ym, &tags, desc, &title);
+        // 阶段1：有 transcript 缓存则回填视频文本/字幕，否则留占位。
+        let transcript = crate::process::read_transcript(transcript_dir, id);
+        if let Some(t) = &transcript {
+            with_transcript += 1;
+            if t.has_segments {
+                with_subtitle += 1;
+            }
+        }
+        let md = render_transcript_md(
+            id,
+            unique_id,
+            nickname,
+            ym,
+            &tags,
+            desc,
+            &title,
+            transcript.as_ref(),
+        );
         std::fs::write(transcripts.join(format!("{id}.md")), md)
             .with_context(|| format!("写条目 {id}.md"))?;
         written += 1;
@@ -361,8 +431,8 @@ pub fn run_publish_knowledge(
     Ok(json!({
         "unique_id": unique_id,
         "written": written,
-        "with_transcript": 0,
-        "with_subtitle": 0,
+        "with_transcript": with_transcript,
+        "with_subtitle": with_subtitle,
         "path": root.to_string_lossy(),
     }))
 }
@@ -480,9 +550,11 @@ mod tests {
     fn publish_writes_all_items_mechanically() {
         let works = tempdir();
         let kb = tempdir();
+        let tr = tempdir();
         write_cache(&works, "82933463317", &sample_cache()).unwrap();
-        let v = run_publish_knowledge(&works, &kb, "82933463317", &[]).unwrap();
+        let v = run_publish_knowledge(&works, &kb, &tr, "82933463317", &[]).unwrap();
         assert_eq!(v["written"], 3);
+        assert_eq!(v["with_transcript"], 0);
         let root = kb.join("82933463317");
         assert!(root.join("profile.md").exists());
         assert!(root.join("index.md").exists());
@@ -494,15 +566,17 @@ mod tests {
         assert!(md.contains("## 字幕（时间轴）"));
         std::fs::remove_dir_all(&works).ok();
         std::fs::remove_dir_all(&kb).ok();
+        std::fs::remove_dir_all(&tr).ok();
     }
 
     #[test]
     fn publish_only_ids_subset() {
         let works = tempdir();
         let kb = tempdir();
+        let tr = tempdir();
         write_cache(&works, "82933463317", &sample_cache()).unwrap();
-        let v =
-            run_publish_knowledge(&works, &kb, "82933463317", &["7a".into(), "7c".into()]).unwrap();
+        let v = run_publish_knowledge(&works, &kb, &tr, "82933463317", &["7a".into(), "7c".into()])
+            .unwrap();
         assert_eq!(v["written"], 2);
         let root = kb.join("82933463317");
         assert!(root.join("transcripts/7a.md").exists());
@@ -510,5 +584,41 @@ mod tests {
         assert!(root.join("transcripts/7c.md").exists());
         std::fs::remove_dir_all(&works).ok();
         std::fs::remove_dir_all(&kb).ok();
+        std::fs::remove_dir_all(&tr).ok();
+    }
+
+    #[test]
+    fn publish_backfills_transcript_and_subtitle() {
+        let works = tempdir();
+        let kb = tempdir();
+        let tr = tempdir();
+        write_cache(&works, "82933463317", &sample_cache()).unwrap();
+        let t = crate::process::Transcript {
+            aweme_id: "7a".into(),
+            text: "今天讲 ComfyUI 工作流".into(),
+            segments: vec![crate::process::Segment {
+                start: 0.0,
+                end: 4.2,
+                text: "今天讲 ComfyUI".into(),
+            }],
+            has_segments: true,
+            asr_model: "sense-voice".into(),
+            transcribed_at: "2026-05-31T00:00:00Z".into(),
+        };
+        std::fs::write(tr.join("7a.json"), serde_json::to_string(&t).unwrap()).unwrap();
+
+        let v = run_publish_knowledge(&works, &kb, &tr, "82933463317", &[]).unwrap();
+        assert_eq!(v["with_transcript"], 1);
+        assert_eq!(v["with_subtitle"], 1);
+        let md = std::fs::read_to_string(kb.join("82933463317/transcripts/7a.md")).unwrap();
+        assert!(md.contains("has_transcript: true"));
+        assert!(md.contains("has_subtitle: true"));
+        assert!(md.contains("今天讲 ComfyUI 工作流"));
+        assert!(md.contains("[00:00-00:04]"));
+        let md_b = std::fs::read_to_string(kb.join("82933463317/transcripts/7b.md")).unwrap();
+        assert!(md_b.contains("has_transcript: false"));
+        std::fs::remove_dir_all(&works).ok();
+        std::fs::remove_dir_all(&kb).ok();
+        std::fs::remove_dir_all(&tr).ok();
     }
 }

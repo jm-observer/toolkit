@@ -183,12 +183,18 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn download_one(
+/// 下载单个作品的无水印 mp4 到 `out_dir/<aweme_id>.mp4`，返回落盘绝对路径字符串。
+/// 已下载则跳过（幂等，供 process worker 复用）。
+pub(crate) async fn download_one(
     client: &DouyinClient,
     http: &reqwest::Client,
     aweme_id: &str,
     out_dir: &Path,
 ) -> Result<String> {
+    let existing = out_dir.join(format!("{aweme_id}.mp4"));
+    if existing.exists() {
+        return Ok(existing.to_string_lossy().to_string());
+    }
     let (_, urls, _) = client
         .aweme_detail(aweme_id)
         .await
