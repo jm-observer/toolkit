@@ -107,6 +107,38 @@ enum Command {
         #[arg(long)]
         task_id: String,
     },
+    /// 聚合某博主已拉取作品的话题标签 + 计数（Plan 5 标签预筛）。
+    ListTags {
+        #[arg(long)]
+        works_dir: Option<PathBuf>,
+        #[arg(long)]
+        unique_id: String,
+    },
+    /// 按标签筛选已拉取作品，返回匹配 aweme_ids（Plan 5 标签预筛）。
+    FilterWorks {
+        #[arg(long)]
+        works_dir: Option<PathBuf>,
+        #[arg(long)]
+        unique_id: String,
+        /// 逗号分隔的标签名（不含 #）。
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// 匹配模式：all=同时含全部（默认），any=含任一。
+        #[arg(long, default_value = "all")]
+        r#match: String,
+    },
+    /// 把缓存里的作品逐条机械写入知识包目录（Plan 5 逐条录入）。
+    PublishKnowledge {
+        #[arg(long)]
+        works_dir: Option<PathBuf>,
+        #[arg(long)]
+        knowledge_dir: Option<PathBuf>,
+        #[arg(long)]
+        unique_id: String,
+        /// 可选：仅录入这些 aweme_id（逗号分隔），用于标签筛选后录入子集。
+        #[arg(long, value_delimiter = ',')]
+        only_ids: Vec<String>,
+    },
     /// 内部：后台 list-works worker（由 list-works-submit spawn，勿手动调）。
     #[command(hide = true)]
     ListWorksWorker {
@@ -218,6 +250,32 @@ async fn main() -> Result<()> {
         Command::ListWorksStatus { task_dir, task_id } => {
             douyin::run_list_works_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
         }
+        Command::ListTags {
+            works_dir,
+            unique_id,
+        } => douyin::run_list_tags(&douyin::resolve_works_dir(works_dir)?, &unique_id)?,
+        Command::FilterWorks {
+            works_dir,
+            unique_id,
+            tags,
+            r#match,
+        } => douyin::run_filter_works(
+            &douyin::resolve_works_dir(works_dir)?,
+            &unique_id,
+            &tags,
+            r#match != "any",
+        )?,
+        Command::PublishKnowledge {
+            works_dir,
+            knowledge_dir,
+            unique_id,
+            only_ids,
+        } => douyin::run_publish_knowledge(
+            &douyin::resolve_works_dir(works_dir)?,
+            &douyin::resolve_knowledge_dir(knowledge_dir)?,
+            &unique_id,
+            &only_ids,
+        )?,
         Command::DownloadWorker { .. }
         | Command::ListWorksWorker { .. }
         | Command::Update { .. } => {

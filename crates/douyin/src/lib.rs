@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod download;
+pub mod knowledge;
 pub mod list_works_task;
 pub mod sign;
 
@@ -58,6 +59,47 @@ pub fn resolve_out_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
         Some(p) => Ok(p),
         None => Ok(workspace_dir()?.join("downloads").join("douyin")),
     }
+}
+
+/// 作品稳定缓存目录（按 unique_id 落 `<id>.json`）：显式优先，否则 `$ZERO_WORKSPACE/douyin/works`。
+pub fn resolve_works_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("douyin").join("works")),
+    }
+}
+
+/// 知识包根目录（每博主 `<unique_id>/`）：显式优先，否则 `$ZERO_WORKSPACE/knowledge/douyin`。
+pub fn resolve_knowledge_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("knowledge").join("douyin")),
+    }
+}
+
+/// `list_tags`：聚合某博主已拉取作品的话题标签 + 计数。
+pub fn run_list_tags(works_dir: &Path, unique_id: &str) -> Result<Value> {
+    knowledge::run_list_tags(works_dir, unique_id)
+}
+
+/// `filter_works`：按标签筛选已拉取作品，返回匹配 aweme_ids。
+pub fn run_filter_works(
+    works_dir: &Path,
+    unique_id: &str,
+    tags: &[String],
+    match_all: bool,
+) -> Result<Value> {
+    knowledge::run_filter_works(works_dir, unique_id, tags, match_all)
+}
+
+/// `publish_knowledge`：把缓存里的作品逐条机械写入知识包目录。
+pub fn run_publish_knowledge(
+    works_dir: &Path,
+    knowledge_dir: &Path,
+    unique_id: &str,
+    only_ids: &[String],
+) -> Result<Value> {
+    knowledge::run_publish_knowledge(works_dir, knowledge_dir, unique_id, only_ids)
 }
 
 /// 读 cookie 文件。支持 v1 结构 `{updated_at, value:{...}}` 或裸 `{...}`。
@@ -272,12 +314,14 @@ pub async fn run_list_works(cookie_file: &Path, input: &str, max_pages: usize) -
                     let ym = chrono::DateTime::from_timestamp(ts, 0)
                         .map(|d| d.format("%Y-%m").to_string())
                         .unwrap_or_default();
-                    json!({
+                    let mut item = json!({
                         "aweme_id": a.get("aweme_id"),
                         "desc": a.get("desc"),
                         "create_time": a.get("create_time"),
                         "create_ym": ym,
-                    })
+                    });
+                    knowledge::enrich_with_tags(&mut item);
+                    item
                 })
                 .collect();
             Ok(json!({

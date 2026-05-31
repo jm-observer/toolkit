@@ -28,6 +28,10 @@ pub struct TaskStatus {
     /// 拿名字（避免一次 30s API 调用）。
     #[serde(default)]
     pub nickname: Option<String>,
+    /// 抖音号（unique_id），worker user_profile 后写入。知识包目录键用它
+    /// （Plan 5：`knowledge/douyin/<unique_id>/`）。
+    #[serde(default)]
+    pub unique_id: Option<String>,
     pub pages_fetched: usize,
     pub max_pages: usize,
     pub aweme_count: i64,
@@ -128,6 +132,7 @@ pub fn submit(
         state: "queued".into(),
         sec_uid: None,
         nickname: None,
+        unique_id: None,
         pages_fetched: 0,
         max_pages,
         aweme_count: -1,
@@ -211,12 +216,20 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             return Ok(());
         }
     };
-    // 同时拿 nickname + aweme_count，写入 TaskStatus 让回调路径不必再 resolve_user。
-    let (nickname, aweme_count) = client
+    // 同时拿 nickname + aweme_count + unique_id，写入 TaskStatus 让回调路径不必再 resolve_user，
+    // 并作为知识包目录键（Plan 5）。
+    let (nickname, aweme_count, unique_id) = client
         .user_profile(&sec_uid)
         .await
-        .map(|(name, c, _)| (Some(name), c))
-        .unwrap_or((None, -1));
+        .map(|(name, c, user)| {
+            let uid = user
+                .get("unique_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            (Some(name), c, uid)
+        })
+        .unwrap_or((None, -1, None));
 
     // ===== 切到 running，开始翻页 =====
     let mut st = TaskStatus {
@@ -224,6 +237,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         state: "running".into(),
         sec_uid: Some(sec_uid.clone()),
         nickname,
+        unique_id,
         pages_fetched: 0,
         max_pages: job.max_pages,
         aweme_count,
@@ -301,12 +315,14 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             let ym = chrono::DateTime::from_timestamp(ts, 0)
                 .map(|d| d.format("%Y-%m").to_string())
                 .unwrap_or_default();
-            serde_json::json!({
+            let mut item = serde_json::json!({
                 "aweme_id": a.get("aweme_id"),
                 "desc": a.get("desc"),
                 "create_time": a.get("create_time"),
                 "create_ym": ym,
-            })
+            });
+            crate::knowledge::enrich_with_tags(&mut item);
+            item
         })
         .collect();
 
@@ -323,6 +339,35 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     };
     st.updated_at = now();
     write_status(task_dir, &st)?;
+
+    // ===== Plan 5：终态落「按 unique_id 的稳定缓存」，供 list_tags / filter_works /
+    // publish_knowledge 使用。缓存目录与 tasks 同级（task_dir 的兄弟 works/）。
+    // unique_id 缺失时退化用 sec_uid 命名，保证调用方两种 id 都能命中。
+    if st.state == "succeeded" || st.state == "partial" {
+        let works_dir = task_dir
+            .parent()
+            .map(|p| p.join("works"))
+            .unwrap_or_else(|| task_dir.join("works"));
+        let cache_id = st.unique_id.clone().unwrap_or_else(|| sec_uid.clone());
+        let cache = crate::knowledge::WorksCache {
+            sec_uid: sec_uid.clone(),
+            unique_id: st.unique_id.clone(),
+            nickname: st.nickname.clone(),
+            aweme_count: st.aweme_count,
+            count: st.count,
+            throttled: st.throttled,
+            cached_at: now(),
+            works: st.works.clone(),
+        };
+        if let Err(e) = crate::knowledge::write_cache(&works_dir, &cache_id, &cache) {
+            log::warn!("[list-works] 写作品缓存失败 id={cache_id}: {e}");
+        } else {
+            log::info!(
+                "[list-works] 作品缓存已落盘 id={cache_id} count={}",
+                st.count
+            );
+        }
+    }
 
     // ===== 业务回调：成功通知 zero gateway，让第二轮 LLM 周期接管 =====
     // 详见 docs/2026-05-31-callback-driven-async-tasks/。
@@ -416,6 +461,7 @@ fn write_failed(task_dir: &Path, task_id: &str, max_pages: usize, error: String)
         state: "failed".into(),
         sec_uid: None,
         nickname: None,
+        unique_id: None,
         pages_fetched: 0,
         max_pages,
         aweme_count: -1,
@@ -466,6 +512,7 @@ mod tests {
             state: "running".into(),
             sec_uid: Some("MS4wTEST".into()),
             nickname: Some("熊猫怪兽AI日记".into()),
+            unique_id: Some("82933463317".into()),
             pages_fetched: 3,
             max_pages: 60,
             aweme_count: 81,
@@ -520,6 +567,7 @@ mod tests {
             state: "succeeded".into(),
             sec_uid: Some("MS4w".into()),
             nickname: Some("Nick".into()),
+            unique_id: Some("nick123".into()),
             pages_fetched: 5,
             max_pages: 60,
             aweme_count: 81,
@@ -560,6 +608,7 @@ mod tests {
             state: "succeeded".into(),
             sec_uid: None,
             nickname: None,
+            unique_id: None,
             pages_fetched: 0,
             max_pages: 0,
             aweme_count: -1,
