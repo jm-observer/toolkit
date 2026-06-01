@@ -59,6 +59,10 @@ pub struct Job {
     /// 但不发回调（适合 CLI 手动 submit 测试场景）。
     #[serde(default)]
     pub delivery_handle: Option<String>,
+    /// E2E 测试用 zero session_id。worker POST callback 时回填到 payload，
+    /// sps correlate 可据此关联 sub-agent LLM 调用。生产场景传 None 不影响功能。
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 fn now() -> String {
@@ -109,6 +113,7 @@ pub fn submit(
     handle: String,
     max_pages: usize,
     delivery_handle: Option<String>,
+    session_id: Option<String>,
 ) -> Result<TaskStatus> {
     std::fs::create_dir_all(task_dir)
         .with_context(|| format!("建任务目录 {}", task_dir.display()))?;
@@ -124,6 +129,7 @@ pub fn submit(
         max_pages,
         cookie_file: cookie_file.to_path_buf(),
         delivery_handle,
+        session_id,
     };
     atomic_write(&job_path(task_dir, &task_id), &serde_json::to_string(&job)?)?;
 
@@ -378,7 +384,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         } else {
             "douyin-list-works-done"
         };
-        match post_gateway_callback(handle, kind, &st.task_id).await {
+        match post_gateway_callback(handle, kind, &st.task_id, job.session_id.as_deref()).await {
             Ok(()) => {
                 // 持久化 notified=true 让 alarm 兜底子 Agent 据此走"静默退出"。
                 st.notified = true;
@@ -411,6 +417,7 @@ async fn post_gateway_callback(
     delivery_handle: &str,
     kind: &str,
     task_id: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let body = serde_json::json!({
         "sender_id": "system:callback",
@@ -418,7 +425,10 @@ async fn post_gateway_callback(
         "metadata": {
             "callback": {
                 "kind": kind,
-                "payload": { "task_id": task_id }
+                "payload": {
+                    "task_id": task_id,
+                    "session_id": session_id
+                }
             },
             "delivery_handle": delivery_handle
         }
@@ -550,6 +560,7 @@ mod tests {
             "https://example.com/user/x".into(),
             60,
             Some("dh_test_handle".into()),
+            None,
         )
         .unwrap();
         let job_str = std::fs::read_to_string(job_path(&dir, &st.task_id)).unwrap();
@@ -583,6 +594,27 @@ mod tests {
         assert!(read.notified);
         assert_eq!(read.nickname.as_deref(), Some("Nick"));
         assert_eq!(read.works.len(), 1);
+        cleanup(&dir);
+    }
+
+    /// Plan 2 新增：session_id 字段原样落盘 job 文件。
+    #[test]
+    fn submit_persists_session_id_in_job() {
+        let dir = tempdir();
+        let cookie = dir.join("fake-cookie.json");
+        std::fs::write(&cookie, "{}").unwrap();
+        let st = submit(
+            &dir,
+            &cookie,
+            "https://example.com/user/x".into(),
+            60,
+            Some("dh_test".into()),
+            Some("test-uuid-abcd".into()),
+        )
+        .unwrap();
+        let job_str = std::fs::read_to_string(job_path(&dir, &st.task_id)).unwrap();
+        let job: Job = serde_json::from_str(&job_str).unwrap();
+        assert_eq!(job.session_id.as_deref(), Some("test-uuid-abcd"));
         cleanup(&dir);
     }
 

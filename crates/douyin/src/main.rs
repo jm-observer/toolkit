@@ -99,6 +99,11 @@ enum Command {
         /// 缺失则 worker 跑完只落 status，不发回调（CLI 手测场景）。
         #[arg(long)]
         delivery_handle: Option<String>,
+        /// E2E 测试用 zero session_id（从主 Agent prompt 头部 `[Session]` 行原样取）。
+        /// worker POST callback 时回填到 payload，sps correlate 据此关联 sub-agent 调用。
+        /// 生产环境可不传，不传不影响功能。
+        #[arg(long)]
+        session_id: Option<String>,
     },
     /// 查列博主作品任务进度。
     ListWorksStatus {
@@ -287,6 +292,7 @@ async fn main() -> Result<()> {
             input,
             max_pages,
             delivery_handle,
+            session_id,
         } => {
             douyin::run_list_works_submit(
                 &douyin::resolve_cookie_file(cookie_file)?,
@@ -294,6 +300,7 @@ async fn main() -> Result<()> {
                 &input,
                 max_pages,
                 delivery_handle.as_deref(),
+                session_id.as_deref(),
             )
             .await?
         }

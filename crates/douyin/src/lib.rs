@@ -431,6 +431,7 @@ pub async fn run_list_works_submit(
     input: &str,
     max_pages: usize,
     delivery_handle: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<Value> {
     if input.trim().is_empty() {
         return Ok(json!({ "error": "input 为空", "error_kind": "invalid_input" }));
@@ -441,6 +442,7 @@ pub async fn run_list_works_submit(
         input.to_string(),
         max_pages,
         delivery_handle.map(str::to_string),
+        session_id.map(str::to_string),
     )?;
     Ok(json!({
         "task_id": st.task_id,
