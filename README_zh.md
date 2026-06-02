@@ -4,7 +4,7 @@ zero 的 Rust 工具集合 workspace。当前包含：
 
 - `github-commit-info`：获取 GitHub 仓库指定时间范围内的 commit 信息。
 - `hf-watcher`：HuggingFace trending / model-card 监听。
-- `douyin`：面向 Agent 的抖音 Cookie、自检、作品列表与异步下载工具。初步设计见 [docs/douyin-design.md](./docs/douyin-design.md)。
+- `douyin`：面向 Agent 的抖音工具集，含立即返回工具、长任务（submit/status/retry/cancel/reap）、持久 callback 队列、daemon + HTTP API、G10 systemd 部署。设计原理见 [docs/douyin-design.md](./docs/douyin-design.md)，CLI / HTTP API 参考见 [docs/douyin-cli.md](./docs/douyin-cli.md)。
 
 [English](./README.md) | [中文](./README_zh.md)
 
