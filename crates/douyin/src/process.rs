@@ -430,30 +430,46 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     st.updated_at = now();
     write_status(task_dir, &st)?;
 
-    // 业务回调：通知 zero gateway，第二轮 LLM 周期接管（调 publish_knowledge 回填）。
+    // 业务回调：入持久队列并当场尝试投递，通知 zero gateway 触发第二轮 LLM 周期
+    // （调 publish_knowledge 回填）。未当场送达则留 pending，由 callback-flush 补发。
     if let Some(handle) = &job.delivery_handle {
         let kind = if st.state == "failed" {
             "douyin-process-failed"
         } else {
             "douyin-process-done"
         };
-        match post_gateway_callback(
-            handle,
-            kind,
+        let mut payload = serde_json::Map::new();
+        payload.insert("task_id".into(), serde_json::json!(st.task_id));
+        if let Some(uid) = job.unique_id.as_deref().filter(|s| !s.trim().is_empty()) {
+            payload.insert("unique_id".into(), serde_json::json!(uid));
+        }
+        if let Some(sid) = job.session_id.as_deref().filter(|s| !s.trim().is_empty()) {
+            payload.insert("session_id".into(), serde_json::json!(sid));
+        }
+        match crate::callback::enqueue_and_deliver(
+            task_dir,
             &st.task_id,
-            job.unique_id.as_deref(),
-            job.session_id.as_deref(),
+            kind,
+            handle,
+            payload,
+            crate::callback::GATEWAY_CALLBACK_URL,
         )
         .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 st.notified = true;
                 st.updated_at = now();
                 let _ = write_status(task_dir, &st);
                 log::info!("[process callback] notified=true task_id={}", st.task_id);
             }
+            Ok(false) => {
+                log::warn!(
+                    "[process callback] 未当场送达，已入队待 flush task_id={}",
+                    st.task_id
+                );
+            }
             Err(e) => {
-                log::warn!("[process callback] post failed task_id={}: {e}", st.task_id);
+                log::warn!("[process callback] enqueue/deliver failed task_id={}: {e}", st.task_id);
             }
         }
     }
@@ -559,52 +575,6 @@ fn write_all_failed(task_dir: &Path, job: &Job, error: String) -> Result<()> {
         notified: false,
     };
     write_status(task_dir, &st)
-}
-
-const GATEWAY_CALLBACK_URL: &str = "http://127.0.0.1:9001/messages";
-
-async fn post_gateway_callback(
-    delivery_handle: &str,
-    kind: &str,
-    task_id: &str,
-    unique_id: Option<&str>,
-    session_id: Option<&str>,
-) -> Result<()> {
-    let mut payload = serde_json::Map::new();
-    payload.insert("task_id".to_string(), serde_json::json!(task_id));
-    if let Some(unique_id) = unique_id.filter(|s| !s.trim().is_empty()) {
-        payload.insert("unique_id".to_string(), serde_json::json!(unique_id));
-    }
-    if let Some(session_id) = session_id.filter(|s| !s.trim().is_empty()) {
-        payload.insert("session_id".to_string(), serde_json::json!(session_id));
-    }
-    let body = serde_json::json!({
-        "sender_id": "system:callback",
-        "text": format!("<callback kind=\"{kind}\" task_id=\"{task_id}\"/>"),
-        "metadata": {
-            "callback": { "kind": kind, "payload": serde_json::Value::Object(payload) },
-            "delivery_handle": delivery_handle
-        }
-    });
-    let client = reqwest::Client::new();
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..3u32 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        match client
-            .post(GATEWAY_CALLBACK_URL)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => return Ok(()),
-            Ok(resp) => last_err = Some(anyhow::anyhow!("gateway HTTP {}", resp.status())),
-            Err(e) => last_err = Some(e.into()),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown post error")))
 }
 
 #[cfg(test)]

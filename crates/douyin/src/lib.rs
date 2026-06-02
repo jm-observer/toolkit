@@ -10,6 +10,7 @@
 //! （与 hf-watcher 的 snapshot_dir 约定一致）。
 
 pub mod api;
+pub mod callback;
 pub mod download;
 pub mod knowledge;
 pub mod list_works_task;
@@ -245,6 +246,14 @@ pub fn run_list_tasks(task_dir: &Path, state: Option<&str>) -> Result<Value> {
     }
     tasks.sort_by(|a, b| b["updated_at"].as_str().cmp(&a["updated_at"].as_str()));
     Ok(json!({ "count": tasks.len(), "tasks": tasks }))
+}
+
+/// `callback_flush`：扫描并补发未送达的持久 callback（pending 且到期的重投一次）。
+/// 修掉 §4.4 欠债——worker 当场没送达的通知，由此命令（或定时调用）按退避补发。
+pub async fn run_callback_flush(task_dir: &Path) -> Result<Value> {
+    let (delivered, pending, failed) =
+        callback::flush(task_dir, callback::GATEWAY_CALLBACK_URL).await?;
+    Ok(json!({ "delivered": delivered, "pending": pending, "failed": failed }))
 }
 
 /// 读 cookie 文件。支持 v1 结构 `{updated_at, value:{...}}` 或裸 `{...}`。

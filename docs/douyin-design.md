@@ -143,6 +143,7 @@ running -> cancelled               收到 cancel 标志（已实现）
 | retry（重启任务，幂等续传） | ✅ 三类任务全实现（`{process,download,list-works}-retry`） |
 | cancel | ✅ 三类任务全实现（`*-cancel` 写标志，worker 处理下一条前转 `cancelled`） |
 | list（按状态过滤） | ✅ 统一 `list-tasks [--state]`（serde 忽略差异字段，跨三类一视图） |
+| 持久 callback 队列 | ✅ 已实现（`callback.rs`：落盘 + 退避补发 + `callback-flush`） |
 | 进程重启后恢复 | ◐ 三类任务可经 `*-reap` 恢复；启动自动扫描需 daemon |
 
 ---
@@ -244,10 +245,16 @@ payload 动态组装：`null`/空字段不序列化（见 `process.rs:442`），
 
 `validate_delivery_handle`（`lib.rs:464`）在入队前拒绝：空串、非 `dh_` 前缀、含 `placeholder`/`demo` 的疑似占位符。意图是防止 Agent 把 prompt 模板里的占位符当真 handle 提交，导致任务跑完回调发往一个不存在的地址。
 
-### 4.4 当前重试与欠债
+### 4.4 持久 callback 队列（已实现）
 
-- **已实现**：callback POST 失败重试 3 次，间隔 5s；成功则置 `notified=true`（`process.rs:459`）。
-- **契约欠债**：重试只在 worker 进程存活期间有效。若三次都失败、或 worker 在发回调前就崩了，**这个回调就永久丢失**——任务完成了，但发起方永远不知道。这正是第 7 章"持久 callback 队列"要补的。
+原欠债：worker 内 3 次重试若全失败、或 worker 在发回调前崩溃，**回调永久丢失**——任务完成了但发起方永远不知道。已用持久队列修复（`callback.rs`）：
+
+1. **先落盘再投递**：worker 终态把回调入队为 `<task_id>.callback.json`（state=pending），再当场短重试 3 次（每次 5s）尝试送达。即使 worker 在投递前崩溃，记录已在盘上。
+2. **状态机**：`pending →（attempt 累加 + 指数退避 next_retry_at）→ … → delivered`（送达）或 `failed`（超 `MAX_ATTEMPTS=8` 放弃）。
+3. **补发**：`callback-flush` 命令（无 daemon 时由定时调用触发）扫描所有未送达记录，对到期（`next_retry_at ≤ now`）的各重投一次，更新状态。送达时同步把 `<task_id>.status.json` 的 `notified` 置 true（generic Value 更新，跨任务类型通用）。
+4. **退避**：第 n 次失败后等 `30s · 2^min(n,6)`，封顶 ~32 分钟一次。
+
+process 与 list-works 共用 `callback.rs`——body 结构、状态机、退避完全一致；payload 内容（process 带 unique_id+session_id、list-works 带 session_id）由各 worker 构造。
 
 ### 4.5 ⚠️ 待修：ADR 引用悬空
 
@@ -363,7 +370,7 @@ Cookie 属于敏感凭据：
 
 | 触发痛点 | 演进方案 |
 |---|---|
-| callback 三次失败 / worker 发回调前崩溃 → 回调永久丢失 | **持久 callback 队列**：pending→sending→delivered/failed→pending，daemon 重启后补发。记录 callback_id/event/target_url/attempt/next_retry_at/delivered_at |
+| ~~callback 三次失败 / worker 发回调前崩溃 → 回调永久丢失~~ | ✅ 已在轻量档实现（§4.4 `callback.rs`，无需 daemon）。daemon 化后可由常驻进程定时 flush 替代手动/定时调用 |
 | 跑了什么、何时、为何失败无法观测 | **event log**（append-only）：job.created/started、item.succeeded/failed、job.succeeded、callback.delivered。供 Web 时间线 / CLI events 查询 |
 | CLI、Web、Agent 包装层要复用同一套任务接口 | **daemon + HTTP API**：`Agent → CLI → daemon(127.0.0.1:8787) → worker/store`。API 草案：`POST /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs?state=`、`POST /v1/jobs/{id}/retry|cancel`、`GET /v1/events` |
 | 本地用户要可视化运维 | **Web 模块**（`douyin serve --bind 127.0.0.1:8787`）：Jobs / Job Detail / Artifacts / Credentials / Network Profiles / Callbacks。默认只听 127.0.0.1、不展示 Cookie 原文；监听 0.0.0.0 须显式 token。候选 `axum` + `tower-http` |
@@ -381,8 +388,8 @@ Cookie 属于敏感凭据：
 ✅ P0  L2 .partial + atomic rename        # 已完成：修掉"判重不可信"最大隐患
 ✅ P0  heartbeat + reap + retry (三类任务) # 已完成：process/download/list-works 全可发现、可重启
 ✅ P1  cancel + list-tasks                # 已完成：补齐长任务契约接口面
+✅ P1  持久 callback 队列                  # 已完成：落盘 + 退避补发 + callback-flush
    P1  item 账本驱动去重                   # status.results 升级为 submit 建账本、worker 消费
-   P1  持久 callback 队列                  # 修掉"任务完成但通知丢失"
    P2  event log                         # 可观测性
    P2  daemon + HTTP API                 # 多入口复用 + 超时治理
    P3  Web 模块                           # 本地运维可视化

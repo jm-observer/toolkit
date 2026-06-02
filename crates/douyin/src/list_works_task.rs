@@ -495,8 +495,9 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         }
     }
 
-    // ===== 业务回调：成功通知 zero gateway，让第二轮 LLM 周期接管 =====
-    // 详见 docs/2026-05-31-callback-driven-async-tasks/。
+    // ===== 业务回调：入持久队列并当场尝试投递，让第二轮 LLM 周期接管 =====
+    // 详见 docs/2026-05-31-callback-driven-async-tasks/。未当场送达则留 pending，
+    // 由 callback-flush 补发（修掉 §4.4 通知永久丢失）。
     // delivery_handle 缺失时（CLI 手测场景）跳过回调，只落 status。
     if let Some(handle) = &job.delivery_handle {
         let kind = if st.state == "failed" {
@@ -504,8 +505,22 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         } else {
             "douyin-list-works-done"
         };
-        match post_gateway_callback(handle, kind, &st.task_id, job.session_id.as_deref()).await {
-            Ok(()) => {
+        let mut payload = serde_json::Map::new();
+        payload.insert("task_id".into(), serde_json::json!(st.task_id));
+        if let Some(sid) = job.session_id.as_deref().filter(|s| !s.trim().is_empty()) {
+            payload.insert("session_id".into(), serde_json::json!(sid));
+        }
+        match crate::callback::enqueue_and_deliver(
+            task_dir,
+            &st.task_id,
+            kind,
+            handle,
+            payload,
+            crate::callback::GATEWAY_CALLBACK_URL,
+        )
+        .await
+        {
+            Ok(true) => {
                 // 持久化 notified=true 让 alarm 兜底子 Agent 据此走"静默退出"。
                 st.notified = true;
                 st.updated_at = now();
@@ -515,75 +530,21 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
                     st.task_id
                 );
             }
-            Err(e) => {
-                // notified 保持 false，等 alarm 10min 兜底子 Agent 走"补救下发"分支。
+            Ok(false) => {
                 log::warn!(
-                    "[list-works callback] all retries failed task_id={} kind={}: {e}",
-                    st.task_id,
-                    kind
+                    "[list-works callback] 未当场送达，已入队待 flush task_id={}",
+                    st.task_id
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "[list-works callback] enqueue/deliver failed task_id={}: {e}",
+                    st.task_id
                 );
             }
         }
     }
     Ok(())
-}
-
-/// 业务回调专用 POST。3 次重试，每次间隔 5s；全失败仅 log warn，由 alarm 兜底承接。
-/// gateway 是本机 LAN（与 alarm-server 同款 hardcode 风险，详见
-/// docs/adr/2026-05-18-reminder-callback-delivery.md）。
-const GATEWAY_CALLBACK_URL: &str = "http://127.0.0.1:9001/messages";
-
-async fn post_gateway_callback(
-    delivery_handle: &str,
-    kind: &str,
-    task_id: &str,
-    session_id: Option<&str>,
-) -> anyhow::Result<()> {
-    let mut payload = serde_json::Map::new();
-    payload.insert("task_id".to_string(), serde_json::json!(task_id));
-    if let Some(session_id) = session_id.filter(|s| !s.trim().is_empty()) {
-        payload.insert("session_id".to_string(), serde_json::json!(session_id));
-    }
-    let body = serde_json::json!({
-        "sender_id": "system:callback",
-        "text": format!("<callback kind=\"{kind}\" task_id=\"{task_id}\"/>"),
-        "metadata": {
-            "callback": {
-                "kind": kind,
-                "payload": serde_json::Value::Object(payload)
-            },
-            "delivery_handle": delivery_handle
-        }
-    });
-    let client = reqwest::Client::new();
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..3u32 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        match client
-            .post(GATEWAY_CALLBACK_URL)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                log::info!(
-                    "[list-works callback] posted task_id={task_id} kind={kind} attempt={}",
-                    attempt + 1
-                );
-                return Ok(());
-            }
-            Ok(resp) => {
-                last_err = Some(anyhow::anyhow!("gateway returned HTTP {}", resp.status()));
-            }
-            Err(e) => {
-                last_err = Some(e.into());
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown post error")))
 }
 
 /// 写一条 failed 终态，不返回错误（保证 worker 进程干净退出）。
@@ -741,22 +702,6 @@ mod tests {
         let job: Job = serde_json::from_str(&job_str).unwrap();
         assert_eq!(job.session_id.as_deref(), Some("test-uuid-abcd"));
         cleanup(&dir);
-    }
-
-    #[test]
-    fn callback_payload_omits_null_session_id() {
-        let mut payload = serde_json::Map::new();
-        payload.insert("task_id".to_string(), serde_json::json!("dylw1"));
-        let body = serde_json::json!({
-            "metadata": {
-                "callback": {
-                    "kind": "douyin-list-works-done",
-                    "payload": serde_json::Value::Object(payload)
-                }
-            }
-        });
-        assert!(body["metadata"]["callback"]["payload"]["session_id"].is_null());
-        assert!(!body.to_string().contains("session_id"));
     }
 
     fn running_status(task_id: &str, heartbeat: &str) -> TaskStatus {

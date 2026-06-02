@@ -278,6 +278,11 @@ enum Command {
         #[arg(long)]
         task_id: String,
     },
+    /// 补发未送达的持久 callback（pending 且到期的重投一次）。无 daemon 时由定时调用触发。
+    CallbackFlush {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+    },
     /// 从 GitHub Release 自更新当前可执行文件。
     Update {
         #[arg(short, long, help = "即使版本未升级也强制更新")]
@@ -465,6 +470,9 @@ async fn main() -> Result<()> {
         )?,
         Command::ProcessStatus { task_dir, task_id } => {
             douyin::run_process_status(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
+        Command::CallbackFlush { task_dir } => {
+            douyin::run_callback_flush(&douyin::resolve_task_dir(task_dir)?).await?
         }
         Command::ProcessRetry { task_dir, task_id } => {
             douyin::run_process_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
