@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>douyin tasks</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 1.5rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
+  .bar { margin-bottom: .75rem; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; padding: .25rem .6rem; cursor: pointer; }
+  select { font: inherit; padding: .2rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #8884; white-space: nowrap; }
+  th { font-weight: 600; }
+  tr.sel { background: #4a90e220; }
+  .state { font-weight: 600; }
+  .running { color: #2a7; } .queued { color: #888; }
+  .succeeded { color: #2a7; } .partial { color: #c80; }
+  .failed { color: #d44; } .cancelled { color: #a6a; }
+  .muted { color: #888; }
+  #detail { margin-top: 1rem; white-space: pre-wrap; font-family: ui-monospace, monospace;
+            font-size: 12px; background: #8881; padding: .75rem; border-radius: 6px; max-height: 40vh; overflow: auto; }
+  .row-actions button { padding: .1rem .45rem; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>douyin tasks <span id="count" class="muted"></span></h1>
+<div class="bar">
+  <label>状态
+    <select id="filter">
+      <option value="">全部</option>
+      <option value="queued">queued</option>
+      <option value="running">running</option>
+      <option value="succeeded">succeeded</option>
+      <option value="partial">partial</option>
+      <option value="failed">failed</option>
+      <option value="cancelled">cancelled</option>
+    </select>
+  </label>
+  <button onclick="refresh()">刷新</button>
+  <button onclick="post('/v1/maintenance/run')">维护一轮</button>
+  <button onclick="post('/v1/callbacks/flush')">补发 callback</button>
+  <span id="status" class="muted"></span>
+</div>
+<table>
+  <thead><tr><th>task_id</th><th>kind</th><th>state</th><th>updated_at</th><th>heartbeat_at</th><th>操作</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<div id="detail" hidden></div>
+
+<script>
+let selected = null;
+const $ = (id) => document.getElementById(id);
+
+async function refresh() {
+  const state = $('filter').value;
+  const url = '/v1/tasks' + (state ? ('?state=' + encodeURIComponent(state)) : '');
+  try {
+    const r = await fetch(url);
+    const data = await r.json();
+    render(data);
+    $('status').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('status').textContent = '加载失败: ' + e;
+  }
+}
+
+function render(data) {
+  $('count').textContent = '(' + (data.count ?? 0) + ')';
+  const rows = (data.tasks || []).map(t => {
+    const st = t.state || '';
+    const sel = t.task_id === selected ? ' class="sel"' : '';
+    return `<tr${sel}>
+      <td><a href="#" onclick="showDetail('${t.task_id}');return false">${t.task_id}</a></td>
+      <td>${t.kind || ''}</td>
+      <td class="state ${st}">${st}</td>
+      <td class="muted">${fmt(t.updated_at)}</td>
+      <td class="muted">${fmt(t.heartbeat_at)}</td>
+      <td class="row-actions">
+        <button onclick="act('${t.task_id}','retry')">retry</button>
+        <button onclick="act('${t.task_id}','cancel')">cancel</button>
+      </td>
+    </tr>`;
+  }).join('');
+  $('rows').innerHTML = rows || '<tr><td colspan="6" class="muted">（无任务）</td></tr>';
+}
+
+function fmt(s) { return s ? String(s).replace('T', ' ').replace(/\..*$/, '') : '—'; }
+
+async function act(taskId, action) {
+  await post('/v1/tasks/' + taskId + '/' + action);
+}
+
+async function post(url) {
+  $('status').textContent = 'POST ' + url + ' …';
+  try {
+    const r = await fetch(url, { method: 'POST' });
+    const data = await r.json();
+    $('status').textContent = JSON.stringify(data);
+    refresh();
+  } catch (e) {
+    $('status').textContent = '请求失败: ' + e;
+  }
+}
+
+async function showDetail(taskId) {
+  selected = taskId;
+  const r = await fetch('/v1/tasks/' + taskId);
+  const data = await r.json();
+  $('detail').hidden = false;
+  $('detail').textContent = JSON.stringify(data, null, 2);
+  refresh();
+}
+
+$('filter').onchange = refresh;
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

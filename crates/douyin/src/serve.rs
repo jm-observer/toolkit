@@ -13,6 +13,7 @@
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxPath, Query, State},
+    response::Html,
     routing::{get, post},
     Json, Router,
 };
@@ -55,6 +56,7 @@ pub async fn run(task_dir: PathBuf, bind: String, tick_secs: u64, stale_secs: i6
         stale_secs,
     };
     let app = Router::new()
+        .route("/", get(dashboard))
         .route("/healthz", get(healthz))
         .route("/v1/tasks", get(list_tasks))
         .route("/v1/tasks/{task_id}", get(get_task))
@@ -84,6 +86,11 @@ async fn shutdown_signal() {
 
 fn err_json(e: anyhow::Error) -> Value {
     json!({ "error": e.to_string(), "error_kind": "internal" })
+}
+
+/// 极简运维面板（设计 §Web 第一版：HTML + JS 轮询 /v1/tasks，无新依赖）。
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
 }
 
 async fn healthz() -> Json<Value> {

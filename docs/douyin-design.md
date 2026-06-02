@@ -374,7 +374,7 @@ Cookie 属于敏感凭据：
 | ~~callback 三次失败 / worker 发回调前崩溃 → 回调永久丢失~~ | ✅ 已在轻量档实现（§4.4 `callback.rs`，无需 daemon）。daemon 化后可由常驻进程定时 flush 替代手动/定时调用 |
 | 跑了什么、何时、为何失败无法观测 | **event log**（append-only）：job.created/started、item.succeeded/failed、job.succeeded、callback.delivered。供 Web 时间线 / CLI events 查询 |
 | CLI、Web、Agent 包装层要复用同一套任务接口 | ✅ **daemon + HTTP API（MVP 已实现，`serve.rs`）**：`douyin serve --bind 127.0.0.1:8787`，axum 路由 `GET /healthz`、`GET /v1/tasks[?state=]`、`GET /v1/tasks/{id}`、`POST /v1/tasks/{id}/retry\|cancel`、`POST /v1/callbacks/flush`、`POST /v1/maintenance/run`。启动即跑一轮维护 + 每 `--tick-secs` 定时 reap/flush，替代手动命令。**MVP 与 CLI 直接 spawn 并存**——尚未把 CLI submit 改为透传 daemon（创建类 `POST /v1/jobs` 待补），also event log（`GET /v1/events`）未做 |
-| 本地用户要可视化运维 | **Web 模块**（`douyin serve --bind 127.0.0.1:8787`）：Jobs / Job Detail / Artifacts / Credentials / Network Profiles / Callbacks。默认只听 127.0.0.1、不展示 Cookie 原文；监听 0.0.0.0 须显式 token。候选 `axum` + `tower-http` |
+| 本地用户要可视化运维 | ◐ **Web 模块 MVP 已实现**（`dashboard.html` 内嵌，axum `GET /` 返回，无需 tower-http）：任务列表轮询 + 状态过滤 + 行内 retry/cancel + 详情 + 维护/flush 按钮。默认只听 127.0.0.1。完整档（Artifacts / Credentials / Network Profiles / 事件时间线页 + 静态资源目录）待后续 |
 | 下载产物要被多方按 id 引用 / 远程访问 | **artifact-store**：产物注册为 `{artifact_id, source, local_path, sha256, content_type}`，Agent 包装层按场景给 artifact_id / local_path / HTTP URL |
 
 > daemon 未运行时，CLI 应返回明确错误而非静默降级为前台长任务（那会重新引入超时问题）：
@@ -392,9 +392,9 @@ Cookie 属于敏感凭据：
 ✅ P1  持久 callback 队列                  # 已完成：落盘 + 退避补发 + callback-flush
 ✅ P1  item 账本驱动去重 (process)         # 已完成：submit 建账本、worker 消费、retry 精确续传
 ✅ P2  daemon + HTTP API (MVP)            # 已完成：serve.rs，axum + 启动/定时自动 reap/flush
+✅ P3  Web 模块 (MVP)                      # 已完成：内嵌 dashboard.html，轮询 /v1/tasks + retry/cancel
    P2  daemon submit (POST /v1/jobs)      # 把创建类任务也纳入 HTTP；CLI 透传 daemon
    P2  event log                         # 可观测性（GET /v1/events，Web 时间线消费）
-   P3  Web 模块                           # 本地运维可视化（axum 静态资源 + tower-http）
    P3  credential store / artifact-store  # 解耦凭据与产物
 ```
 
