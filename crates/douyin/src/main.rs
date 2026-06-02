@@ -283,6 +283,20 @@ enum Command {
         #[arg(long)]
         task_dir: Option<PathBuf>,
     },
+    /// 启动常驻 daemon + 本机 HTTP API（自动 reap/flush + 跨三类任务查询/控制）。
+    Serve {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        /// 监听地址（默认仅本机）。
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: String,
+        /// 后台维护轮询间隔（秒）。
+        #[arg(long, default_value_t = 60)]
+        tick_secs: u64,
+        /// stale 判定阈值（秒）：running 任务心跳超过即重启。
+        #[arg(long, default_value_t = 600)]
+        stale_secs: i64,
+    },
     /// 从 GitHub Release 自更新当前可执行文件。
     Update {
         #[arg(short, long, help = "即使版本未升级也强制更新")]
@@ -309,6 +323,21 @@ async fn main() -> Result<()> {
         }
         Command::ProcessWorker { task_dir, task_id } => {
             douyin::process::run_worker(task_dir, task_id).await?;
+            return Ok(());
+        }
+        Command::Serve {
+            task_dir,
+            bind,
+            tick_secs,
+            stale_secs,
+        } => {
+            douyin::serve::run(
+                douyin::resolve_task_dir(task_dir.clone())?,
+                bind.clone(),
+                *tick_secs,
+                *stale_secs,
+            )
+            .await?;
             return Ok(());
         }
         Command::Update { force } => {
@@ -487,6 +516,7 @@ async fn main() -> Result<()> {
         Command::DownloadWorker { .. }
         | Command::ListWorksWorker { .. }
         | Command::ProcessWorker { .. }
+        | Command::Serve { .. }
         | Command::Update { .. } => {
             unreachable!("已在上面处理")
         }

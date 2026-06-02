@@ -144,7 +144,8 @@ running -> cancelled               收到 cancel 标志（已实现）
 | cancel | ✅ 三类任务全实现（`*-cancel` 写标志，worker 处理下一条前转 `cancelled`） |
 | list（按状态过滤） | ✅ 统一 `list-tasks [--state]`（serde 忽略差异字段，跨三类一视图） |
 | 持久 callback 队列 | ✅ 已实现（`callback.rs`：落盘 + 退避补发 + `callback-flush`） |
-| 进程重启后恢复 | ◐ 三类任务可经 `*-reap` 恢复；启动自动扫描需 daemon |
+| 进程重启后恢复 | ✅ `douyin serve` daemon 启动即跑一轮 + 定时 reap/flush（`serve.rs`） |
+| HTTP API（多入口复用） | ✅ MVP（axum：健康/列任务/查/retry/cancel/flush/maintenance） |
 
 ---
 
@@ -372,7 +373,7 @@ Cookie 属于敏感凭据：
 |---|---|
 | ~~callback 三次失败 / worker 发回调前崩溃 → 回调永久丢失~~ | ✅ 已在轻量档实现（§4.4 `callback.rs`，无需 daemon）。daemon 化后可由常驻进程定时 flush 替代手动/定时调用 |
 | 跑了什么、何时、为何失败无法观测 | **event log**（append-only）：job.created/started、item.succeeded/failed、job.succeeded、callback.delivered。供 Web 时间线 / CLI events 查询 |
-| CLI、Web、Agent 包装层要复用同一套任务接口 | **daemon + HTTP API**：`Agent → CLI → daemon(127.0.0.1:8787) → worker/store`。API 草案：`POST /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs?state=`、`POST /v1/jobs/{id}/retry|cancel`、`GET /v1/events` |
+| CLI、Web、Agent 包装层要复用同一套任务接口 | ✅ **daemon + HTTP API（MVP 已实现，`serve.rs`）**：`douyin serve --bind 127.0.0.1:8787`，axum 路由 `GET /healthz`、`GET /v1/tasks[?state=]`、`GET /v1/tasks/{id}`、`POST /v1/tasks/{id}/retry\|cancel`、`POST /v1/callbacks/flush`、`POST /v1/maintenance/run`。启动即跑一轮维护 + 每 `--tick-secs` 定时 reap/flush，替代手动命令。**MVP 与 CLI 直接 spawn 并存**——尚未把 CLI submit 改为透传 daemon（创建类 `POST /v1/jobs` 待补），also event log（`GET /v1/events`）未做 |
 | 本地用户要可视化运维 | **Web 模块**（`douyin serve --bind 127.0.0.1:8787`）：Jobs / Job Detail / Artifacts / Credentials / Network Profiles / Callbacks。默认只听 127.0.0.1、不展示 Cookie 原文；监听 0.0.0.0 须显式 token。候选 `axum` + `tower-http` |
 | 下载产物要被多方按 id 引用 / 远程访问 | **artifact-store**：产物注册为 `{artifact_id, source, local_path, sha256, content_type}`，Agent 包装层按场景给 artifact_id / local_path / HTTP URL |
 
@@ -390,9 +391,10 @@ Cookie 属于敏感凭据：
 ✅ P1  cancel + list-tasks                # 已完成：补齐长任务契约接口面
 ✅ P1  持久 callback 队列                  # 已完成：落盘 + 退避补发 + callback-flush
 ✅ P1  item 账本驱动去重 (process)         # 已完成：submit 建账本、worker 消费、retry 精确续传
-   P2  event log                         # 可观测性
-   P2  daemon + HTTP API                 # 多入口复用 + 超时治理
-   P3  Web 模块                           # 本地运维可视化
+✅ P2  daemon + HTTP API (MVP)            # 已完成：serve.rs，axum + 启动/定时自动 reap/flush
+   P2  daemon submit (POST /v1/jobs)      # 把创建类任务也纳入 HTTP；CLI 透传 daemon
+   P2  event log                         # 可观测性（GET /v1/events，Web 时间线消费）
+   P3  Web 模块                           # 本地运维可视化（axum 静态资源 + tower-http）
    P3  credential store / artifact-store  # 解耦凭据与产物
 ```
 

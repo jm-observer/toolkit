@@ -15,6 +15,7 @@ pub mod download;
 pub mod knowledge;
 pub mod list_works_task;
 pub mod process;
+pub mod serve;
 pub mod sign;
 
 use anyhow::{Context, Result};
@@ -254,6 +255,81 @@ pub async fn run_callback_flush(task_dir: &Path) -> Result<Value> {
     let (delivered, pending, failed) =
         callback::flush(task_dir, callback::GATEWAY_CALLBACK_URL).await?;
     Ok(json!({ "delivered": delivered, "pending": pending, "failed": failed }))
+}
+
+/// 由 task_id 前缀判定任务类型（daemon / HTTP 统一入口按此分派）。
+pub fn task_kind(task_id: &str) -> &'static str {
+    if task_id.starts_with("dyproc") {
+        "process"
+    } else if task_id.starts_with("dylw") {
+        "list-works"
+    } else {
+        "download"
+    }
+}
+
+fn not_found_json(task_id: &str) -> Value {
+    json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })
+}
+
+/// 统一查任务状态（按前缀分派到三类）。daemon / HTTP 用。
+pub fn run_task_status(task_dir: &Path, task_id: &str) -> Result<Value> {
+    let v = match task_kind(task_id) {
+        "process" => process::read_status(task_dir, task_id)?
+            .map(serde_json::to_value)
+            .transpose()?,
+        "list-works" => list_works_task::read_status(task_dir, task_id)?
+            .map(serde_json::to_value)
+            .transpose()?,
+        _ => download::read_status(task_dir, task_id)?
+            .map(serde_json::to_value)
+            .transpose()?,
+    };
+    Ok(v.unwrap_or_else(|| not_found_json(task_id)))
+}
+
+/// 统一重启任务（按前缀分派）。daemon / HTTP 用。
+pub fn run_task_retry(task_dir: &Path, task_id: &str) -> Result<Value> {
+    let state = match task_kind(task_id) {
+        "process" => process::retry(task_dir, task_id)?.map(|s| s.state),
+        "list-works" => list_works_task::retry(task_dir, task_id)?.map(|s| s.state),
+        _ => download::retry(task_dir, task_id)?.map(|s| s.state),
+    };
+    match state {
+        Some(state) => Ok(json!({ "task_id": task_id, "state": state, "retried": true })),
+        None => Ok(not_found_json(task_id)),
+    }
+}
+
+/// 统一取消任务（按前缀分派）。daemon / HTTP 用。
+pub fn run_task_cancel(task_dir: &Path, task_id: &str) -> Result<Value> {
+    let ok = match task_kind(task_id) {
+        "process" => process::cancel(task_dir, task_id)?,
+        "list-works" => list_works_task::cancel(task_dir, task_id)?,
+        _ => download::cancel(task_dir, task_id)?,
+    };
+    if ok {
+        Ok(json!({ "task_id": task_id, "cancel_requested": true }))
+    } else {
+        Ok(json!({ "task_id": task_id, "cancel_requested": false, "error_kind": "not_cancellable" }))
+    }
+}
+
+/// 维护一轮：reap 三类 stale 任务 + flush 未送达 callback。daemon 启动 + 定时调用。
+pub async fn run_maintenance(task_dir: &Path, stale_secs: i64) -> Result<Value> {
+    let proc_reaped = process::reap(task_dir, stale_secs)?;
+    let dl_reaped = download::reap(task_dir, stale_secs)?;
+    let lw_reaped = list_works_task::reap(task_dir, stale_secs)?;
+    let (delivered, pending, failed) =
+        callback::flush(task_dir, callback::GATEWAY_CALLBACK_URL).await?;
+    Ok(json!({
+        "reaped": {
+            "process": proc_reaped,
+            "download": dl_reaped,
+            "list_works": lw_reaped,
+        },
+        "callbacks": { "delivered": delivered, "pending": pending, "failed": failed },
+    }))
 }
 
 /// 读 cookie 文件。支持 v1 结构 `{updated_at, value:{...}}` 或裸 `{...}`。
