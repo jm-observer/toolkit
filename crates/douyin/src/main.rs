@@ -1,13 +1,34 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use custom_utils::updater::UpdateConfig;
+use custom_utils::updater::{CliAction, DeployCommand, LinuxService};
 use log::LevelFilter::Info;
 use std::path::PathBuf;
 
+// LinuxService 部署描述：systemd 用户级单元 + ~/.local/bin + ~/.config/douyin。
 // 自更新指向承载本工具集的同一 GitHub 仓库（与 github-commit-info 同仓）。
 const REPO_OWNER: &str = "jm-observer";
 const REPO_NAME: &str = "github-commit-info";
-const BIN_NAME: &str = "douyin";
+const APP: &str = "douyin";
+/// G10 部署：daemon 长跑作业（process 含 ASR 可达数分钟）。watchdog 心跳间隔留 60s
+/// 给 maintenance tick + axum 喘息，systemd 仍能在 daemon 真正死锁/卡死时拉起。
+const WATCHDOG_SEC: u32 = 60;
+
+/// 构造统一的 LinuxService 描述。systemd unit 的 ExecStart 由这里的 exec_args 决定：
+///
+/// ```text
+/// ExecStart=~/.local/bin/douyin serve --task-dir {workspace} --bind 127.0.0.1:8787
+/// ```
+///
+/// 即安装后 `systemctl --user start douyin` 直接拉起 daemon；CLI 长任务命令默认指
+/// 127.0.0.1:8787，恰好对应同一进程（设计 §CLI 与服务）。
+fn linux_service() -> LinuxService {
+    LinuxService::new(APP, REPO_OWNER, REPO_NAME, env!("CARGO_PKG_VERSION"))
+        .bin_name(APP)
+        .description("douyin async task daemon (process/list-works/download)")
+        .exec_args("serve --task-dir {workspace} --bind 127.0.0.1:8787")
+        .watchdog_sec(WATCHDOG_SEC)
+        .restart_sec(5)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "douyin", version, about = "zero 的抖音工具集", long_about = None)]
@@ -290,6 +311,19 @@ enum Command {
         #[arg(long)]
         task_id: String,
     },
+    /// 后台拉起 daemon（detached `douyin serve`）。已运行则原样返回，幂等。
+    /// 给本机开发用；G10 生产 systemd 管理 daemon，不调本命令。
+    DaemonStart {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: String,
+        /// 探活最大等待秒数（启动后轮询 /healthz）。
+        #[arg(long, default_value_t = 10)]
+        wait_secs: u64,
+    },
+    /// 查 daemon 是否运行（probe /healthz）。返回 {alive, daemon_url}。
+    DaemonStatus,
     /// 启动常驻 daemon + 本机 HTTP API（自动 reap/flush + 跨三类任务查询/控制）。
     Serve {
         #[arg(long)]
@@ -304,7 +338,16 @@ enum Command {
         #[arg(long, default_value_t = 600)]
         stale_secs: i64,
     },
-    /// 从 GitHub Release 自更新当前可执行文件。
+    /// 安装为 systemd 用户级服务（G10 部署：rootless，~/.local/bin + ~/.config/douyin）。
+    /// 不传 `--dry-run` 即执行；`--dry-run` 仅打印 unit 文件供检视。
+    Install {
+        #[arg(long, short = 'n', help = "只打印渲染后的 unit 不真正安装")]
+        dry_run: bool,
+        /// 显式 workspace 路径，覆盖 ~/.config/douyin 默认。
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+    },
+    /// 从 GitHub Release 自更新当前可执行文件（指向安装目录 ~/.local/bin）。
     Update {
         #[arg(short, long, help = "即使版本未升级也强制更新")]
         force: bool,
@@ -338,6 +381,9 @@ async fn main() -> Result<()> {
             tick_secs,
             stale_secs,
         } => {
+            // systemd 集成：Type=notify 要求 READY=1，WatchdogSec= 要求心跳。
+            // 非 systemd 环境（手动跑、Windows）下 spawn_watchdog 自禁，no-op。
+            let _watchdog = linux_service().spawn_watchdog();
             douyin::serve::run(
                 douyin::resolve_task_dir(task_dir.clone())?,
                 bind.clone(),
@@ -347,14 +393,30 @@ async fn main() -> Result<()> {
             .await?;
             return Ok(());
         }
+        Command::Install { dry_run, workspace } => {
+            match linux_service()
+                .dispatch(DeployCommand::Install {
+                    dry_run: *dry_run,
+                    workspace: workspace.clone(),
+                })
+                .await
+                .context("安装失败")?
+            {
+                CliAction::DryRun(unit) => {
+                    println!("{unit}");
+                }
+                CliAction::Handled => {
+                    log::info!("install ok");
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         Command::Update { force } => {
-            let outcome = UpdateConfig::new(REPO_OWNER, REPO_NAME, env!("CARGO_PKG_VERSION"))
-                .bin_name(BIN_NAME)
-                .force(*force)
-                .execute()
+            linux_service()
+                .dispatch(DeployCommand::Update { force: *force })
                 .await
                 .context("自更新失败")?;
-            log::info!("update: {outcome:?}");
             return Ok(());
         }
         _ => {}
@@ -520,6 +582,15 @@ async fn main() -> Result<()> {
             douyin::client::get(&format!("/v1/tasks/{task_id}")).await
         }
         Command::CallbackFlush { .. } => douyin::client::post("/v1/callbacks/flush", None).await,
+        Command::DaemonStatus => {
+            let alive = douyin::client::is_alive().await;
+            serde_json::json!({ "alive": alive, "daemon_url": douyin::client::daemon_base() })
+        }
+        Command::DaemonStart {
+            task_dir,
+            bind,
+            wait_secs,
+        } => daemon_start(task_dir, &bind, wait_secs).await?,
         Command::Events { task_id, .. } => {
             douyin::client::get(&format!("/v1/tasks/{task_id}/events")).await
         }
@@ -534,6 +605,7 @@ async fn main() -> Result<()> {
         | Command::ListWorksWorker { .. }
         | Command::ProcessWorker { .. }
         | Command::Serve { .. }
+        | Command::Install { .. }
         | Command::Update { .. } => {
             unreachable!("已在上面处理")
         }
@@ -541,4 +613,65 @@ async fn main() -> Result<()> {
 
     println!("{}", serde_json::to_string(&value)?);
     Ok(())
+}
+
+/// 后台启动 daemon：先 probe，已活返回 `already_running`；否则 spawn `douyin serve`
+/// 脱离进程，轮询 /healthz 直到 ready 或 wait_secs 超时。
+async fn daemon_start(
+    task_dir: Option<PathBuf>,
+    bind: &str,
+    wait_secs: u64,
+) -> Result<serde_json::Value> {
+    // 探活看实际启动地址（与 DOUYIN_DAEMON 默认 8787 可能不同）。
+    let base_url = format!("http://{bind}");
+    if douyin::client::is_alive_at(&base_url).await {
+        return Ok(serde_json::json!({
+            "started": false,
+            "already_running": true,
+            "daemon_url": base_url,
+        }));
+    }
+    let exe = std::env::current_exe().context("取当前可执行路径")?;
+    let resolved_task_dir = douyin::resolve_task_dir(task_dir)?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("serve")
+        .arg("--task-dir")
+        .arg(&resolved_task_dir)
+        .arg("--bind")
+        .arg(bind);
+    // 父进程退出后子进程继续：stdin/stdout/stderr 都丢给 null，避免占着 console。
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd.spawn().context("spawn douyin serve")?;
+    let pid = child.id();
+    drop(child); // 不 wait，让其脱离
+
+    // 轮询 /healthz 直至 ready 或超时。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
+    loop {
+        if douyin::client::is_alive_at(&base_url).await {
+            return Ok(serde_json::json!({
+                "started": true,
+                "pid": pid,
+                "daemon_url": base_url,
+                "task_dir": resolved_task_dir.to_string_lossy(),
+                "hint": if bind != "127.0.0.1:8787" {
+                    format!("daemon 监听 {bind}，与默认 DOUYIN_DAEMON 不符；后续 CLI 调用请设 DOUYIN_DAEMON={base_url}")
+                } else {
+                    String::new()
+                },
+            }));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(serde_json::json!({
+                "started": false,
+                "error": "daemon spawn 后 wait_secs 内未就绪",
+                "error_kind": "timeout",
+                "pid": pid,
+                "wait_secs": wait_secs,
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }

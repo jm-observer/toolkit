@@ -396,8 +396,84 @@ Cookie 属于敏感凭据：
 ✅ P2  event log                         # 已完成：events.rs，三类任务生命周期 + callback，CLI/HTTP 查询
 ✅ P2  daemon submit (POST /v1/jobs)      # 已完成：三类任务可经 HTTP 入队（run_submit_job 分派）
 ✅ P2  CLI 透传 daemon                     # 已完成：client.rs，长任务命令硬切 daemon，未运行回 service_unavailable
+✅ P2  G10 部署 + daemon-start              # 已完成：LinuxService systemd + douyin install/update；daemon-start 本机一键拉起
    P3  credential store / artifact-store  # 解耦凭据与产物（跨系统，依赖外部组件，本仓之外）
 ```
 
 P0/P1 多数落在"轻量档"，不引新依赖、可立即推进；P2 起才进入 daemon 形态。
 已完成的两项 P0 即是范例：全程未引入新依赖，仅在现有 spawn-worker + 文件模型上补契约。
+
+## 8. G10 部署（systemd 用户级服务）
+
+daemon 在 G10 上以 **rootless systemd 用户级服务** 形式跑（`custom_utils::updater::LinuxService` 统一编排），与自更新、watchdog、workspace 路径用同一份描述。
+
+### 8.1 一次性安装
+
+```bash
+# G10 当前登录用户下，先拿 release 二进制（aarch64-unknown-linux-gnu，与 CI 资产名对齐）：
+curl -L "https://github.com/jm-observer/github-commit-info/releases/latest/download/douyin_aarch64-unknown-linux-gnu" -o /tmp/douyin
+chmod +x /tmp/douyin
+# install 自动完成：copy → ~/.local/bin/douyin、写 unit、daemon-reload、enable、enable-linger
+/tmp/douyin install
+systemctl --user start douyin
+systemctl --user status douyin
+```
+
+渲染出的 unit（`douyin install --dry-run` 预览）：
+
+```ini
+[Unit]
+Description=douyin async task daemon (process/list-works/download)
+After=network.target
+
+[Service]
+Type=notify
+Environment=PATH=~/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=~/.local/bin/douyin serve --task-dir ~/.config/douyin --bind 127.0.0.1:8787
+Restart=on-failure
+RestartSec=5
+WatchdogSec=60
+WorkingDirectory=~/.config/douyin
+
+[Install]
+WantedBy=default.target
+```
+
+关键设计：
+
+- `Type=notify` + `WatchdogSec=60`：daemon `Serve` 路径调 `LinuxService::spawn_watchdog`，systemd 收到 READY=1 才算启动完成；之后心跳每 ≤ 30s 一次（自动半周期），真正卡死才会被 systemd 重启。维护循环 + axum 共用同一 tokio runtime，任一线程死锁都会被发现。
+- **rootless**：`systemctl --user`，二进制装到 `~/.local/bin`、workspace 与 task store 都在 `~/.config/douyin`。自更新无需 root。
+- **CLI 透传**：systemd 已起 daemon → 同机 CLI 直接 `127.0.0.1:8787` 命中。`DOUYIN_DAEMON` 未设即默认此地址。
+
+### 8.2 自更新
+
+```bash
+douyin update              # 拉最新 GitHub Release 替换 ~/.local/bin/douyin
+systemctl --user restart douyin   # 让新二进制接管
+```
+
+`douyin update` 不需要 root、不动 unit 文件、不动 task store；只替换二进制。systemd 重启后旧 daemon 优雅退出、任务靠 status.json + heartbeat 由新 daemon 启动维护一轮恢复。
+
+### 8.3 本机开发（非 systemd）
+
+```bash
+douyin daemon-start        # 后台 spawn `douyin serve`（detached），轮询 /healthz 直至就绪
+douyin daemon-status       # probe /healthz
+douyin serve               # 或前台跑，看实时日志
+```
+
+`daemon-start` 幂等：daemon 已活则报 `already_running`；启动后超时未就绪报 `timeout`。bind 端口与默认 8787 不同时返回 hint 指导设 `DOUYIN_DAEMON`。
+
+### 8.4 service_unavailable 错误
+
+CLI 长任务命令调 daemon，连接拒绝 → 统一返回：
+
+```json
+{
+  "error": "douyin service 未运行",
+  "error_kind": "service_unavailable",
+  "hint": "本机后台启动：`douyin daemon-start`；前台调试：`douyin serve`；G10：`systemctl --user start douyin`。指向已有实例：设 DOUYIN_DAEMON=<url>。当前目标 http://127.0.0.1:8787"
+}
+```
+
+不静默降级为前台长任务，避免重新引入 Agent 调用超时（设计 §CLI 与服务）。

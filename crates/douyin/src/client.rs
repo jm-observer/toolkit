@@ -22,8 +22,29 @@ fn service_unavailable() -> Value {
     json!({
         "error": "douyin service 未运行",
         "error_kind": "service_unavailable",
-        "hint": format!("运行 douyin serve（或设 DOUYIN_DAEMON 指向已有 daemon）；当前目标 {}", daemon_base()),
+        "hint": format!(
+            "本机后台启动：`douyin daemon-start`；前台调试：`douyin serve`；G10：`systemctl --user start douyin`。\
+             指向已有实例：设 DOUYIN_DAEMON=<url>。当前目标 {}",
+            daemon_base()
+        ),
     })
+}
+
+/// 健康探测当前 DOUYIN_DAEMON 目标。
+pub async fn is_alive() -> bool {
+    is_alive_at(&daemon_base()).await
+}
+
+/// 健康探测指定 base URL（daemon-start 用，避免 bind 端口与 DOUYIN_DAEMON 不一致时误判）。
+pub async fn is_alive_at(base: &str) -> bool {
+    let url = format!("{}/healthz", base.trim_end_matches('/'));
+    reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 async fn req(method: reqwest::Method, path: &str, body: Option<Value>) -> Value {
