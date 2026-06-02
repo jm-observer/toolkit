@@ -104,6 +104,12 @@ pub fn submit(
         heartbeat_at: None,
     };
     write_status(task_dir, &st)?;
+    crate::events::append(
+        task_dir,
+        &task_id,
+        "job.created",
+        Some(serde_json::json!({ "total": st.total })),
+    );
 
     spawn_worker(task_dir, &task_id)?;
 
@@ -268,6 +274,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         heartbeat_at: Some(now()),
     };
     write_status(task_dir, &st)?;
+    crate::events::append(task_dir, task_id, "job.started", None);
 
     let http = reqwest::Client::new();
     for id in &job.ids {
@@ -277,6 +284,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             st.state = "cancelled".into();
             st.updated_at = now();
             write_status(task_dir, &st)?;
+            crate::events::append(task_dir, task_id, "job.cancelled", None);
             return Ok(());
         }
         match download_one(&client, &http, id, &job.out_dir).await {
@@ -304,6 +312,12 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     .into();
     st.updated_at = now();
     write_status(task_dir, &st)?;
+    crate::events::append(
+        task_dir,
+        task_id,
+        &format!("job.{}", st.state),
+        Some(serde_json::json!({ "done": st.done, "failed": st.failed })),
+    );
     Ok(())
 }
 

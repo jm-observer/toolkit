@@ -169,10 +169,20 @@ pub async fn deliver(task_dir: &Path, task_id: &str, url: &str) -> Result<bool> 
             apply_success(&mut rec);
             write(task_dir, &rec)?;
             mark_status_notified(task_dir, task_id);
+            crate::events::append(task_dir, task_id, "callback.delivered", None);
             Ok(true)
         }
         Err(e) => {
             apply_failure(&mut rec, e.to_string());
+            // 仅在彻底放弃时记一条 failed 事件，避免每次退避都刷屏。
+            if rec.state == "failed" {
+                crate::events::append(
+                    task_dir,
+                    task_id,
+                    "callback.failed",
+                    Some(json!({ "attempt": rec.attempt, "last_error": rec.last_error })),
+                );
+            }
             write(task_dir, &rec)?;
             Ok(false)
         }

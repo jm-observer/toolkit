@@ -283,6 +283,13 @@ enum Command {
         #[arg(long)]
         task_dir: Option<PathBuf>,
     },
+    /// 查某任务的事件时间线（append-only event log）。
+    Events {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
     /// 启动常驻 daemon + 本机 HTTP API（自动 reap/flush + 跨三类任务查询/控制）。
     Serve {
         #[arg(long)]
@@ -502,6 +509,9 @@ async fn main() -> Result<()> {
         }
         Command::CallbackFlush { task_dir } => {
             douyin::run_callback_flush(&douyin::resolve_task_dir(task_dir)?).await?
+        }
+        Command::Events { task_dir, task_id } => {
+            douyin::run_events(&douyin::resolve_task_dir(task_dir)?, &task_id)?
         }
         Command::ProcessRetry { task_dir, task_id } => {
             douyin::run_process_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?

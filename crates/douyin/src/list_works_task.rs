@@ -154,6 +154,12 @@ pub fn submit(
         notified: false,
     };
     write_status(task_dir, &st)?;
+    crate::events::append(
+        task_dir,
+        &task_id,
+        "job.created",
+        Some(serde_json::json!({ "max_pages": max_pages })),
+    );
 
     spawn_worker(task_dir, &task_id)?;
 
@@ -365,6 +371,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         notified: false,
     };
     write_status(task_dir, &st)?;
+    crate::events::append(task_dir, task_id, "job.started", None);
 
     // ===== 翻页循环（复制 api.rs::list_all_works，每页 write_status）=====
     let mut cursor = 0i64;
@@ -381,6 +388,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             st.state = "cancelled".into();
             st.updated_at = now();
             let _ = write_status(task_dir, &st);
+            crate::events::append(task_dir, task_id, "job.cancelled", None);
             log::info!("[list-works] cancelled task_id={task_id}");
             return Ok(());
         }
@@ -465,6 +473,12 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     };
     st.updated_at = now();
     write_status(task_dir, &st)?;
+    crate::events::append(
+        task_dir,
+        task_id,
+        &format!("job.{}", st.state),
+        Some(serde_json::json!({ "count": st.count, "throttled": st.throttled })),
+    );
 
     // ===== Plan 5：终态落「按 unique_id 的稳定缓存」，供 list_tags / filter_works /
     // publish_knowledge 使用。缓存目录与 tasks 同级（task_dir 的兄弟 works/）。

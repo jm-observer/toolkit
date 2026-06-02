@@ -345,6 +345,12 @@ pub fn submit(
     };
     recompute_counts(&mut st);
     write_status(task_dir, &st)?;
+    crate::events::append(
+        task_dir,
+        &task_id,
+        "job.created",
+        Some(serde_json::json!({ "total": st.total, "skipped": st.skipped })),
+    );
 
     spawn_worker(task_dir, &task_id)?;
 
@@ -421,6 +427,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     };
     recompute_counts(&mut st);
     write_status(task_dir, &st)?;
+    crate::events::append(task_dir, task_id, "job.started", None);
 
     let http = reqwest::Client::new();
     for i in 0..st.results.len() {
@@ -434,6 +441,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             st.state = "cancelled".into();
             st.updated_at = now();
             write_status(task_dir, &st)?;
+            crate::events::append(task_dir, task_id, "job.cancelled", None);
             log::info!("[process] cancelled task_id={task_id}");
             return Ok(());
         }
@@ -461,6 +469,12 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
                 },
             };
         }
+        crate::events::append(
+            task_dir,
+            task_id,
+            &format!("item.{}", st.results[i].state),
+            Some(serde_json::json!({ "aweme_id": st.results[i].aweme_id })),
+        );
         recompute_counts(&mut st);
         st.updated_at = now();
         st.heartbeat_at = Some(now());
@@ -478,6 +492,12 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     .into();
     st.updated_at = now();
     write_status(task_dir, &st)?;
+    crate::events::append(
+        task_dir,
+        task_id,
+        &format!("job.{}", st.state),
+        Some(serde_json::json!({ "done": st.done, "failed": st.failed, "skipped": st.skipped })),
+    );
 
     // 业务回调：入持久队列并当场尝试投递，通知 zero gateway 触发第二轮 LLM 周期
     // （调 publish_knowledge 回填）。未当场送达则留 pending，由 callback-flush 补发。

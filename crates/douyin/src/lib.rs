@@ -12,6 +12,7 @@
 pub mod api;
 pub mod callback;
 pub mod download;
+pub mod events;
 pub mod knowledge;
 pub mod list_works_task;
 pub mod process;
@@ -255,6 +256,12 @@ pub async fn run_callback_flush(task_dir: &Path) -> Result<Value> {
     let (delivered, pending, failed) =
         callback::flush(task_dir, callback::GATEWAY_CALLBACK_URL).await?;
     Ok(json!({ "delivered": delivered, "pending": pending, "failed": failed }))
+}
+
+/// `events`：读某任务的 append-only 事件时间线。
+pub fn run_events(task_dir: &Path, task_id: &str) -> Result<Value> {
+    let evs = events::read_all(task_dir, task_id)?;
+    Ok(json!({ "task_id": task_id, "count": evs.len(), "events": evs }))
 }
 
 /// 由 task_id 前缀判定任务类型（daemon / HTTP 统一入口按此分派）。

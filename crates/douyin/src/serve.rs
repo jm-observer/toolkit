@@ -60,6 +60,7 @@ pub async fn run(task_dir: PathBuf, bind: String, tick_secs: u64, stale_secs: i6
         .route("/healthz", get(healthz))
         .route("/v1/tasks", get(list_tasks))
         .route("/v1/tasks/{task_id}", get(get_task))
+        .route("/v1/tasks/{task_id}/events", get(get_events))
         .route("/v1/tasks/{task_id}/retry", post(retry_task))
         .route("/v1/tasks/{task_id}/cancel", post(cancel_task))
         .route("/v1/callbacks/flush", post(flush_callbacks))
@@ -107,6 +108,10 @@ async fn list_tasks(
 
 async fn get_task(State(s): State<AppState>, AxPath(task_id): AxPath<String>) -> Json<Value> {
     Json(crate::run_task_status(&s.task_dir, &task_id).unwrap_or_else(err_json))
+}
+
+async fn get_events(State(s): State<AppState>, AxPath(task_id): AxPath<String>) -> Json<Value> {
+    Json(crate::run_events(&s.task_dir, &task_id).unwrap_or_else(err_json))
 }
 
 async fn retry_task(State(s): State<AppState>, AxPath(task_id): AxPath<String>) -> Json<Value> {
