@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod callback;
+pub mod client;
 pub mod download;
 pub mod events;
 pub mod knowledge;

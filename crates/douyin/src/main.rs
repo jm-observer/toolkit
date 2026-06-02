@@ -390,66 +390,70 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        // ===== 长任务命令：透传 daemon（store 在 daemon 侧，--task-dir 不再生效）=====
         Command::DownloadSubmit {
             cookie_file,
-            task_dir,
             out_dir,
             ids,
+            ..
         } => {
-            douyin::run_download_submit(
-                &douyin::resolve_cookie_file(cookie_file)?,
-                &douyin::resolve_task_dir(task_dir)?,
-                &douyin::resolve_out_dir(out_dir)?,
-                ids,
+            douyin::client::submit(
+                "download",
+                serde_json::json!({
+                    "cookie_file": douyin::resolve_cookie_file(cookie_file)?.to_string_lossy(),
+                    "out_dir": douyin::resolve_out_dir(out_dir)?.to_string_lossy(),
+                    "ids": ids,
+                }),
             )
-            .await?
+            .await
         }
-        Command::DownloadStatus { task_dir, task_id } => {
-            douyin::run_download_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
+        Command::DownloadStatus { task_id, .. } => {
+            douyin::client::get(&format!("/v1/tasks/{task_id}")).await
         }
-        Command::DownloadRetry { task_dir, task_id } => {
-            douyin::run_download_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::DownloadRetry { task_id, .. } => {
+            douyin::client::post(&format!("/v1/tasks/{task_id}/retry"), None).await
         }
-        Command::DownloadReap {
-            task_dir,
-            stale_secs,
-        } => douyin::run_download_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
-        Command::DownloadCancel { task_dir, task_id } => {
-            douyin::run_download_cancel(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::DownloadReap { .. } => douyin::client::post("/v1/maintenance/run", None).await,
+        Command::DownloadCancel { task_id, .. } => {
+            douyin::client::post(&format!("/v1/tasks/{task_id}/cancel"), None).await
         }
         Command::ListWorksSubmit {
             cookie_file,
-            task_dir,
             input,
             max_pages,
             delivery_handle,
             session_id,
+            ..
         } => {
-            douyin::run_list_works_submit(
-                &douyin::resolve_cookie_file(cookie_file)?,
-                &douyin::resolve_task_dir(task_dir)?,
-                &input,
-                max_pages,
-                delivery_handle.as_deref(),
-                session_id.as_deref(),
-            )
-            .await?
+            let mut params = serde_json::json!({
+                "cookie_file": douyin::resolve_cookie_file(cookie_file)?.to_string_lossy(),
+                "input": input,
+                "max_pages": max_pages,
+            });
+            if let Some(dh) = delivery_handle {
+                params["delivery_handle"] = serde_json::json!(dh);
+            }
+            if let Some(sid) = session_id {
+                params["session_id"] = serde_json::json!(sid);
+            }
+            douyin::client::submit("list-works", params).await
         }
-        Command::ListWorksStatus { task_dir, task_id } => {
-            douyin::run_list_works_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
+        Command::ListWorksStatus { task_id, .. } => {
+            douyin::client::get(&format!("/v1/tasks/{task_id}")).await
         }
-        Command::ListWorksRetry { task_dir, task_id } => {
-            douyin::run_list_works_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::ListWorksRetry { task_id, .. } => {
+            douyin::client::post(&format!("/v1/tasks/{task_id}/retry"), None).await
         }
-        Command::ListWorksReap {
-            task_dir,
-            stale_secs,
-        } => douyin::run_list_works_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
-        Command::ListWorksCancel { task_dir, task_id } => {
-            douyin::run_list_works_cancel(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::ListWorksReap { .. } => douyin::client::post("/v1/maintenance/run", None).await,
+        Command::ListWorksCancel { task_id, .. } => {
+            douyin::client::post(&format!("/v1/tasks/{task_id}/cancel"), None).await
         }
-        Command::ListTasks { task_dir, state } => {
-            douyin::run_list_tasks(&douyin::resolve_task_dir(task_dir)?, state.as_deref())?
+        Command::ListTasks { state, .. } => {
+            let path = match state {
+                Some(s) => format!("/v1/tasks?state={s}"),
+                None => "/v1/tasks".to_string(),
+            };
+            douyin::client::get(&path).await
         }
         Command::ListTags {
             works_dir,
@@ -481,7 +485,6 @@ async fn main() -> Result<()> {
         )?,
         Command::ProcessSubmit {
             cookie_file,
-            task_dir,
             out_dir,
             transcript_dir,
             ids,
@@ -491,37 +494,41 @@ async fn main() -> Result<()> {
             delivery_handle,
             unique_id,
             session_id,
-        } => douyin::run_process_submit(
-            &douyin::resolve_task_dir(task_dir)?,
-            &douyin::resolve_out_dir(out_dir)?,
-            &douyin::resolve_transcript_dir(transcript_dir)?,
-            &douyin::resolve_cookie_file(cookie_file)?,
-            ids,
-            asr_url,
-            asr_model,
-            vad,
-            delivery_handle,
-            unique_id,
-            session_id,
-        )?,
-        Command::ProcessStatus { task_dir, task_id } => {
-            douyin::run_process_status(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+            ..
+        } => {
+            let mut params = serde_json::json!({
+                "cookie_file": douyin::resolve_cookie_file(cookie_file)?.to_string_lossy(),
+                "out_dir": douyin::resolve_out_dir(out_dir)?.to_string_lossy(),
+                "transcript_dir": douyin::resolve_transcript_dir(transcript_dir)?.to_string_lossy(),
+                "ids": ids,
+                "asr_url": asr_url,
+                "asr_model": asr_model,
+                "vad": vad,
+            });
+            if let Some(dh) = delivery_handle {
+                params["delivery_handle"] = serde_json::json!(dh);
+            }
+            if let Some(u) = unique_id {
+                params["unique_id"] = serde_json::json!(u);
+            }
+            if let Some(sid) = session_id {
+                params["session_id"] = serde_json::json!(sid);
+            }
+            douyin::client::submit("process", params).await
         }
-        Command::CallbackFlush { task_dir } => {
-            douyin::run_callback_flush(&douyin::resolve_task_dir(task_dir)?).await?
+        Command::ProcessStatus { task_id, .. } => {
+            douyin::client::get(&format!("/v1/tasks/{task_id}")).await
         }
-        Command::Events { task_dir, task_id } => {
-            douyin::run_events(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::CallbackFlush { .. } => douyin::client::post("/v1/callbacks/flush", None).await,
+        Command::Events { task_id, .. } => {
+            douyin::client::get(&format!("/v1/tasks/{task_id}/events")).await
         }
-        Command::ProcessRetry { task_dir, task_id } => {
-            douyin::run_process_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::ProcessRetry { task_id, .. } => {
+            douyin::client::post(&format!("/v1/tasks/{task_id}/retry"), None).await
         }
-        Command::ProcessReap {
-            task_dir,
-            stale_secs,
-        } => douyin::run_process_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
-        Command::ProcessCancel { task_dir, task_id } => {
-            douyin::run_process_cancel(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        Command::ProcessReap { .. } => douyin::client::post("/v1/maintenance/run", None).await,
+        Command::ProcessCancel { task_id, .. } => {
+            douyin::client::post(&format!("/v1/tasks/{task_id}/cancel"), None).await
         }
         Command::DownloadWorker { .. }
         | Command::ListWorksWorker { .. }

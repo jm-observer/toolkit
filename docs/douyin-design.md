@@ -373,7 +373,7 @@ Cookie 属于敏感凭据：
 |---|---|
 | ~~callback 三次失败 / worker 发回调前崩溃 → 回调永久丢失~~ | ✅ 已在轻量档实现（§4.4 `callback.rs`，无需 daemon）。daemon 化后可由常驻进程定时 flush 替代手动/定时调用 |
 | ~~跑了什么、何时、为何失败无法观测~~ | ✅ 已实现（`events.rs`）：append-only `<task_id>.events.jsonl`，记 job.created/started、item.\*（process）、job.<终态>/cancelled、callback.delivered/failed。查询：CLI `events --task-id` / HTTP `GET /v1/tasks/{id}/events`。SSE 实时推送待后续 |
-| CLI、Web、Agent 包装层要复用同一套任务接口 | ✅ **daemon + HTTP API（MVP 已实现，`serve.rs`）**：`douyin serve --bind 127.0.0.1:8787`，axum 路由 `GET /healthz`、`GET /v1/tasks[?state=]`、`GET /v1/tasks/{id}`、`POST /v1/tasks/{id}/retry\|cancel`、`POST /v1/callbacks/flush`、`POST /v1/maintenance/run`。启动即跑一轮维护 + 每 `--tick-secs` 定时 reap/flush，替代手动命令。入队 `POST /v1/jobs`（kind=process/download/list-works + params）、事件时间线 `GET /v1/tasks/{id}/events`。**MVP 与 CLI 直接 spawn 并存**——把 CLI submit 改为透传 daemon（daemon 未运行回 `service_unavailable`）是最后一步演进 |
+| CLI、Web、Agent 包装层要复用同一套任务接口 | ✅ **daemon + HTTP API（MVP 已实现，`serve.rs`）**：`douyin serve --bind 127.0.0.1:8787`，axum 路由 `GET /healthz`、`GET /v1/tasks[?state=]`、`GET /v1/tasks/{id}`、`POST /v1/tasks/{id}/retry\|cancel`、`POST /v1/callbacks/flush`、`POST /v1/maintenance/run`。启动即跑一轮维护 + 每 `--tick-secs` 定时 reap/flush，替代手动命令。入队 `POST /v1/jobs`（kind=process/download/list-works + params）、事件时间线 `GET /v1/tasks/{id}/events`。✅ **CLI 已硬切透传 daemon**（`client.rs`）：长任务命令（submit/status/retry/cancel/reap/list-tasks/events/callback-flush）只调 daemon，未运行回 `service_unavailable`；daemon 拥有 task_dir，这些命令的 `--task-dir` 不再生效。**立即返回工具**（cookie/resolve/list-works 同步/list-tags/filter/publish）无状态、不经 daemon，保持直连。daemon 地址 `DOUYIN_DAEMON`（缺省 `127.0.0.1:8787`） |
 | 本地用户要可视化运维 | ◐ **Web 模块 MVP 已实现**（`dashboard.html` 内嵌，axum `GET /` 返回，无需 tower-http）：任务列表轮询 + 状态过滤 + 行内 retry/cancel + 详情 + 维护/flush 按钮。默认只听 127.0.0.1。完整档（Artifacts / Credentials / Network Profiles / 事件时间线页 + 静态资源目录）待后续 |
 | 下载产物要被多方按 id 引用 / 远程访问 | **artifact-store**：产物注册为 `{artifact_id, source, local_path, sha256, content_type}`，Agent 包装层按场景给 artifact_id / local_path / HTTP URL |
 
@@ -395,8 +395,8 @@ Cookie 属于敏感凭据：
 ✅ P3  Web 模块 (MVP)                      # 已完成：内嵌 dashboard.html，轮询 /v1/tasks + retry/cancel
 ✅ P2  event log                         # 已完成：events.rs，三类任务生命周期 + callback，CLI/HTTP 查询
 ✅ P2  daemon submit (POST /v1/jobs)      # 已完成：三类任务可经 HTTP 入队（run_submit_job 分派）
-   P2  CLI 透传 daemon                     # 把 CLI 改为优先调 daemon（daemon 未运行回 service_unavailable）
-   P3  credential store / artifact-store  # 解耦凭据与产物（跨系统，依赖外部组件）
+✅ P2  CLI 透传 daemon                     # 已完成：client.rs，长任务命令硬切 daemon，未运行回 service_unavailable
+   P3  credential store / artifact-store  # 解耦凭据与产物（跨系统，依赖外部组件，本仓之外）
 ```
 
 P0/P1 多数落在"轻量档"，不引新依赖、可立即推进；P2 起才进入 daemon 形态。
