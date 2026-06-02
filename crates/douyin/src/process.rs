@@ -76,6 +76,10 @@ pub struct Job {
     pub vad: bool,
     #[serde(default)]
     pub delivery_handle: Option<String>,
+    #[serde(default)]
+    pub unique_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 fn now() -> String {
@@ -136,6 +140,8 @@ pub fn submit(
     asr_model: String,
     vad: bool,
     delivery_handle: Option<String>,
+    unique_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<(TaskStatus, usize)> {
     std::fs::create_dir_all(task_dir)
         .with_context(|| format!("建任务目录 {}", task_dir.display()))?;
@@ -161,6 +167,8 @@ pub fn submit(
         asr_model,
         vad,
         delivery_handle,
+        unique_id,
+        session_id,
     };
     atomic_write(&job_path(task_dir, &task_id), &serde_json::to_string(&job)?)?;
 
@@ -177,15 +185,18 @@ pub fn submit(
     };
     write_status(task_dir, &st)?;
 
-    let exe = std::env::current_exe().context("取当前可执行路径")?;
-    std::process::Command::new(exe)
-        .arg("process-worker")
-        .arg("--task-dir")
-        .arg(task_dir)
-        .arg("--task-id")
-        .arg(&task_id)
-        .spawn()
-        .context("spawn process worker")?;
+    #[cfg(not(test))]
+    {
+        let exe = std::env::current_exe().context("取当前可执行路径")?;
+        std::process::Command::new(exe)
+            .arg("process-worker")
+            .arg("--task-dir")
+            .arg(task_dir)
+            .arg("--task-id")
+            .arg(&task_id)
+            .spawn()
+            .context("spawn process worker")?;
+    }
 
     Ok((st, already))
 }
@@ -296,7 +307,15 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         } else {
             "douyin-process-done"
         };
-        match post_gateway_callback(handle, kind, &st.task_id).await {
+        match post_gateway_callback(
+            handle,
+            kind,
+            &st.task_id,
+            job.unique_id.as_deref(),
+            job.session_id.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 st.notified = true;
                 st.updated_at = now();
@@ -413,12 +432,26 @@ fn write_all_failed(task_dir: &Path, job: &Job, error: String) -> Result<()> {
 
 const GATEWAY_CALLBACK_URL: &str = "http://127.0.0.1:9001/messages";
 
-async fn post_gateway_callback(delivery_handle: &str, kind: &str, task_id: &str) -> Result<()> {
+async fn post_gateway_callback(
+    delivery_handle: &str,
+    kind: &str,
+    task_id: &str,
+    unique_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<()> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("task_id".to_string(), serde_json::json!(task_id));
+    if let Some(unique_id) = unique_id.filter(|s| !s.trim().is_empty()) {
+        payload.insert("unique_id".to_string(), serde_json::json!(unique_id));
+    }
+    if let Some(session_id) = session_id.filter(|s| !s.trim().is_empty()) {
+        payload.insert("session_id".to_string(), serde_json::json!(session_id));
+    }
     let body = serde_json::json!({
         "sender_id": "system:callback",
         "text": format!("<callback kind=\"{kind}\" task_id=\"{task_id}\"/>"),
         "metadata": {
-            "callback": { "kind": kind, "payload": { "task_id": task_id } },
+            "callback": { "kind": kind, "payload": serde_json::Value::Object(payload) },
             "delivery_handle": delivery_handle
         }
     });
@@ -526,6 +559,38 @@ mod tests {
         let back = read_status(&dir, "dyproc1").unwrap().unwrap();
         assert_eq!(back.done, 1);
         assert_eq!(back.results.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn process_job_preserves_unique_id_and_session_id() {
+        let dir = tempdir();
+        let cookie = dir.join("cookie.json");
+        let out_dir = dir.join("out");
+        let transcript_dir = dir.join("transcripts");
+        std::fs::write(&cookie, "{}").unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let (st, _) = submit(
+            &dir,
+            &out_dir,
+            &transcript_dir,
+            &cookie,
+            vec!["123".to_string()],
+            "http://127.0.0.1:8091/v1/audio/transcriptions/from-source".to_string(),
+            "sense-voice".to_string(),
+            true,
+            Some("dh_test".to_string()),
+            Some("82933463317".to_string()),
+            Some("sess-123".to_string()),
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(job_path(&dir, &st.task_id)).unwrap();
+        let job: Job = serde_json::from_str(&raw).unwrap();
+        assert_eq!(job.unique_id.as_deref(), Some("82933463317"));
+        assert_eq!(job.session_id.as_deref(), Some("sess-123"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

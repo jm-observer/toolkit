@@ -1,6 +1,10 @@
 # github-commit-info
 
-获取 GitHub 仓库指定时间范围内的 commit 信息。
+zero 的 Rust 工具集合 workspace。当前包含：
+
+- `github-commit-info`：获取 GitHub 仓库指定时间范围内的 commit 信息。
+- `hf-watcher`：HuggingFace trending / model-card 监听。
+- `douyin`：面向 Agent 的抖音 Cookie、自检、作品列表与异步下载工具。初步设计见 [docs/douyin-design.md](./docs/douyin-design.md)。
 
 [English](./README.md) | [中文](./README_zh.md)
 

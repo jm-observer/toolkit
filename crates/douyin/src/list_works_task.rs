@@ -152,15 +152,18 @@ pub fn submit(
     write_status(task_dir, &st)?;
 
     // spawn 脱离的 worker：同款 list-works-worker 隐藏子命令。父进程退出后子进程继续。
-    let exe = std::env::current_exe().context("取当前可执行路径")?;
-    std::process::Command::new(exe)
-        .arg("list-works-worker")
-        .arg("--task-dir")
-        .arg(task_dir)
-        .arg("--task-id")
-        .arg(&task_id)
-        .spawn()
-        .context("spawn list-works worker")?;
+    #[cfg(not(test))]
+    {
+        let exe = std::env::current_exe().context("取当前可执行路径")?;
+        std::process::Command::new(exe)
+            .arg("list-works-worker")
+            .arg("--task-dir")
+            .arg(task_dir)
+            .arg("--task-id")
+            .arg(&task_id)
+            .spawn()
+            .context("spawn list-works worker")?;
+    }
 
     Ok(st)
 }
@@ -419,16 +422,18 @@ async fn post_gateway_callback(
     task_id: &str,
     session_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("task_id".to_string(), serde_json::json!(task_id));
+    if let Some(session_id) = session_id.filter(|s| !s.trim().is_empty()) {
+        payload.insert("session_id".to_string(), serde_json::json!(session_id));
+    }
     let body = serde_json::json!({
         "sender_id": "system:callback",
         "text": format!("<callback kind=\"{kind}\" task_id=\"{task_id}\"/>"),
         "metadata": {
             "callback": {
                 "kind": kind,
-                "payload": {
-                    "task_id": task_id,
-                    "session_id": session_id
-                }
+                "payload": serde_json::Value::Object(payload)
             },
             "delivery_handle": delivery_handle
         }
@@ -616,6 +621,22 @@ mod tests {
         let job: Job = serde_json::from_str(&job_str).unwrap();
         assert_eq!(job.session_id.as_deref(), Some("test-uuid-abcd"));
         cleanup(&dir);
+    }
+
+    #[test]
+    fn callback_payload_omits_null_session_id() {
+        let mut payload = serde_json::Map::new();
+        payload.insert("task_id".to_string(), serde_json::json!("dylw1"));
+        let body = serde_json::json!({
+            "metadata": {
+                "callback": {
+                    "kind": "douyin-list-works-done",
+                    "payload": serde_json::Value::Object(payload)
+                }
+            }
+        });
+        assert!(body["metadata"]["callback"]["payload"]["session_id"].is_null());
+        assert!(!body.to_string().contains("session_id"));
     }
 
     #[test]

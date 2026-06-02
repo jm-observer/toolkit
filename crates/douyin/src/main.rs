@@ -174,6 +174,14 @@ enum Command {
         /// 回调寻址 handle（从主 Agent prompt 头部 `[Delivery]` 行取）。
         #[arg(long)]
         delivery_handle: Option<String>,
+        /// 博主 unique_id（从 §D 输入里的 `unique_id=...` 原样取）。
+        /// worker POST callback 时回填到 payload，供 §E 精确回填知识包。
+        #[arg(long)]
+        unique_id: Option<String>,
+        /// zero session_id（从主 Agent prompt 头部 `[Session]` 行原样取）。
+        /// worker POST callback 时回填到 payload，sps correlate 据此关联 sub-agent 调用。
+        #[arg(long)]
+        session_id: Option<String>,
     },
     /// 查「下载+ASR」任务进度。
     ProcessStatus {
@@ -345,6 +353,8 @@ async fn main() -> Result<()> {
             asr_model,
             vad,
             delivery_handle,
+            unique_id,
+            session_id,
         } => douyin::run_process_submit(
             &douyin::resolve_task_dir(task_dir)?,
             &douyin::resolve_out_dir(out_dir)?,
@@ -355,6 +365,8 @@ async fn main() -> Result<()> {
             asr_model,
             vad,
             delivery_handle,
+            unique_id,
+            session_id,
         )?,
         Command::ProcessStatus { task_dir, task_id } => {
             douyin::run_process_status(&douyin::resolve_task_dir(task_dir)?, &task_id)?

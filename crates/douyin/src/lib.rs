@@ -130,9 +130,14 @@ pub fn run_process_submit(
     asr_model: String,
     vad: bool,
     delivery_handle: Option<String>,
+    unique_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<Value> {
     if ids.is_empty() {
         return Ok(json!({ "error": "ids 为空", "error_kind": "invalid_input" }));
+    }
+    if let Some(error) = validate_delivery_handle(delivery_handle.as_deref()) {
+        return Ok(json!({ "error": error, "error_kind": "invalid_input" }));
     }
     let (st, already) = process::submit(
         task_dir,
@@ -144,6 +149,8 @@ pub fn run_process_submit(
         asr_model,
         vad,
         delivery_handle,
+        unique_id,
+        session_id,
     )?;
     Ok(json!({
         "task_id": st.task_id,
@@ -436,6 +443,9 @@ pub async fn run_list_works_submit(
     if input.trim().is_empty() {
         return Ok(json!({ "error": "input 为空", "error_kind": "invalid_input" }));
     }
+    if let Some(error) = validate_delivery_handle(delivery_handle) {
+        return Ok(json!({ "error": error, "error_kind": "invalid_input" }));
+    }
     let st = list_works_task::submit(
         task_dir,
         cookie_file,
@@ -449,6 +459,22 @@ pub async fn run_list_works_submit(
         "state": st.state,
         "max_pages": st.max_pages,
     }))
+}
+
+fn validate_delivery_handle(handle: Option<&str>) -> Option<String> {
+    let handle = handle?;
+    let trimmed = handle.trim();
+    if trimmed.is_empty() {
+        return Some("delivery_handle 为空".to_string());
+    }
+    if !trimmed.starts_with("dh_") {
+        return Some("delivery_handle 格式无效：必须以 dh_ 开头".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("placeholder") || lower.contains("demo") {
+        return Some("delivery_handle 疑似占位符，拒绝入队".to_string());
+    }
+    None
 }
 
 /// `list_works_status`：查列博主作品任务进度。
@@ -489,5 +515,18 @@ mod tests {
     fn short_link_detection() {
         assert!(is_short_link("https://v.douyin.com/abc/"));
         assert!(!is_short_link("https://www.douyin.com/user/MS4w"));
+    }
+
+    #[test]
+    fn delivery_handle_validation_accepts_real_handle() {
+        assert!(validate_delivery_handle(Some("dh_8a2f4c91")).is_none());
+        assert!(validate_delivery_handle(None).is_none());
+    }
+
+    #[test]
+    fn delivery_handle_validation_rejects_placeholder() {
+        assert!(validate_delivery_handle(Some("dh_placeholder_for_demo")).is_some());
+        assert!(validate_delivery_handle(Some("placeholder")).is_some());
+        assert!(validate_delivery_handle(Some("abc")).is_some());
     }
 }
