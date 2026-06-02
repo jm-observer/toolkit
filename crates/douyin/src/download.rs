@@ -102,15 +102,18 @@ pub fn submit(
     write_status(task_dir, &st)?;
 
     // spawn 脱离的 worker：同一二进制的隐藏子命令。父进程退出后子进程继续。
-    let exe = std::env::current_exe().context("取当前可执行路径")?;
-    std::process::Command::new(exe)
-        .arg("download-worker")
-        .arg("--task-dir")
-        .arg(task_dir)
-        .arg("--task-id")
-        .arg(&task_id)
-        .spawn()
-        .context("spawn 下载 worker")?;
+    #[cfg(not(test))]
+    {
+        let exe = std::env::current_exe().context("取当前可执行路径")?;
+        std::process::Command::new(exe)
+            .arg("download-worker")
+            .arg("--task-dir")
+            .arg(task_dir)
+            .arg("--task-id")
+            .arg(&task_id)
+            .spawn()
+            .context("spawn 下载 worker")?;
+    }
 
     Ok(st)
 }
@@ -183,12 +186,18 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn download_one(
+/// 下载单个作品的无水印 mp4 到 `out_dir/<aweme_id>.mp4`，返回落盘绝对路径字符串。
+/// 已下载则跳过（幂等，供 process worker 复用）。
+pub(crate) async fn download_one(
     client: &DouyinClient,
     http: &reqwest::Client,
     aweme_id: &str,
     out_dir: &Path,
 ) -> Result<String> {
+    let existing = out_dir.join(format!("{aweme_id}.mp4"));
+    if existing.exists() {
+        return Ok(existing.to_string_lossy().to_string());
+    }
     let (_, urls, _) = client
         .aweme_detail(aweme_id)
         .await

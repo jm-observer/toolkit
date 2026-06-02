@@ -45,6 +45,7 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} -p github_commit_info --features prod
           cargo build --release --target ${{ matrix.target }} -p hf_watcher --features prod
+          cargo build --release --target ${{ matrix.target }} -p douyin --features prod
         env:
           # `cc` crate vars so aws-lc-sys (pulled via reqwest 0.13's rustls
           # feature) builds its C sources with the aarch64 cross-toolchain
@@ -59,7 +60,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          for bin in github-commit-info hf-watcher; do
+          for bin in github-commit-info hf-watcher douyin; do
             cp "target/${{ matrix.target }}/release/${bin}${{ matrix.ext }}" \
                "dist/${bin}_${{ matrix.target }}${{ matrix.ext }}"
           done

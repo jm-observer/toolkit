@@ -28,6 +28,10 @@ pub struct TaskStatus {
     /// 拿名字（避免一次 30s API 调用）。
     #[serde(default)]
     pub nickname: Option<String>,
+    /// 抖音号（unique_id），worker user_profile 后写入。知识包目录键用它
+    /// （Plan 5：`knowledge/douyin/<unique_id>/`）。
+    #[serde(default)]
+    pub unique_id: Option<String>,
     pub pages_fetched: usize,
     pub max_pages: usize,
     pub aweme_count: i64,
@@ -55,6 +59,10 @@ pub struct Job {
     /// 但不发回调（适合 CLI 手动 submit 测试场景）。
     #[serde(default)]
     pub delivery_handle: Option<String>,
+    /// E2E 测试用 zero session_id。worker POST callback 时回填到 payload，
+    /// sps correlate 可据此关联 sub-agent LLM 调用。生产场景传 None 不影响功能。
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 fn now() -> String {
@@ -105,6 +113,7 @@ pub fn submit(
     handle: String,
     max_pages: usize,
     delivery_handle: Option<String>,
+    session_id: Option<String>,
 ) -> Result<TaskStatus> {
     std::fs::create_dir_all(task_dir)
         .with_context(|| format!("建任务目录 {}", task_dir.display()))?;
@@ -120,6 +129,7 @@ pub fn submit(
         max_pages,
         cookie_file: cookie_file.to_path_buf(),
         delivery_handle,
+        session_id,
     };
     atomic_write(&job_path(task_dir, &task_id), &serde_json::to_string(&job)?)?;
 
@@ -128,6 +138,7 @@ pub fn submit(
         state: "queued".into(),
         sec_uid: None,
         nickname: None,
+        unique_id: None,
         pages_fetched: 0,
         max_pages,
         aweme_count: -1,
@@ -141,15 +152,18 @@ pub fn submit(
     write_status(task_dir, &st)?;
 
     // spawn 脱离的 worker：同款 list-works-worker 隐藏子命令。父进程退出后子进程继续。
-    let exe = std::env::current_exe().context("取当前可执行路径")?;
-    std::process::Command::new(exe)
-        .arg("list-works-worker")
-        .arg("--task-dir")
-        .arg(task_dir)
-        .arg("--task-id")
-        .arg(&task_id)
-        .spawn()
-        .context("spawn list-works worker")?;
+    #[cfg(not(test))]
+    {
+        let exe = std::env::current_exe().context("取当前可执行路径")?;
+        std::process::Command::new(exe)
+            .arg("list-works-worker")
+            .arg("--task-dir")
+            .arg(task_dir)
+            .arg("--task-id")
+            .arg(&task_id)
+            .spawn()
+            .context("spawn list-works worker")?;
+    }
 
     Ok(st)
 }
@@ -211,12 +225,20 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             return Ok(());
         }
     };
-    // 同时拿 nickname + aweme_count，写入 TaskStatus 让回调路径不必再 resolve_user。
-    let (nickname, aweme_count) = client
+    // 同时拿 nickname + aweme_count + unique_id，写入 TaskStatus 让回调路径不必再 resolve_user，
+    // 并作为知识包目录键（Plan 5）。
+    let (nickname, aweme_count, unique_id) = client
         .user_profile(&sec_uid)
         .await
-        .map(|(name, c, _)| (Some(name), c))
-        .unwrap_or((None, -1));
+        .map(|(name, c, user)| {
+            let uid = user
+                .get("unique_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            (Some(name), c, uid)
+        })
+        .unwrap_or((None, -1, None));
 
     // ===== 切到 running，开始翻页 =====
     let mut st = TaskStatus {
@@ -224,6 +246,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         state: "running".into(),
         sec_uid: Some(sec_uid.clone()),
         nickname,
+        unique_id,
         pages_fetched: 0,
         max_pages: job.max_pages,
         aweme_count,
@@ -301,12 +324,14 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             let ym = chrono::DateTime::from_timestamp(ts, 0)
                 .map(|d| d.format("%Y-%m").to_string())
                 .unwrap_or_default();
-            serde_json::json!({
+            let mut item = serde_json::json!({
                 "aweme_id": a.get("aweme_id"),
                 "desc": a.get("desc"),
                 "create_time": a.get("create_time"),
                 "create_ym": ym,
-            })
+            });
+            crate::knowledge::enrich_with_tags(&mut item);
+            item
         })
         .collect();
 
@@ -324,6 +349,35 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     st.updated_at = now();
     write_status(task_dir, &st)?;
 
+    // ===== Plan 5：终态落「按 unique_id 的稳定缓存」，供 list_tags / filter_works /
+    // publish_knowledge 使用。缓存目录与 tasks 同级（task_dir 的兄弟 works/）。
+    // unique_id 缺失时退化用 sec_uid 命名，保证调用方两种 id 都能命中。
+    if st.state == "succeeded" || st.state == "partial" {
+        let works_dir = task_dir
+            .parent()
+            .map(|p| p.join("works"))
+            .unwrap_or_else(|| task_dir.join("works"));
+        let cache_id = st.unique_id.clone().unwrap_or_else(|| sec_uid.clone());
+        let cache = crate::knowledge::WorksCache {
+            sec_uid: sec_uid.clone(),
+            unique_id: st.unique_id.clone(),
+            nickname: st.nickname.clone(),
+            aweme_count: st.aweme_count,
+            count: st.count,
+            throttled: st.throttled,
+            cached_at: now(),
+            works: st.works.clone(),
+        };
+        if let Err(e) = crate::knowledge::write_cache(&works_dir, &cache_id, &cache) {
+            log::warn!("[list-works] 写作品缓存失败 id={cache_id}: {e}");
+        } else {
+            log::info!(
+                "[list-works] 作品缓存已落盘 id={cache_id} count={}",
+                st.count
+            );
+        }
+    }
+
     // ===== 业务回调：成功通知 zero gateway，让第二轮 LLM 周期接管 =====
     // 详见 docs/2026-05-31-callback-driven-async-tasks/。
     // delivery_handle 缺失时（CLI 手测场景）跳过回调，只落 status。
@@ -333,7 +387,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         } else {
             "douyin-list-works-done"
         };
-        match post_gateway_callback(handle, kind, &st.task_id).await {
+        match post_gateway_callback(handle, kind, &st.task_id, job.session_id.as_deref()).await {
             Ok(()) => {
                 // 持久化 notified=true 让 alarm 兜底子 Agent 据此走"静默退出"。
                 st.notified = true;
@@ -366,14 +420,20 @@ async fn post_gateway_callback(
     delivery_handle: &str,
     kind: &str,
     task_id: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("task_id".to_string(), serde_json::json!(task_id));
+    if let Some(session_id) = session_id.filter(|s| !s.trim().is_empty()) {
+        payload.insert("session_id".to_string(), serde_json::json!(session_id));
+    }
     let body = serde_json::json!({
         "sender_id": "system:callback",
         "text": format!("<callback kind=\"{kind}\" task_id=\"{task_id}\"/>"),
         "metadata": {
             "callback": {
                 "kind": kind,
-                "payload": { "task_id": task_id }
+                "payload": serde_json::Value::Object(payload)
             },
             "delivery_handle": delivery_handle
         }
@@ -416,6 +476,7 @@ fn write_failed(task_dir: &Path, task_id: &str, max_pages: usize, error: String)
         state: "failed".into(),
         sec_uid: None,
         nickname: None,
+        unique_id: None,
         pages_fetched: 0,
         max_pages,
         aweme_count: -1,
@@ -466,6 +527,7 @@ mod tests {
             state: "running".into(),
             sec_uid: Some("MS4wTEST".into()),
             nickname: Some("熊猫怪兽AI日记".into()),
+            unique_id: Some("82933463317".into()),
             pages_fetched: 3,
             max_pages: 60,
             aweme_count: 81,
@@ -503,6 +565,7 @@ mod tests {
             "https://example.com/user/x".into(),
             60,
             Some("dh_test_handle".into()),
+            None,
         )
         .unwrap();
         let job_str = std::fs::read_to_string(job_path(&dir, &st.task_id)).unwrap();
@@ -520,6 +583,7 @@ mod tests {
             state: "succeeded".into(),
             sec_uid: Some("MS4w".into()),
             nickname: Some("Nick".into()),
+            unique_id: Some("nick123".into()),
             pages_fetched: 5,
             max_pages: 60,
             aweme_count: 81,
@@ -536,6 +600,43 @@ mod tests {
         assert_eq!(read.nickname.as_deref(), Some("Nick"));
         assert_eq!(read.works.len(), 1);
         cleanup(&dir);
+    }
+
+    /// Plan 2 新增：session_id 字段原样落盘 job 文件。
+    #[test]
+    fn submit_persists_session_id_in_job() {
+        let dir = tempdir();
+        let cookie = dir.join("fake-cookie.json");
+        std::fs::write(&cookie, "{}").unwrap();
+        let st = submit(
+            &dir,
+            &cookie,
+            "https://example.com/user/x".into(),
+            60,
+            Some("dh_test".into()),
+            Some("test-uuid-abcd".into()),
+        )
+        .unwrap();
+        let job_str = std::fs::read_to_string(job_path(&dir, &st.task_id)).unwrap();
+        let job: Job = serde_json::from_str(&job_str).unwrap();
+        assert_eq!(job.session_id.as_deref(), Some("test-uuid-abcd"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn callback_payload_omits_null_session_id() {
+        let mut payload = serde_json::Map::new();
+        payload.insert("task_id".to_string(), serde_json::json!("dylw1"));
+        let body = serde_json::json!({
+            "metadata": {
+                "callback": {
+                    "kind": "douyin-list-works-done",
+                    "payload": serde_json::Value::Object(payload)
+                }
+            }
+        });
+        assert!(body["metadata"]["callback"]["payload"]["session_id"].is_null());
+        assert!(!body.to_string().contains("session_id"));
     }
 
     #[test]
@@ -560,6 +661,7 @@ mod tests {
             state: "succeeded".into(),
             sec_uid: None,
             nickname: None,
+            unique_id: None,
             pages_fetched: 0,
             max_pages: 0,
             aweme_count: -1,

@@ -11,7 +11,9 @@
 
 pub mod api;
 pub mod download;
+pub mod knowledge;
 pub mod list_works_task;
+pub mod process;
 pub mod sign;
 
 use anyhow::{Context, Result};
@@ -57,6 +59,111 @@ pub fn resolve_out_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     match explicit {
         Some(p) => Ok(p),
         None => Ok(workspace_dir()?.join("downloads").join("douyin")),
+    }
+}
+
+/// 作品稳定缓存目录（按 unique_id 落 `<id>.json`）：显式优先，否则 `$ZERO_WORKSPACE/douyin/works`。
+pub fn resolve_works_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("douyin").join("works")),
+    }
+}
+
+/// 知识包根目录（每博主 `<unique_id>/`）：显式优先，否则 `$ZERO_WORKSPACE/knowledge/douyin`。
+pub fn resolve_knowledge_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("knowledge").join("douyin")),
+    }
+}
+
+/// 转写缓存目录：显式优先，否则 `$ZERO_WORKSPACE/douyin/transcripts`。
+pub fn resolve_transcript_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("douyin").join("transcripts")),
+    }
+}
+
+/// `list_tags`：聚合某博主已拉取作品的话题标签 + 计数。
+pub fn run_list_tags(works_dir: &Path, unique_id: &str) -> Result<Value> {
+    knowledge::run_list_tags(works_dir, unique_id)
+}
+
+/// `filter_works`：按标签筛选已拉取作品，返回匹配 aweme_ids。
+pub fn run_filter_works(
+    works_dir: &Path,
+    unique_id: &str,
+    tags: &[String],
+    match_all: bool,
+) -> Result<Value> {
+    knowledge::run_filter_works(works_dir, unique_id, tags, match_all)
+}
+
+/// `publish_knowledge`：把缓存里的作品逐条机械写入知识包目录，有转写缓存则回填。
+pub fn run_publish_knowledge(
+    works_dir: &Path,
+    knowledge_dir: &Path,
+    transcript_dir: &Path,
+    unique_id: &str,
+    only_ids: &[String],
+) -> Result<Value> {
+    knowledge::run_publish_knowledge(
+        works_dir,
+        knowledge_dir,
+        transcript_dir,
+        unique_id,
+        only_ids,
+    )
+}
+
+/// `process_submit`：异步入队「下载+ASR」合并任务，立即返回 task_id。
+#[allow(clippy::too_many_arguments)]
+pub fn run_process_submit(
+    task_dir: &Path,
+    out_dir: &Path,
+    transcript_dir: &Path,
+    cookie_file: &Path,
+    ids: Vec<String>,
+    asr_url: String,
+    asr_model: String,
+    vad: bool,
+    delivery_handle: Option<String>,
+    unique_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<Value> {
+    if ids.is_empty() {
+        return Ok(json!({ "error": "ids 为空", "error_kind": "invalid_input" }));
+    }
+    if let Some(error) = validate_delivery_handle(delivery_handle.as_deref()) {
+        return Ok(json!({ "error": error, "error_kind": "invalid_input" }));
+    }
+    let (st, already) = process::submit(
+        task_dir,
+        out_dir,
+        transcript_dir,
+        cookie_file,
+        ids,
+        asr_url,
+        asr_model,
+        vad,
+        delivery_handle,
+        unique_id,
+        session_id,
+    )?;
+    Ok(json!({
+        "task_id": st.task_id,
+        "submitted": st.total,
+        "skipped_already_done": already,
+    }))
+}
+
+/// `process_status`：查「下载+ASR」任务进度。
+pub fn run_process_status(task_dir: &Path, task_id: &str) -> Result<Value> {
+    match process::read_status(task_dir, task_id)? {
+        Some(st) => Ok(serde_json::to_value(st)?),
+        None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
     }
 }
 
@@ -272,12 +379,14 @@ pub async fn run_list_works(cookie_file: &Path, input: &str, max_pages: usize) -
                     let ym = chrono::DateTime::from_timestamp(ts, 0)
                         .map(|d| d.format("%Y-%m").to_string())
                         .unwrap_or_default();
-                    json!({
+                    let mut item = json!({
                         "aweme_id": a.get("aweme_id"),
                         "desc": a.get("desc"),
                         "create_time": a.get("create_time"),
                         "create_ym": ym,
-                    })
+                    });
+                    knowledge::enrich_with_tags(&mut item);
+                    item
                 })
                 .collect();
             Ok(json!({
@@ -329,9 +438,13 @@ pub async fn run_list_works_submit(
     input: &str,
     max_pages: usize,
     delivery_handle: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<Value> {
     if input.trim().is_empty() {
         return Ok(json!({ "error": "input 为空", "error_kind": "invalid_input" }));
+    }
+    if let Some(error) = validate_delivery_handle(delivery_handle) {
+        return Ok(json!({ "error": error, "error_kind": "invalid_input" }));
     }
     let st = list_works_task::submit(
         task_dir,
@@ -339,12 +452,29 @@ pub async fn run_list_works_submit(
         input.to_string(),
         max_pages,
         delivery_handle.map(str::to_string),
+        session_id.map(str::to_string),
     )?;
     Ok(json!({
         "task_id": st.task_id,
         "state": st.state,
         "max_pages": st.max_pages,
     }))
+}
+
+fn validate_delivery_handle(handle: Option<&str>) -> Option<String> {
+    let handle = handle?;
+    let trimmed = handle.trim();
+    if trimmed.is_empty() {
+        return Some("delivery_handle 为空".to_string());
+    }
+    if !trimmed.starts_with("dh_") {
+        return Some("delivery_handle 格式无效：必须以 dh_ 开头".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("placeholder") || lower.contains("demo") {
+        return Some("delivery_handle 疑似占位符，拒绝入队".to_string());
+    }
+    None
 }
 
 /// `list_works_status`：查列博主作品任务进度。
@@ -385,5 +515,18 @@ mod tests {
     fn short_link_detection() {
         assert!(is_short_link("https://v.douyin.com/abc/"));
         assert!(!is_short_link("https://www.douyin.com/user/MS4w"));
+    }
+
+    #[test]
+    fn delivery_handle_validation_accepts_real_handle() {
+        assert!(validate_delivery_handle(Some("dh_8a2f4c91")).is_none());
+        assert!(validate_delivery_handle(None).is_none());
+    }
+
+    #[test]
+    fn delivery_handle_validation_rejects_placeholder() {
+        assert!(validate_delivery_handle(Some("dh_placeholder_for_demo")).is_some());
+        assert!(validate_delivery_handle(Some("placeholder")).is_some());
+        assert!(validate_delivery_handle(Some("abc")).is_some());
     }
 }
