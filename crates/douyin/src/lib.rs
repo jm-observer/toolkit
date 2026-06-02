@@ -185,6 +185,68 @@ pub fn run_process_reap(task_dir: &Path, stale_secs: i64) -> Result<Value> {
     }))
 }
 
+/// `process_cancel`：请求取消一个「下载+ASR」任务（worker 处理下一条前转 cancelled）。
+pub fn run_process_cancel(task_dir: &Path, task_id: &str) -> Result<Value> {
+    if process::cancel(task_dir, task_id)? {
+        Ok(json!({ "task_id": task_id, "cancel_requested": true }))
+    } else {
+        Ok(json!({ "task_id": task_id, "cancel_requested": false, "error_kind": "not_cancellable" }))
+    }
+}
+
+/// `list_tasks`：扫描 task_dir，跨三类任务列出精简摘要（task_id/kind/state/时间）。
+/// 靠 serde 默认忽略各 status 结构的差异字段，只取公共字段，无需按类型分别解析。
+/// `state` 非 None 时按状态过滤。结果按 updated_at 倒序（新任务在前）。
+pub fn run_list_tasks(task_dir: &Path, state: Option<&str>) -> Result<Value> {
+    #[derive(serde::Deserialize)]
+    struct Summary {
+        state: String,
+        #[serde(default)]
+        updated_at: Option<String>,
+        #[serde(default)]
+        heartbeat_at: Option<String>,
+    }
+    let mut tasks: Vec<Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(task_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(task_id) = name.strip_suffix(".status.json") else {
+                continue;
+            };
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(s) = serde_json::from_str::<Summary>(&raw) else {
+                continue;
+            };
+            if let Some(want) = state {
+                if s.state != want {
+                    continue;
+                }
+            }
+            let kind = if task_id.starts_with("dyproc") {
+                "process"
+            } else if task_id.starts_with("dylw") {
+                "list-works"
+            } else {
+                "download"
+            };
+            tasks.push(json!({
+                "task_id": task_id,
+                "kind": kind,
+                "state": s.state,
+                "updated_at": s.updated_at,
+                "heartbeat_at": s.heartbeat_at,
+            }));
+        }
+    }
+    tasks.sort_by(|a, b| b["updated_at"].as_str().cmp(&a["updated_at"].as_str()));
+    Ok(json!({ "count": tasks.len(), "tasks": tasks }))
+}
+
 /// 读 cookie 文件。支持 v1 结构 `{updated_at, value:{...}}` 或裸 `{...}`。
 pub fn load_cookie_file(path: &Path) -> Result<HashMap<String, String>> {
     let raw = std::fs::read_to_string(path)
@@ -460,6 +522,15 @@ pub fn run_download_reap(task_dir: &Path, stale_secs: i64) -> Result<Value> {
     Ok(json!({ "reaped": reaped.len(), "stale_secs": stale_secs, "task_ids": reaped }))
 }
 
+/// `download_cancel`：请求取消一个下载任务（worker 处理下一条前转 cancelled）。
+pub fn run_download_cancel(task_dir: &Path, task_id: &str) -> Result<Value> {
+    if download::cancel(task_dir, task_id)? {
+        Ok(json!({ "task_id": task_id, "cancel_requested": true }))
+    } else {
+        Ok(json!({ "task_id": task_id, "cancel_requested": false, "error_kind": "not_cancellable" }))
+    }
+}
+
 /// `list_works_submit`：异步入队列博主作品，立即返回 task_id（不阻塞）。
 /// `delivery_handle` 透传给 worker，worker 跑完时携带它 POST gateway 触发回调路径
 /// （[ADR docs/adr/2026-05-31-callback-driven-async-tasks.md]）；
@@ -530,6 +601,15 @@ pub fn run_list_works_retry(task_dir: &Path, task_id: &str) -> Result<Value> {
 pub fn run_list_works_reap(task_dir: &Path, stale_secs: i64) -> Result<Value> {
     let reaped = list_works_task::reap(task_dir, stale_secs)?;
     Ok(json!({ "reaped": reaped.len(), "stale_secs": stale_secs, "task_ids": reaped }))
+}
+
+/// `list_works_cancel`：请求取消一个列作品任务（worker 翻下一页前转 cancelled）。
+pub fn run_list_works_cancel(task_dir: &Path, task_id: &str) -> Result<Value> {
+    if list_works_task::cancel(task_dir, task_id)? {
+        Ok(json!({ "task_id": task_id, "cancel_requested": true }))
+    } else {
+        Ok(json!({ "task_id": task_id, "cancel_requested": false, "error_kind": "not_cancellable" }))
+    }
 }
 
 #[cfg(test)]

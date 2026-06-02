@@ -188,6 +188,7 @@ pub fn retry(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>> {
     if !job_path(task_dir, task_id).exists() {
         return Ok(None);
     }
+    clear_cancel(task_dir, task_id); // 重跑前清掉残留 cancel 标志
     if let Some(mut st) = read_status(task_dir, task_id)? {
         st.state = "queued".into();
         st.updated_at = now();
@@ -197,6 +198,30 @@ pub fn retry(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>> {
     }
     spawn_worker(task_dir, task_id)?;
     read_status(task_dir, task_id)
+}
+
+fn cancel_flag_path(task_dir: &Path, task_id: &str) -> PathBuf {
+    task_dir.join(format!("{task_id}.cancel"))
+}
+
+/// 请求取消任务：写 cancel 标志，worker 翻下一页前检查并转 cancelled。
+/// 仅 queued/running 有意义；返回 false 表示不存在或已终态。
+pub fn cancel(task_dir: &Path, task_id: &str) -> Result<bool> {
+    match read_status(task_dir, task_id)? {
+        Some(st) if st.state == "queued" || st.state == "running" => {
+            std::fs::write(cancel_flag_path(task_dir, task_id), "").context("写 cancel 标志")?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn is_cancelled(task_dir: &Path, task_id: &str) -> bool {
+    cancel_flag_path(task_dir, task_id).exists()
+}
+
+fn clear_cancel(task_dir: &Path, task_id: &str) {
+    let _ = std::fs::remove_file(cancel_flag_path(task_dir, task_id));
 }
 
 /// 扫描并重启心跳超时（stale）的 running 列作品任务。返回被 reap 的 task_id。
@@ -349,6 +374,15 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     loop {
         if st.pages_fetched >= job.max_pages {
             break;
+        }
+        // 取消检查：翻下一页前看 cancel 标志，命中则转 cancelled 干净退出。
+        if is_cancelled(task_dir, task_id) {
+            clear_cancel(task_dir, task_id);
+            st.state = "cancelled".into();
+            st.updated_at = now();
+            let _ = write_status(task_dir, &st);
+            log::info!("[list-works] cancelled task_id={task_id}");
+            return Ok(());
         }
         let page = match client.user_post_page(&sec_uid, cursor).await {
             Ok(p) => p,
@@ -777,6 +811,18 @@ mod tests {
     fn retry_missing_job_returns_none() {
         let dir = tempdir();
         assert!(retry(&dir, "dylw404").unwrap().is_none());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn cancel_writes_flag_only_for_active_tasks() {
+        let dir = tempdir();
+        assert!(!cancel(&dir, "dylw_x").unwrap());
+        write_status(&dir, &running_status("dylw1", &now())).unwrap();
+        assert!(cancel(&dir, "dylw1").unwrap());
+        assert!(is_cancelled(&dir, "dylw1"));
+        clear_cancel(&dir, "dylw1");
+        assert!(!is_cancelled(&dir, "dylw1"));
         cleanup(&dir);
     }
 

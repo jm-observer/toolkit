@@ -90,6 +90,13 @@ enum Command {
         #[arg(long, default_value_t = 600)]
         stale_secs: i64,
     },
+    /// 请求取消一个下载任务（worker 处理下一条前转 cancelled）。
+    DownloadCancel {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
     /// 内部：后台下载 worker（由 download-submit spawn，勿手动调）。
     #[command(hide = true)]
     DownloadWorker {
@@ -139,6 +146,21 @@ enum Command {
         task_dir: Option<PathBuf>,
         #[arg(long, default_value_t = 600)]
         stale_secs: i64,
+    },
+    /// 请求取消一个列作品任务（worker 翻下一页前转 cancelled）。
+    ListWorksCancel {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 跨三类任务列出精简摘要（task_id/kind/state/时间），可按 --state 过滤。
+    ListTasks {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        /// 可选状态过滤：queued/running/succeeded/partial/failed/cancelled。
+        #[arg(long)]
+        state: Option<String>,
     },
     /// 聚合某博主已拉取作品的话题标签 + 计数（Plan 5 标签预筛）。
     ListTags {
@@ -232,6 +254,13 @@ enum Command {
         /// 心跳超时阈值（秒）：running 任务心跳距今超过此值即判 stale 并重启。
         #[arg(long, default_value_t = 600)]
         stale_secs: i64,
+    },
+    /// 请求取消一个「下载+ASR」任务（worker 处理下一条前转 cancelled）。
+    ProcessCancel {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
     },
     /// 内部：后台 process worker（由 process-submit spawn，勿手动调）。
     #[command(hide = true)]
@@ -344,6 +373,9 @@ async fn main() -> Result<()> {
             task_dir,
             stale_secs,
         } => douyin::run_download_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
+        Command::DownloadCancel { task_dir, task_id } => {
+            douyin::run_download_cancel(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
         Command::ListWorksSubmit {
             cookie_file,
             task_dir,
@@ -372,6 +404,12 @@ async fn main() -> Result<()> {
             task_dir,
             stale_secs,
         } => douyin::run_list_works_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
+        Command::ListWorksCancel { task_dir, task_id } => {
+            douyin::run_list_works_cancel(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
+        Command::ListTasks { task_dir, state } => {
+            douyin::run_list_tasks(&douyin::resolve_task_dir(task_dir)?, state.as_deref())?
+        }
         Command::ListTags {
             works_dir,
             unique_id,
@@ -435,6 +473,9 @@ async fn main() -> Result<()> {
             task_dir,
             stale_secs,
         } => douyin::run_process_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
+        Command::ProcessCancel { task_dir, task_id } => {
+            douyin::run_process_cancel(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
         Command::DownloadWorker { .. }
         | Command::ListWorksWorker { .. }
         | Command::ProcessWorker { .. }

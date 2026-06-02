@@ -129,6 +129,7 @@ pub fn retry(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>> {
     if !job_path(task_dir, task_id).exists() {
         return Ok(None);
     }
+    clear_cancel(task_dir, task_id); // 重跑前清掉残留 cancel 标志，避免一启动又被取消
     if let Some(mut st) = read_status(task_dir, task_id)? {
         st.state = "queued".into();
         st.updated_at = now();
@@ -196,6 +197,30 @@ fn is_stale_running(
         return false;
     };
     (now - hb.with_timezone(&chrono::Utc)).num_seconds() >= stale_secs
+}
+
+fn cancel_flag_path(task_dir: &Path, task_id: &str) -> PathBuf {
+    task_dir.join(format!("{task_id}.cancel"))
+}
+
+/// 请求取消任务：写 cancel 标志文件。worker 处理下一条前检查并转 cancelled。
+/// 仅对 queued/running 任务有意义；返回 false 表示任务不存在或已终态（无可取消）。
+pub fn cancel(task_dir: &Path, task_id: &str) -> Result<bool> {
+    match read_status(task_dir, task_id)? {
+        Some(st) if st.state == "queued" || st.state == "running" => {
+            std::fs::write(cancel_flag_path(task_dir, task_id), "").context("写 cancel 标志")?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn is_cancelled(task_dir: &Path, task_id: &str) -> bool {
+    cancel_flag_path(task_dir, task_id).exists()
+}
+
+fn clear_cancel(task_dir: &Path, task_id: &str) {
+    let _ = std::fs::remove_file(cancel_flag_path(task_dir, task_id));
 }
 
 fn transcript_path(transcript_dir: &Path, aweme_id: &str) -> PathBuf {
@@ -334,6 +359,15 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
 
     let http = reqwest::Client::new();
     for id in &job.ids {
+        // 取消检查：处理每条前看 cancel 标志，命中则转 cancelled 干净退出。
+        if is_cancelled(task_dir, task_id) {
+            clear_cancel(task_dir, task_id);
+            st.state = "cancelled".into();
+            st.updated_at = now();
+            write_status(task_dir, &st)?;
+            log::info!("[process] cancelled task_id={task_id}");
+            return Ok(());
+        }
         // 幂等：已有 transcript 缓存则跳过下载+转写。
         if transcript_path(&job.transcript_dir, id).exists() {
             let has_seg = read_transcript(&job.transcript_dir, id)
@@ -736,6 +770,27 @@ mod tests {
     fn retry_missing_job_returns_none() {
         let dir = tempdir();
         assert!(retry(&dir, "nope").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancel_writes_flag_only_for_active_tasks() {
+        let dir = tempdir();
+        // 不存在 → false
+        assert!(!cancel(&dir, "dyproc_x").unwrap());
+        // running → true，落 cancel 标志
+        write_status(&dir, &running_status("dyproc_run", &now())).unwrap();
+        assert!(cancel(&dir, "dyproc_run").unwrap());
+        assert!(is_cancelled(&dir, "dyproc_run"));
+        // 终态 → false，不落标志
+        let mut done = running_status("dyproc_done", &now());
+        done.state = "succeeded".into();
+        write_status(&dir, &done).unwrap();
+        assert!(!cancel(&dir, "dyproc_done").unwrap());
+        assert!(!is_cancelled(&dir, "dyproc_done"));
+        // clear 后标志消失
+        clear_cancel(&dir, "dyproc_run");
+        assert!(!is_cancelled(&dir, "dyproc_run"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
