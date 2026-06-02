@@ -234,6 +234,59 @@ pub fn read_transcript(transcript_dir: &Path, aweme_id: &str) -> Option<Transcri
     serde_json::from_str(&raw).ok()
 }
 
+/// 已有 transcript 缓存则构造一条 skipped item（跨任务幂等）。
+fn skipped_item(transcript_dir: &Path, id: &str) -> ItemResult {
+    let has_seg = read_transcript(transcript_dir, id)
+        .map(|t| t.has_segments)
+        .unwrap_or(false);
+    ItemResult {
+        aweme_id: id.to_string(),
+        state: "skipped".into(),
+        downloaded: true,
+        transcribed: true,
+        has_segments: has_seg,
+        error: None,
+    }
+}
+
+/// 按 ids 构建初始 item 账本：已有 transcript 缓存的标 skipped，其余 queued。
+/// 去重从此看账本不看文件——submit 时一次性建全量账本，worker 消费。
+fn build_ledger(transcript_dir: &Path, ids: &[String]) -> Vec<ItemResult> {
+    ids.iter()
+        .map(|id| {
+            if transcript_path(transcript_dir, id).exists() {
+                skipped_item(transcript_dir, id)
+            } else {
+                ItemResult {
+                    aweme_id: id.clone(),
+                    state: "queued".into(),
+                    downloaded: false,
+                    transcribed: false,
+                    has_segments: false,
+                    error: None,
+                }
+            }
+        })
+        .collect()
+}
+
+/// 从 item 账本重算任务级计数。done 含 succeeded + skipped。
+fn recompute_counts(st: &mut TaskStatus) {
+    st.total = st.results.len();
+    st.skipped = st.results.iter().filter(|r| r.state == "skipped").count();
+    st.failed = st.results.iter().filter(|r| r.state == "failed").count();
+    st.done = st
+        .results
+        .iter()
+        .filter(|r| r.state == "succeeded" || r.state == "skipped")
+        .count();
+}
+
+/// item 是否已到成功终态（不再重做）。failed 不算终态——retry 可重跑。
+fn is_terminal_item(state: &str) -> bool {
+    state == "succeeded" || state == "skipped"
+}
+
 /// 入队：生成 `dyproc<ms>` task_id，落 job + 初始 status，spawn 脱离 worker，立即返回。
 #[allow(clippy::too_many_arguments)]
 pub fn submit(
@@ -278,18 +331,19 @@ pub fn submit(
     };
     atomic_write(&job_path(task_dir, &task_id), &serde_json::to_string(&job)?)?;
 
-    let st = TaskStatus {
+    let mut st = TaskStatus {
         task_id: task_id.clone(),
         state: "queued".into(),
         total: ids.len(),
         done: 0,
         failed: 0,
         skipped: 0,
-        results: vec![],
+        results: build_ledger(transcript_dir, &ids),
         updated_at: now(),
         heartbeat_at: None,
         notified: false,
     };
+    recompute_counts(&mut st);
     write_status(task_dir, &st)?;
 
     spawn_worker(task_dir, &task_id)?;
@@ -343,22 +397,37 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         }
     };
 
-    let mut st = TaskStatus {
-        task_id: task_id.into(),
-        state: "running".into(),
-        total: job.ids.len(),
-        done: 0,
-        failed: 0,
-        skipped: 0,
-        results: vec![],
-        updated_at: now(),
-        heartbeat_at: Some(now()),
-        notified: false,
+    // 账本驱动：复用 submit / 上次运行落下的 item 账本，只处理未完成项（resume 语义）。
+    // 缺失时按 job.ids 重建（防御，正常 submit 已写入）。
+    let mut st = match read_status(task_dir, task_id)? {
+        Some(mut s) => {
+            s.state = "running".into();
+            s.heartbeat_at = Some(now());
+            s.updated_at = now();
+            s
+        }
+        None => TaskStatus {
+            task_id: task_id.into(),
+            state: "running".into(),
+            total: job.ids.len(),
+            done: 0,
+            failed: 0,
+            skipped: 0,
+            results: build_ledger(&job.transcript_dir, &job.ids),
+            updated_at: now(),
+            heartbeat_at: Some(now()),
+            notified: false,
+        },
     };
+    recompute_counts(&mut st);
     write_status(task_dir, &st)?;
 
     let http = reqwest::Client::new();
-    for id in &job.ids {
+    for i in 0..st.results.len() {
+        // 账本去重：已到成功终态（succeeded/skipped）的不重做。
+        if is_terminal_item(&st.results[i].state) {
+            continue;
+        }
         // 取消检查：处理每条前看 cancel 标志，命中则转 cancelled 干净退出。
         if is_cancelled(task_dir, task_id) {
             clear_cancel(task_dir, task_id);
@@ -368,57 +437,37 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             log::info!("[process] cancelled task_id={task_id}");
             return Ok(());
         }
-        // 幂等：已有 transcript 缓存则跳过下载+转写。
-        if transcript_path(&job.transcript_dir, id).exists() {
-            let has_seg = read_transcript(&job.transcript_dir, id)
-                .map(|t| t.has_segments)
-                .unwrap_or(false);
-            st.skipped += 1;
-            st.done += 1;
-            st.results.push(ItemResult {
-                aweme_id: id.clone(),
-                state: "skipped".into(),
-                downloaded: true,
-                transcribed: true,
-                has_segments: has_seg,
-                error: None,
-            });
-            st.updated_at = now();
-            st.heartbeat_at = Some(now());
-            write_status(task_dir, &st)?;
-            continue;
-        }
-
-        let res = process_one(&client, &http, id, &job).await;
-        match res {
-            Ok(has_seg) => {
-                st.done += 1;
-                st.results.push(ItemResult {
-                    aweme_id: id.clone(),
+        let id = st.results[i].aweme_id.clone();
+        // 跨任务幂等快速路径：submit 后才出现的 transcript（别的任务下好的）也跳过。
+        if transcript_path(&job.transcript_dir, &id).exists() {
+            st.results[i] = skipped_item(&job.transcript_dir, &id);
+        } else {
+            st.results[i] = match process_one(&client, &http, &id, &job).await {
+                Ok(has_seg) => ItemResult {
+                    aweme_id: id,
                     state: "succeeded".into(),
                     downloaded: true,
                     transcribed: true,
                     has_segments: has_seg,
                     error: None,
-                });
-            }
-            Err(e) => {
-                st.failed += 1;
-                st.results.push(ItemResult {
-                    aweme_id: id.clone(),
+                },
+                Err(e) => ItemResult {
+                    aweme_id: id,
                     state: "failed".into(),
                     downloaded: false,
                     transcribed: false,
                     has_segments: false,
                     error: Some(e.to_string()),
-                });
-            }
+                },
+            };
         }
+        recompute_counts(&mut st);
         st.updated_at = now();
         st.heartbeat_at = Some(now());
         write_status(task_dir, &st)?;
     }
 
+    recompute_counts(&mut st);
     st.state = if st.failed == 0 {
         "succeeded"
     } else if st.done == 0 {
@@ -740,6 +789,98 @@ mod tests {
     fn retry_missing_job_returns_none() {
         let dir = tempdir();
         assert!(retry(&dir, "nope").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_ledger_marks_existing_as_skipped() {
+        let dir = tempdir();
+        // 7a 已有 transcript → skipped；7b 无 → queued
+        let t = Transcript {
+            aweme_id: "7a".into(),
+            text: "x".into(),
+            segments: vec![],
+            has_segments: false,
+            asr_model: "m".into(),
+            transcribed_at: now(),
+        };
+        atomic_write(&transcript_path(&dir, "7a"), &serde_json::to_string(&t).unwrap()).unwrap();
+        let ledger = build_ledger(&dir, &["7a".to_string(), "7b".to_string()]);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger[0].state, "skipped");
+        assert!(ledger[0].downloaded && ledger[0].transcribed);
+        assert_eq!(ledger[1].state, "queued");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recompute_counts_from_ledger() {
+        let mut st = TaskStatus {
+            task_id: "dyproc1".into(),
+            state: "running".into(),
+            total: 0,
+            done: 0,
+            failed: 0,
+            skipped: 0,
+            results: vec![
+                ItemResult { aweme_id: "a".into(), state: "succeeded".into(), downloaded: true, transcribed: true, has_segments: false, error: None },
+                ItemResult { aweme_id: "b".into(), state: "skipped".into(), downloaded: true, transcribed: true, has_segments: false, error: None },
+                ItemResult { aweme_id: "c".into(), state: "failed".into(), downloaded: false, transcribed: false, has_segments: false, error: Some("e".into()) },
+                ItemResult { aweme_id: "d".into(), state: "queued".into(), downloaded: false, transcribed: false, has_segments: false, error: None },
+            ],
+            updated_at: now(),
+            heartbeat_at: None,
+            notified: false,
+        };
+        recompute_counts(&mut st);
+        assert_eq!(st.total, 4);
+        assert_eq!(st.skipped, 1);
+        assert_eq!(st.failed, 1);
+        assert_eq!(st.done, 2); // succeeded + skipped
+    }
+
+    #[test]
+    fn submit_prepopulates_ledger() {
+        let dir = tempdir();
+        let cookie = dir.join("cookie.json");
+        let out_dir = dir.join("out");
+        let transcript_dir = dir.join("transcripts");
+        std::fs::write(&cookie, "{}").unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        // 预置 7a 的 transcript → submit 时账本应标 skipped
+        let t = Transcript {
+            aweme_id: "7a".into(),
+            text: "x".into(),
+            segments: vec![],
+            has_segments: false,
+            asr_model: "m".into(),
+            transcribed_at: now(),
+        };
+        atomic_write(
+            &transcript_path(&transcript_dir, "7a"),
+            &serde_json::to_string(&t).unwrap(),
+        )
+        .unwrap();
+        let (st, already) = submit(
+            &dir,
+            &out_dir,
+            &transcript_dir,
+            &cookie,
+            vec!["7a".to_string(), "7b".to_string()],
+            "http://127.0.0.1:8091/x".to_string(),
+            "sense-voice".to_string(),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(already, 1);
+        assert_eq!(st.results.len(), 2);
+        assert_eq!(st.skipped, 1);
+        assert_eq!(st.results[0].state, "skipped");
+        assert_eq!(st.results[1].state, "queued");
         std::fs::remove_dir_all(&dir).ok();
     }
 
