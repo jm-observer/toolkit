@@ -76,6 +76,20 @@ enum Command {
         #[arg(long)]
         task_id: String,
     },
+    /// 重启一个下载任务（重 spawn worker，已下载文件靠幂等跳过）。
+    DownloadRetry {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 扫描并重启心跳超时（stale）的 running 下载任务。
+    DownloadReap {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 600)]
+        stale_secs: i64,
+    },
     /// 内部：后台下载 worker（由 download-submit spawn，勿手动调）。
     #[command(hide = true)]
     DownloadWorker {
@@ -111,6 +125,20 @@ enum Command {
         task_dir: Option<PathBuf>,
         #[arg(long)]
         task_id: String,
+    },
+    /// 重启一个列作品任务（重 spawn worker，整任务重头翻页）。
+    ListWorksRetry {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 扫描并重启心跳超时（stale）的 running 列作品任务。
+    ListWorksReap {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 600)]
+        stale_secs: i64,
     },
     /// 聚合某博主已拉取作品的话题标签 + 计数（Plan 5 标签预筛）。
     ListTags {
@@ -309,6 +337,13 @@ async fn main() -> Result<()> {
         Command::DownloadStatus { task_dir, task_id } => {
             douyin::run_download_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
         }
+        Command::DownloadRetry { task_dir, task_id } => {
+            douyin::run_download_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
+        Command::DownloadReap {
+            task_dir,
+            stale_secs,
+        } => douyin::run_download_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
         Command::ListWorksSubmit {
             cookie_file,
             task_dir,
@@ -330,6 +365,13 @@ async fn main() -> Result<()> {
         Command::ListWorksStatus { task_dir, task_id } => {
             douyin::run_list_works_status(&douyin::resolve_task_dir(task_dir)?, &task_id).await?
         }
+        Command::ListWorksRetry { task_dir, task_id } => {
+            douyin::run_list_works_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
+        Command::ListWorksReap {
+            task_dir,
+            stale_secs,
+        } => douyin::run_list_works_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
         Command::ListTags {
             works_dir,
             unique_id,

@@ -446,6 +446,20 @@ pub async fn run_download_status(task_dir: &Path, task_id: &str) -> Result<Value
     }
 }
 
+/// `download_retry`：重启一个下载任务（重 spawn worker，已下载文件靠幂等跳过）。
+pub fn run_download_retry(task_dir: &Path, task_id: &str) -> Result<Value> {
+    match download::retry(task_dir, task_id)? {
+        Some(st) => Ok(json!({ "task_id": st.task_id, "state": st.state, "retried": true })),
+        None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
+    }
+}
+
+/// `download_reap`：扫描并重启心跳超时的 running 下载任务。
+pub fn run_download_reap(task_dir: &Path, stale_secs: i64) -> Result<Value> {
+    let reaped = download::reap(task_dir, stale_secs)?;
+    Ok(json!({ "reaped": reaped.len(), "stale_secs": stale_secs, "task_ids": reaped }))
+}
+
 /// `list_works_submit`：异步入队列博主作品，立即返回 task_id（不阻塞）。
 /// `delivery_handle` 透传给 worker，worker 跑完时携带它 POST gateway 触发回调路径
 /// （[ADR docs/adr/2026-05-31-callback-driven-async-tasks.md]）；
@@ -502,6 +516,20 @@ pub async fn run_list_works_status(task_dir: &Path, task_id: &str) -> Result<Val
         Some(st) => Ok(serde_json::to_value(st)?),
         None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
     }
+}
+
+/// `list_works_retry`：重启一个列作品任务（重 spawn worker，整任务重头翻页）。
+pub fn run_list_works_retry(task_dir: &Path, task_id: &str) -> Result<Value> {
+    match list_works_task::retry(task_dir, task_id)? {
+        Some(st) => Ok(json!({ "task_id": st.task_id, "state": st.state, "retried": true })),
+        None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
+    }
+}
+
+/// `list_works_reap`：扫描并重启心跳超时的 running 列作品任务。
+pub fn run_list_works_reap(task_dir: &Path, stale_secs: i64) -> Result<Value> {
+    let reaped = list_works_task::reap(task_dir, stale_secs)?;
+    Ok(json!({ "reaped": reaped.len(), "stale_secs": stale_secs, "task_ids": reaped }))
 }
 
 #[cfg(test)]

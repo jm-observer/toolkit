@@ -19,6 +19,9 @@ pub struct TaskStatus {
     pub files: Vec<String>,
     pub errors: Vec<String>,
     pub updated_at: String,
+    /// worker 存活证明：running 期间周期刷新。reap 据此判 stale（见 process.rs 同款）。
+    #[serde(default)]
+    pub heartbeat_at: Option<String>,
 }
 
 /// 任务作业描述（submit 写、worker 读）。
@@ -98,10 +101,18 @@ pub fn submit(
         files: vec![],
         errors: vec![],
         updated_at: now(),
+        heartbeat_at: None,
     };
     write_status(task_dir, &st)?;
 
-    // spawn 脱离的 worker：同一二进制的隐藏子命令。父进程退出后子进程继续。
+    spawn_worker(task_dir, &task_id)?;
+
+    Ok(st)
+}
+
+/// spawn 脱离的 download worker 子进程（隐藏子命令）。父进程退出后子进程继续。
+/// submit / retry / reap 共用。test 下不真正起进程。
+fn spawn_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     #[cfg(not(test))]
     {
         let exe = std::env::current_exe().context("取当前可执行路径")?;
@@ -110,12 +121,86 @@ pub fn submit(
             .arg("--task-dir")
             .arg(task_dir)
             .arg("--task-id")
-            .arg(&task_id)
+            .arg(task_id)
             .spawn()
             .context("spawn 下载 worker")?;
     }
+    #[cfg(test)]
+    {
+        let _ = (task_dir, task_id);
+    }
+    Ok(())
+}
 
-    Ok(st)
+/// 重启一个下载任务：标回 queued 并重 spawn worker。worker 重建进度，已下载文件
+/// 靠 `download_one` 幂等 skip。返回 None 表示 job 不存在。
+pub fn retry(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>> {
+    if !job_path(task_dir, task_id).exists() {
+        return Ok(None);
+    }
+    if let Some(mut st) = read_status(task_dir, task_id)? {
+        st.state = "queued".into();
+        st.updated_at = now();
+        st.heartbeat_at = Some(now());
+        write_status(task_dir, &st)?;
+    }
+    spawn_worker(task_dir, task_id)?;
+    read_status(task_dir, task_id)
+}
+
+/// 扫描并重启心跳超时（stale）的 running 下载任务。返回被 reap 的 task_id。
+pub fn reap(task_dir: &Path, stale_secs: i64) -> Result<Vec<String>> {
+    let ids = stale_running_task_ids(task_dir, stale_secs)?;
+    for id in &ids {
+        retry(task_dir, id)?;
+    }
+    Ok(ids)
+}
+
+/// 列出 stale 的 running download 任务 id（前缀 `dy` 后接数字，区别于 dylw/dyproc）。
+fn stale_running_task_ids(task_dir: &Path, stale_secs: i64) -> Result<Vec<String>> {
+    let now = chrono::Utc::now();
+    let mut out = Vec::new();
+    let rd = match std::fs::read_dir(task_dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(task_id) = name.strip_suffix(".status.json") else {
+            continue;
+        };
+        // download task_id = dy<digits>；dylw/dyproc 的 status 结构不同，解析也会失败。
+        let is_download = task_id
+            .strip_prefix("dy")
+            .and_then(|r| r.chars().next())
+            .is_some_and(|c| c.is_ascii_digit());
+        if !is_download {
+            continue;
+        }
+        let Ok(Some(st)) = read_status(task_dir, task_id) else {
+            continue;
+        };
+        if is_stale_running(&st, stale_secs, now) {
+            out.push(task_id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// 判定 stale running：state==running 且心跳（缺则退化用 updated_at）距今 ≥ stale_secs。
+fn is_stale_running(st: &TaskStatus, stale_secs: i64, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if st.state != "running" {
+        return false;
+    }
+    let ts = st.heartbeat_at.as_deref().unwrap_or(&st.updated_at);
+    let Ok(hb) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return false;
+    };
+    (now - hb.with_timezone(&chrono::Utc)).num_seconds() >= stale_secs
 }
 
 /// worker 入口：读 job，逐个下载，原子更新 status。由 submit spawn，独立进程运行。
@@ -139,6 +224,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
                 files: vec![],
                 errors: vec![format!("cookie 不可用: {e}")],
                 updated_at: now(),
+                heartbeat_at: None,
             };
             write_status(task_dir, &st)?;
             return Ok(());
@@ -154,6 +240,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         files: vec![],
         errors: vec![],
         updated_at: now(),
+        heartbeat_at: Some(now()),
     };
     write_status(task_dir, &st)?;
 
@@ -170,6 +257,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             }
         }
         st.updated_at = now();
+        st.heartbeat_at = Some(now());
         write_status(task_dir, &st)?;
     }
 
@@ -299,6 +387,53 @@ mod tests {
         finalize_download(&dir, "7a", bytes, None).unwrap();
         assert_eq!(std::fs::read(dir.join("7a.mp4")).unwrap(), bytes);
         assert!(!dir.join("7a.mp4.partial").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn running_status(task_id: &str, heartbeat: &str) -> TaskStatus {
+        TaskStatus {
+            task_id: task_id.into(),
+            state: "running".into(),
+            total: 1,
+            done: 0,
+            failed: 0,
+            files: vec![],
+            errors: vec![],
+            updated_at: heartbeat.into(),
+            heartbeat_at: Some(heartbeat.into()),
+        }
+    }
+
+    #[test]
+    fn is_stale_running_detects_timeout() {
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        let fresh = (now - chrono::Duration::seconds(10)).to_rfc3339();
+        assert!(is_stale_running(&running_status("dy1", &old), 600, now));
+        assert!(!is_stale_running(&running_status("dy1", &fresh), 600, now));
+        let mut done = running_status("dy1", &old);
+        done.state = "succeeded".into();
+        assert!(!is_stale_running(&done, 600, now));
+    }
+
+    #[test]
+    fn stale_scan_picks_only_download_running() {
+        let dir = tempdir();
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        // stale running download 任务 → 命中
+        write_status(&dir, &running_status("dy1780000000", &old)).unwrap();
+        // dylw 前缀（list_works）→ 即便文件名像，前缀判定也排除
+        write_status(&dir, &running_status("dylw1780000000", &old)).unwrap();
+        let ids = stale_running_task_ids(&dir, 600).unwrap();
+        assert_eq!(ids, vec!["dy1780000000".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retry_missing_job_returns_none() {
+        let dir = tempdir();
+        assert!(retry(&dir, "dy404").unwrap().is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

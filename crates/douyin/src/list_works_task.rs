@@ -40,6 +40,9 @@ pub struct TaskStatus {
     pub works: Vec<Value>,
     pub error: Option<String>,
     pub updated_at: String,
+    /// worker 存活证明：running 期间每页刷新。reap 据此判 stale（见 process.rs 同款）。
+    #[serde(default)]
+    pub heartbeat_at: Option<String>,
     /// 是否已经成功 POST gateway 通知 zero。`false` = 业务回调通道还没成功
     /// （worker 未到 POST 步、或 POST 3 次都失败），`true` = 已成功通知。
     /// alarm 兜底子 Agent 据此判定"补救下发"还是"静默退出"。
@@ -147,11 +150,19 @@ pub fn submit(
         works: vec![],
         error: None,
         updated_at: now(),
+        heartbeat_at: None,
         notified: false,
     };
     write_status(task_dir, &st)?;
 
-    // spawn 脱离的 worker：同款 list-works-worker 隐藏子命令。父进程退出后子进程继续。
+    spawn_worker(task_dir, &task_id)?;
+
+    Ok(st)
+}
+
+/// spawn 脱离的 list-works worker 子进程（隐藏子命令）。父进程退出后子进程继续。
+/// submit / retry / reap 共用。test 下不真正起进程。
+fn spawn_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     #[cfg(not(test))]
     {
         let exe = std::env::current_exe().context("取当前可执行路径")?;
@@ -160,12 +171,82 @@ pub fn submit(
             .arg("--task-dir")
             .arg(task_dir)
             .arg("--task-id")
-            .arg(&task_id)
+            .arg(task_id)
             .spawn()
             .context("spawn list-works worker")?;
     }
+    #[cfg(test)]
+    {
+        let _ = (task_dir, task_id);
+    }
+    Ok(())
+}
 
-    Ok(st)
+/// 重启一个列作品任务：标回 queued 并重 spawn worker。worker 重头翻页重建结果
+/// （list 无逐项缓存，retry 即整任务重跑）。返回 None 表示 job 不存在。
+pub fn retry(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>> {
+    if !job_path(task_dir, task_id).exists() {
+        return Ok(None);
+    }
+    if let Some(mut st) = read_status(task_dir, task_id)? {
+        st.state = "queued".into();
+        st.updated_at = now();
+        st.heartbeat_at = Some(now());
+        st.notified = false;
+        write_status(task_dir, &st)?;
+    }
+    spawn_worker(task_dir, task_id)?;
+    read_status(task_dir, task_id)
+}
+
+/// 扫描并重启心跳超时（stale）的 running 列作品任务。返回被 reap 的 task_id。
+pub fn reap(task_dir: &Path, stale_secs: i64) -> Result<Vec<String>> {
+    let ids = stale_running_task_ids(task_dir, stale_secs)?;
+    for id in &ids {
+        retry(task_dir, id)?;
+    }
+    Ok(ids)
+}
+
+/// 列出 stale 的 running list-works 任务 id（前缀 `dylw`）。
+fn stale_running_task_ids(task_dir: &Path, stale_secs: i64) -> Result<Vec<String>> {
+    let now = chrono::Utc::now();
+    let mut out = Vec::new();
+    let rd = match std::fs::read_dir(task_dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(task_id) = name.strip_suffix(".status.json") else {
+            continue;
+        };
+        if !task_id.starts_with("dylw") {
+            continue;
+        }
+        let Ok(Some(st)) = read_status(task_dir, task_id) else {
+            continue;
+        };
+        if is_stale_running(&st, stale_secs, now) {
+            out.push(task_id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// 判定 stale running：state==running 且心跳（缺则退化用 updated_at）距今 ≥ stale_secs。
+fn is_stale_running(st: &TaskStatus, stale_secs: i64, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if st.state != "running" {
+        return false;
+    }
+    let ts = st.heartbeat_at.as_deref().unwrap_or(&st.updated_at);
+    let Ok(hb) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return false;
+    };
+    (now - hb.with_timezone(&chrono::Utc)).num_seconds() >= stale_secs
 }
 
 /// worker 入口：读 job，resolve sec_uid，循环翻页直到 has_more 结束或撞 max_pages；
@@ -255,6 +336,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         works: vec![],
         error: None,
         updated_at: now(),
+        heartbeat_at: Some(now()),
         notified: false,
     };
     write_status(task_dir, &st)?;
@@ -305,6 +387,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         st.count = all.len();
         st.throttled = shadow_throttle;
         st.updated_at = now();
+        st.heartbeat_at = Some(now());
         let _ = write_status(task_dir, &st);
         if !page.has_more || page.max_cursor == cursor {
             break;
@@ -485,6 +568,7 @@ fn write_failed(task_dir: &Path, task_id: &str, max_pages: usize, error: String)
         works: vec![],
         error: Some(error),
         updated_at: now(),
+        heartbeat_at: None,
         notified: false,
     };
     write_status(task_dir, &st)
@@ -536,6 +620,7 @@ mod tests {
             works: vec![],
             error: None,
             updated_at: "2026-05-31T00:00:00Z".into(),
+            heartbeat_at: None,
             notified: false,
         };
         write_status(&dir, &st).unwrap();
@@ -592,6 +677,7 @@ mod tests {
             works: vec![serde_json::json!({"aweme_id": "1"})],
             error: None,
             updated_at: "2026-05-31T00:00:00Z".into(),
+            heartbeat_at: None,
             notified: true,
         };
         write_status(&dir, &st).unwrap();
@@ -639,6 +725,70 @@ mod tests {
         assert!(!body.to_string().contains("session_id"));
     }
 
+    fn running_status(task_id: &str, heartbeat: &str) -> TaskStatus {
+        TaskStatus {
+            task_id: task_id.into(),
+            state: "running".into(),
+            sec_uid: Some("MS4w".into()),
+            nickname: None,
+            unique_id: None,
+            pages_fetched: 1,
+            max_pages: 60,
+            aweme_count: -1,
+            count: 0,
+            throttled: false,
+            works: vec![],
+            error: None,
+            updated_at: heartbeat.into(),
+            heartbeat_at: Some(heartbeat.into()),
+            notified: false,
+        }
+    }
+
+    #[test]
+    fn is_stale_running_detects_timeout() {
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        let fresh = (now - chrono::Duration::seconds(10)).to_rfc3339();
+        assert!(is_stale_running(&running_status("dylw1", &old), 600, now));
+        assert!(!is_stale_running(&running_status("dylw1", &fresh), 600, now));
+        let mut done = running_status("dylw1", &old);
+        done.state = "succeeded".into();
+        assert!(!is_stale_running(&done, 600, now));
+    }
+
+    #[test]
+    fn stale_scan_picks_only_listworks_running() {
+        let dir = tempdir();
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        let fresh = now.to_rfc3339();
+        write_status(&dir, &running_status("dylw_stale", &old)).unwrap();
+        write_status(&dir, &running_status("dylw_fresh", &fresh)).unwrap();
+        let mut done = running_status("dylw_done", &old);
+        done.state = "partial".into();
+        write_status(&dir, &done).unwrap();
+        let ids = stale_running_task_ids(&dir, 600).unwrap();
+        assert_eq!(ids, vec!["dylw_stale".to_string()]);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn retry_missing_job_returns_none() {
+        let dir = tempdir();
+        assert!(retry(&dir, "dylw404").unwrap().is_none());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn old_status_without_heartbeat_deserializes() {
+        let raw = r#"{"task_id":"dylw1","state":"running","sec_uid":null,
+            "pages_fetched":0,"max_pages":60,"aweme_count":-1,"count":0,
+            "throttled":false,"works":[],"error":null,"updated_at":"2026-05-31T00:00:00Z"}"#;
+        let st: TaskStatus = serde_json::from_str(raw).unwrap();
+        assert!(st.heartbeat_at.is_none());
+    }
+
     #[test]
     fn atomic_write_replaces_existing_content() {
         let dir = tempdir();
@@ -670,6 +820,7 @@ mod tests {
             works: vec![],
             error: None,
             updated_at: "2026-05-31T00:00:00Z".into(),
+            heartbeat_at: None,
             notified: false,
         };
         write_status(&dir, &st).unwrap();
