@@ -167,6 +167,24 @@ pub fn run_process_status(task_dir: &Path, task_id: &str) -> Result<Value> {
     }
 }
 
+/// `process_retry`：重启一个「下载+ASR」任务（重 spawn worker，已完成 item 自动跳过）。
+pub fn run_process_retry(task_dir: &Path, task_id: &str) -> Result<Value> {
+    match process::retry(task_dir, task_id)? {
+        Some(st) => Ok(json!({ "task_id": st.task_id, "state": st.state, "retried": true })),
+        None => Ok(json!({ "error": "任务不存在", "error_kind": "not_found", "task_id": task_id })),
+    }
+}
+
+/// `process_reap`：扫描并重启心跳超时（stale）的 running 任务，返回被 reap 的 task_id。
+pub fn run_process_reap(task_dir: &Path, stale_secs: i64) -> Result<Value> {
+    let reaped = process::reap(task_dir, stale_secs)?;
+    Ok(json!({
+        "reaped": reaped.len(),
+        "stale_secs": stale_secs,
+        "task_ids": reaped,
+    }))
+}
+
 /// 读 cookie 文件。支持 v1 结构 `{updated_at, value:{...}}` 或裸 `{...}`。
 pub fn load_cookie_file(path: &Path) -> Result<HashMap<String, String>> {
     let raw = std::fs::read_to_string(path)

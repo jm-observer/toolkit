@@ -187,7 +187,10 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
 }
 
 /// 下载单个作品的无水印 mp4 到 `out_dir/<aweme_id>.mp4`，返回落盘绝对路径字符串。
-/// 已下载则跳过（幂等，供 process worker 复用）。
+///
+/// 幂等：最终 `.mp4` 存在即视为已完成并跳过。这一判断之所以可信，是因为落盘走
+/// `.partial` + atomic rename（见 [`finalize_download`]）——崩溃只会留下 `.partial`，
+/// 最终 `.mp4` 永远不会是半截文件。供 process worker 复用。
 pub(crate) async fn download_one(
     client: &DouyinClient,
     http: &reqwest::Client,
@@ -203,17 +206,99 @@ pub(crate) async fn download_one(
         .await
         .map_err(|e| anyhow::anyhow!("详情失败: {e}"))?;
     let url = urls.first().context("无 play_addr 下载 URL")?;
-    let bytes = http
+    let resp = http
         .get(url)
         .header("user-agent", crate::api::UA)
         .header("referer", "https://www.douyin.com/")
         .send()
         .await
-        .context("下载请求")?
-        .bytes()
-        .await
-        .context("读下载内容")?;
+        .context("下载请求")?;
+    let declared_len = resp.content_length();
+    let bytes = resp.bytes().await.context("读下载内容")?;
+    finalize_download(out_dir, aweme_id, &bytes, declared_len)
+}
+
+/// 校验 + 原子落盘：核对 Content-Length（若服务端声明）→ 写 `<id>.mp4.partial` →
+/// atomic rename 到 `<id>.mp4`。
+///
+/// 三道闸口防止"半截/损坏/空文件被当成已完成"：
+/// 1. 空内容直接判失败，不留空 mp4（否则会被 `exists()` 永久误判为已下载）。
+/// 2. 声明了 Content-Length 时核对字节数，截断响应不落盘。
+/// 3. 先写 `.partial` 再 rename，最终 `.mp4` 只在完整写入后出现。
+fn finalize_download(
+    out_dir: &Path,
+    aweme_id: &str,
+    bytes: &[u8],
+    declared_len: Option<u64>,
+) -> Result<String> {
+    if bytes.is_empty() {
+        anyhow::bail!("下载内容为空");
+    }
+    if let Some(len) = declared_len {
+        if bytes.len() as u64 != len {
+            anyhow::bail!("下载不完整：声明 {len} 字节，实收 {} 字节", bytes.len());
+        }
+    }
     let out = out_dir.join(format!("{aweme_id}.mp4"));
-    std::fs::write(&out, &bytes).with_context(|| format!("写 {}", out.display()))?;
+    let partial = out_dir.join(format!("{aweme_id}.mp4.partial"));
+    std::fs::write(&partial, bytes).with_context(|| format!("写 {}", partial.display()))?;
+    std::fs::rename(&partial, &out).with_context(|| format!("替换 {}", out.display()))?;
     Ok(out.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tempdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static C: AtomicU64 = AtomicU64::new(0);
+        let id = C.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("douyin-dl-test-{}-{}", std::process::id(), id));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn finalize_writes_final_and_leaves_no_partial() {
+        let dir = tempdir();
+        let bytes = b"fake mp4 bytes";
+        let path = finalize_download(&dir, "7a", bytes, Some(bytes.len() as u64)).unwrap();
+        assert!(dir.join("7a.mp4").exists());
+        assert!(!dir.join("7a.mp4.partial").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finalize_rejects_empty() {
+        let dir = tempdir();
+        assert!(finalize_download(&dir, "7a", b"", None).is_err());
+        // 不留空 mp4，否则会被 exists() 永久误判为已下载。
+        assert!(!dir.join("7a.mp4").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finalize_rejects_length_mismatch() {
+        let dir = tempdir();
+        // 声明 100 字节但只收到 5 字节（截断响应）。
+        let err = finalize_download(&dir, "7a", b"short", Some(100));
+        assert!(err.is_err());
+        assert!(!dir.join("7a.mp4").exists());
+        assert!(!dir.join("7a.mp4.partial").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finalize_overwrites_stale_partial() {
+        let dir = tempdir();
+        // 上次崩溃残留的 .partial，应被新一次写入覆盖、不致 rename 失败。
+        std::fs::write(dir.join("7a.mp4.partial"), b"stale crash leftover").unwrap();
+        let bytes = b"fresh complete bytes";
+        finalize_download(&dir, "7a", bytes, None).unwrap();
+        assert_eq!(std::fs::read(dir.join("7a.mp4")).unwrap(), bytes);
+        assert!(!dir.join("7a.mp4.partial").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

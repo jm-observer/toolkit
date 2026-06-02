@@ -1,140 +1,304 @@
-# douyin crate 初步设计
+# douyin crate 设计
 
-## 定位
+## 0. 定位与文档约定
 
-`crates/douyin` 是 zero Agent 工具库中的抖音工具。它不是通用网盘，也不是面向人工浏览的个人文件管理器，而是面向 Agent 的任务型下载与内容处理入口。
+`crates/douyin` 是 zero Agent 工具库中的抖音工具。它不是通用网盘，也不是面向人工浏览的个人文件管理器，而是**面向 Agent 的任务型工具**。
 
-当前目标聚焦在经过授权的内容处理场景：
+本文档的主轴不是"抖音知识库这个产品"，而是一个更基础的问题：
 
-- 维护抖音 Web 访问所需的 Cookie。
-- 解析博主主页 URL / 短链 / `sec_uid`。
-- 拉取博主作品元数据。
-- 按 `aweme_id` 异步下载视频文件。
-- 可选地串联本地 ASR 服务，生成转写缓存，再写入知识包。
+> 当一个 Agent 工具要执行**长任务**（批量下载、爬取、转写）时，正确的工具定义是什么？
 
-工具只应处理用户有权访问和保存的内容，不提供绕过平台权限、付费限制、DRM 或隐私边界的能力。
+抖音下载只是这个问题的第一个实例。因此本文档先立"工具分层模型"和"长任务工具契约"两章作为主干（第 1、2 章），再展示抖音知识录入流水线如何落到这套契约上（第 3 章）。
 
-## 工具形态
+合规边界：工具只应处理用户有权访问和保存的内容，不提供绕过平台权限、付费限制、DRM 或隐私边界的能力。
 
-`douyin` 使用两类命令。
+文档中每个能力点标注三种状态之一：
 
-立即返回命令：
+- **已实现** —— 当前代码已落地。
+- **契约欠债** —— 属于"长任务工具契约"（第 2 章）要求、但当前机制尚未满足的项。这不是"未来可选"，而是已知的设计欠账。
+- **🔭 机制演进** —— 补契约欠债的实现选项，可按痛点优先级推进（第 7 章）。
 
-- `cookie-status`
-- `set-cookie`
-- `search-user`
-- `resolve-user`
-- `list-works`
-- `list-tags`
-- `filter-works`
-- `publish-knowledge`
-- `update`
+---
 
-任务型命令：
+## 1. 工具分层模型
 
-- `download-submit` / `download-status`
-- `list-works-submit` / `list-works-status`
-- `process-submit` / `process-status`
+Agent 工具的第一要务是**可预测、可恢复、可查询**。不同任务对这三点的需求差异极大，因此 douyin 的命令分成两层。
 
-任务型命令采用 submit/status 模式：submit 只创建任务并立即返回 `task_id`，实际工作由同一二进制的隐藏 worker 子命令执行。这样可以避开 Agent 单次工具调用超时，也给后续服务化留下接口。
+### 1.1 立即返回工具
 
-## CLI 与服务交互
+适合元信息抓取、轻量解析、单次查询。
 
-服务化后，`douyin` 应保持 CLI 作为 Agent 的稳定入口，但实际任务调度交给本地 daemon。
+特征：
 
-推荐交互模式：
+- 单次调用内完成。
+- stdout 输出一行紧凑 JSON。
+- 业务失败也返回 `{error, error_kind}`，退出码保持 0。
+- 不需要持久状态。
+- Agent 不需要轮询。
+
+### 1.2 长任务工具
+
+适合批量下载、同步、爬取、模型/数据集缓存、批量处理。
+
+特征：
+
+- `submit` 立即返回 `job_id`（或兼容字段 `task_id`）。
+- 实际工作由后台 worker / daemon 执行。
+- Agent 通过 `status` / `list` / `retry` / `cancel` 查询和控制。
+- 状态持久化，进程重启后能恢复。
+- 输出使用原子写入，避免半成品污染结果。
+
+### 1.3 为什么必须二分
+
+长任务天然会遇到：**中断、重复、并发、网络失败、部分完成**。
+
+如果把长下载做成一个普通命令，Agent 只能知道"这次进程结束了吗"——进程一旦被杀、网络一断，Agent 既不知道失败、也无法续传，更无从判重。
+
+如果把它做成长任务工具，Agent 可以：提交任务、查询进度、重试失败、继续未完成内容。这正是"可预测、可恢复、可查询"的落点。
+
+判定准则：一个能力只要**可能中断、可能重复、可能部分完成**，就应该做成长任务工具，而不是单次 CLI 调用硬跑到底。
+
+### 1.4 现有命令归类
+
+| 层 | 命令 |
+|---|---|
+| 立即返回 | `cookie-status` `set-cookie` `search-user` `resolve-user` `list-works` `list-tags` `filter-works` `publish-knowledge` `update` |
+| 长任务（submit/status） | `download-submit`/`download-status`、`list-works-submit`/`list-works-status`、`process-submit`/`process-status` |
+
+> 注意 `list-works` 同时存在立即返回版（同步拉取，适合小博主 / CLI 手测）与长任务版（`list-works-submit`，适合大博主 + callback）。两条路径产出的 work item 结构由 `enrich_with_tags` 保证一致。
+
+---
+
+## 2. 长任务工具契约
+
+这是本设计的核心。一个长任务工具**必须**提供下列保证；当前机制未满足的项即为"契约欠债"，是第 7 章演进的来源。
+
+### 2.1 接口面
 
 ```text
-Agent -> douyin CLI -> local daemon -> task store / worker / artifact store
+submit            创建任务，立即返回 job_id          —— 已实现
+status <job_id>   查询单任务进度 + item 明细           —— 已实现
+list [--state]    列任务，按状态过滤                   —— 契约欠债
+retry <job_id>    重跑未完成的 item（不重做已完成）     —— 契约欠债
+cancel <job_id>   请求取消，worker 处理前检查           —— 契约欠债
 ```
 
-CLI 的职责：
+submit 立即返回的目的是**避开 Agent 单次工具调用超时**（详见第 4 章）。
 
-- 解析命令行参数。
-- 读取用户可见配置，例如 service endpoint。
-- 调用本地 daemon API。
-- 将 daemon 响应压缩为一行 JSON 输出到 stdout。
-- 当 daemon 未运行时，返回明确错误或按配置尝试拉起服务。
+### 2.2 持久化与可恢复
 
-daemon 的职责：
+状态落盘为文件，进程重启后能据此恢复，而非全靠内存。
 
-- 持久化 job / item / artifact / callback 状态。
-- 调度 worker。
-- 维护 Cookie / network profile 健康状态。
-- 执行任务恢复、重试、取消和清理。
-- 向 Web 模块提供任务查询 API。
+- **已实现**：`<task_id>.job.json`（作业描述）+ `<task_id>.status.json`（进度），原子写（先 `.tmp` 再 rename），避免 Agent 读到半截 JSON。
+- **契约欠债**：当前没有任何"重启后接管未完成任务"的逻辑。worker 是 fire-and-forget 子进程，崩了 status 永远停在 `running`，没人发现，更不会续跑。
 
-默认通信方式建议使用本机 HTTP：
+### 2.3 幂等去重（回答："如何确保不重复下载？"）
+
+当前去重是**靠文件存在判断**（`process.rs:244` transcript 存在则 skip；download 同理）。致命弱点：**崩溃残留的半截 mp4 会被误判为"已完成"**。正确的去重分三层：
+
+| 层 | 机制 | 解决什么 | 状态 |
+|---|---|---|---|
+| L1 记录级账本 | job 内每个 `aweme_id` 一条 item 记录（state: queued/running/done/failed/skipped），**去重看记录不看文件** | 同任务内 / 跨任务都不重复入队 | 部分（status.results 是雏形，但非"先建账本再消费"模型） |
+| L2 文件级原子性 | 下到 `<id>.mp4.partial`，校验 `Content-Length` 后 atomic rename → `<id>.mp4`；空内容/长度不符判失败不落盘 | 崩溃残留的 `.partial` 不被误判完成（修掉当前最大隐患） | **已实现**（`download::finalize_download`） |
+| L3 完整性校验 | 记录 `content_length` / `sha256`，重跑时校验而非盲信存在 | 防损坏文件、支持断点续传判断 | 契约欠债 |
+
+L2 已落地：`download_one` 经 `finalize_download` 落盘，"最终 `.mp4` 存在"从此是可信的完成信号；process worker 复用同一路径。
+
+### 2.4 失败可发现、可重启（回答："中断后如何发现失败并重启？"）
+
+原来**完全没有**：worker 崩溃后 status 停在 `running`，无人知晓。**process 任务已补齐**（download/list_works 待按同一模式推广）：
+
+1. **心跳**：worker running 期间每写一次 status 刷新 `heartbeat_at`（与 `updated_at` 区分——后者是"进度变更"，前者是"存活证明"）。`#[serde(default)]` 保证旧 status 文件仍可反序列化。
+2. **判活**：`is_stale_running` = `state==running` 且心跳（缺则退化用 `updated_at`）距今 ≥ `stale_secs`；时间无法解析时保守判为非 stale，不误杀。
+3. **谁来扫**：
+   - 无 daemon（当前机制）：`process-reap [--stale-secs N]` 命令显式触发，把 stale 的 `running` 重启。
+   - 有 daemon（演进）：daemon 启动时自动扫，运行期定时扫。
+4. **retry**：`process-retry --task-id X` 把 status 标回 `queued` 并重 spawn worker；worker 重建进度，已完成（有 transcript 缓存）的 item 靠幂等 skip——不重下已完成内容。`reap` 内部即对每个 stale 任务调 `retry`。
+5. **cancel**（契约欠债）：写 cancel 标志文件，worker 每条处理前检查并优雅退出。
+
+状态机（三类长任务统一）：
 
 ```text
-http://127.0.0.1:8787
+queued -> running -> succeeded     全部成功
+queued -> running -> partial       部分成功（done>0 且 failed>0）
+queued -> running -> failed        全失败 / 前置失败（cookie 不可用等）
+running -> stale -> queued         心跳超时被 reap 重新入队（演进）
+running -> cancelled               收到 cancel 标志（演进）
 ```
 
-原因是 CLI、Web UI、Agent 包装层都能复用同一套接口；后续如果要支持跨进程或远程访问，只需要在 daemon 层增加认证和监听配置。
+### 2.5 现状 vs 契约差距表
 
-CLI 到 daemon 的 API 草案：
+这张表是第 7 章 roadmap 的直接来源。
+
+| 契约保证 | 状态 |
+|---|---|
+| submit → job_id | ✅ 已实现 |
+| status 查询 + item 明细 | ✅ 已实现 |
+| 状态持久化（job/status 文件 + 原子写） | ✅ 已实现 |
+| 去重 L1 记录级账本 | ◐ 雏形（results 列表，非账本驱动） |
+| 去重 L2 `.partial` + atomic rename | ✅ 已实现（`download::finalize_download`） |
+| 去重 L3 content_length/sha256 | ◐ 已校验 Content-Length；sha256 / 落盘记录待补 |
+| 失败发现（heartbeat + stale 扫描） | ✅ process 已实现（`heartbeat_at` + `process-reap`）；download/list_works 待推广 |
+| retry（重启任务，幂等续传） | ✅ process 已实现（`process-retry`）；download/list_works 待推广 |
+| cancel | ❌ 契约欠债 |
+| list（按状态过滤） | ❌ 契约欠债 |
+| 进程重启后恢复 | ◐ process 可经 `process-reap` 恢复；启动自动扫描需 daemon |
+
+---
+
+## 3. 产品实例：知识录入流水线
+
+抖音知识录入是"长任务工具契约"的第一个完整实例，展示契约如何落到真实场景。
+
+### 3.1 第一性设计决策：完整性由代码保证
+
+目标：授权范围内，把单个博主的作品变成**可被 Agent 检索的、完整性可信的**本地知识库。
+
+最关键的决策（`knowledge.rs:5`）：
+
+> **完整性由 `for` 循环保证，不经任何 LLM 判断。** `publish_knowledge` 遍历 `works[]` 一条写一条 md，"列全 N 条"由循环保证。
+
+这是为了在结构上消灭"LLM 漏列/省略 N 条作品"这一问题（known-issues #2）。它不是实现细节，而是整个流水线为什么这样切分的根本原因——把"完整性"从概率性的 LLM 输出里拿出来，交给确定性的代码。
+
+### 3.2 端到端流水线
 
 ```text
-POST /v1/jobs
-GET  /v1/jobs/{job_id}
-GET  /v1/jobs?state=running
-POST /v1/jobs/{job_id}/retry
-POST /v1/jobs/{job_id}/cancel
-GET  /v1/artifacts/{artifact_id}
-GET  /v1/artifacts/{artifact_id}/download
+list_works_submit                      列博主作品（长任务，带 callback）
+   └─> works/<unique_id>.json          稳定缓存：sec_uid/nickname/aweme_count/throttled/works[]
+        │
+        ├─> list_tags                  聚合话题标签 + 计数（机械解析 desc 里的 #话题）
+        ├─> filter_works               按标签筛选 → 匹配的 aweme_ids
+        │
+        └─> process_submit (ids)       逐条：下载 mp4 + ASR 转写（长任务，带 callback）
+               └─> transcripts/<aweme_id>.json   {text, segments[], has_segments}
+                    │
+                    └─> publish_knowledge        遍历 works[] 一条写一条 md，有转写则回填
+                           └─> knowledge/<unique_id>/
+                                  ├── profile.md            博主资料
+                                  ├── index.md              作品索引（时间倒序）
+                                  └── transcripts/<id>.md   逐条：文案 + ASR 文本 + 字幕时间轴
 ```
 
-`download-submit` 对应：
+### 3.3 各阶段输入/输出/落盘/幂等
 
-```http
-POST /v1/jobs
+| 阶段 | 输入 | 落盘 | 幂等策略 |
+|---|---|---|---|
+| `list_works_submit` | 主页 URL / 短链 / sec_uid | `works/<unique_id>.json` | 终态覆盖写（按 unique_id 稳定键） |
+| `list_tags` / `filter_works` | unique_id (+ tags) | 无（纯读缓存） | 无副作用 |
+| `process_submit` | aweme_id 列表 | `transcripts/<aweme_id>.json` | transcript 存在则 skip（见 §2.3 L2 欠债） |
+| `publish_knowledge` | unique_id (+ only_ids) | `knowledge/<unique_id>/**` | 内容确定，重跑覆盖同名文件 |
+
+### 3.4 知识包产物结构
+
+```text
+<knowledge_dir>/<unique_id>/
+├── profile.md              # YAML frontmatter + 博主资料（含 throttled 告警）
+├── index.md                # 作品清单，按 create_ym 倒序，链到各条目
+└── transcripts/
+    └── <aweme_id>.md       # frontmatter(tags/has_transcript/has_subtitle/asr_model)
+                            #   ## 文案 / ## 视频内容(ASR) / ## 字幕(时间轴)
 ```
 
-请求：
+ASR 未就绪时各条目留"（待转写）"占位，待 `process` 跑完由 `publish_knowledge` 回填——这就是 callback 第二轮周期接管的典型动作（第 4 章）。
+
+---
+
+## 4. callback 驱动的两轮 Agent 循环
+
+长任务"submit 立返"解决了不阻塞，但带来新问题：**任务跑完了，谁来接着做下一步？** 答案是 callback 驱动的第二轮 LLM 周期。
+
+### 4.1 为什么需要
+
+- submit 立即返回 → 避开 Agent 单次工具调用超时。
+- 但 Agent 不应"一直轮询"等结果——那会占住一个昂贵的 LLM 上下文。
+- 所以：worker 跑完终态后**主动 POST 回调** zero gateway，触发**第二轮独立的 LLM 周期**接管后续（如自动调 `publish_knowledge` 回填字幕）。
+
+### 4.2 机制
+
+worker 进入终态时 POST `http://127.0.0.1:9001/messages`：
 
 ```json
 {
-  "kind": "douyin.download",
-  "params": {
-    "aweme_ids": ["123", "456"],
-    "credential_id": "douyin-main",
-    "out_dir": "..."
-  },
-  "notify": {
-    "mode": "webhook",
-    "url": "http://127.0.0.1:9001/messages",
+  "sender_id": "system:callback",
+  "text": "<callback kind=\"douyin-process-done\" task_id=\"dyproc...\"/>",
+  "metadata": {
+    "callback": {
+      "kind": "douyin-process-done",
+      "payload": { "task_id": "...", "unique_id": "...", "session_id": "..." }
+    },
     "delivery_handle": "dh_..."
   }
 }
 ```
 
-响应：
+寻址参数用途：
 
-```json
-{"job_id":"job_...","state":"queued","total":2}
+- `delivery_handle`：回调寻址 handle，从主 Agent prompt 头部 `[Delivery]` 行取。**缺失则 worker 只落 status 不发回调**（CLI 手测场景）。
+- `unique_id`：供第二轮精确回填对应博主的知识包。
+- `session_id`：供 sps correlate 关联 sub-agent 调用链。
+
+payload 动态组装：`null`/空字段不序列化（见 `process.rs:442`），避免下游收到无意义的 `null`。
+
+### 4.3 防呆：delivery_handle 校验
+
+`validate_delivery_handle`（`lib.rs:464`）在入队前拒绝：空串、非 `dh_` 前缀、含 `placeholder`/`demo` 的疑似占位符。意图是防止 Agent 把 prompt 模板里的占位符当真 handle 提交，导致任务跑完回调发往一个不存在的地址。
+
+### 4.4 当前重试与欠债
+
+- **已实现**：callback POST 失败重试 3 次，间隔 5s；成功则置 `notified=true`（`process.rs:459`）。
+- **契约欠债**：重试只在 worker 进程存活期间有效。若三次都失败、或 worker 在发回调前就崩了，**这个回调就永久丢失**——任务完成了，但发起方永远不知道。这正是第 7 章"持久 callback 队列"要补的。
+
+### 4.5 ⚠️ 待修：ADR 引用悬空
+
+代码（`lib.rs:433` 注释）引用 `docs/adr/2026-05-31-callback-driven-async-tasks.md`，但该文件在本仓库不存在。需二选一：把 ADR 落进本仓，或把代码注释改为引用本章。
+
+---
+
+## 5. 任务与文件模型
+
+### 5.1 三类任务统一视图
+
+download / list-works / process 共享同一套模型：
+
+```text
+<task_dir>/
+├── <task_id>.job.json      # 作业描述：submit 写、worker 读
+└── <task_id>.status.json   # 进度：worker 增量原子写、status 命令读
 ```
 
-CLI 输出应基本透传这个响应：
+`task_id` 形如 `dyproc<ms>` / `dy<ms>`，由 submit 时的毫秒时间戳生成。
 
-```json
-{"task_id":"job_...","state":"queued","total":2}
+### 5.2 status schema（process 为例）
+
+```jsonc
+{
+  "task_id": "dyproc...",
+  "state": "running",          // queued|running|succeeded|partial|failed
+  "total": 10, "done": 6, "failed": 1, "skipped": 2,
+  "results": [                 // item 明细（§2.3 L1 账本的雏形）
+    { "aweme_id": "...", "state": "succeeded",
+      "downloaded": true, "transcribed": true, "has_segments": true }
+  ],
+  "updated_at": "2026-...",
+  "notified": false            // callback 是否已送达
+}
 ```
 
-为了兼容当前实现，可以保留 `task_id` 字段；服务内部可以统一使用 `job_id`，CLI 输出时同时给出二者：
+**演进需新增字段**（对应 §2.4）：`heartbeat_at`、`attempt`、`next_retry_at`、item 级 `error_kind` / `content_length` / `sha256`。
 
-```json
-{"task_id":"job_...","job_id":"job_...","state":"queued","total":2}
-```
+### 5.3 worker 单进程内已收敛的健壮性
 
-daemon 未运行时，CLI 应返回：
+- 前置失败（cookie 缺失/不可用）→ 一次性 `write_all_failed`，所有 item 标失败，不空跑。
+- 每条处理后增量 `write_status` → status 始终反映最新进度，Agent 中途查也准。
+- 单条失败不影响其余条目 → 终态可能是 `partial`。
 
-```json
-{"error":"douyin service 未运行","error_kind":"service_unavailable","hint":"运行 douyin serve"}
-```
+这些是"单进程存活期间"的健壮性；跨进程崩溃恢复仍是欠债（§2.2、§2.4）。
 
-不建议 CLI 在生产环境静默降级为前台长任务，因为这会重新引入 Agent 调用超时问题。开发场景可以提供 `--local-worker` 或继续保留当前隐藏 worker 模式作为兼容路径。
+---
 
-## stdout 契约
+## 6. stdout 契约 / Cookie / 风控
+
+### 6.1 stdout 契约
 
 除隐藏 worker 和 `update` 外，正常命令只向 stdout 输出一行紧凑 JSON。业务失败仍输出 JSON，退出码保持 0：
 
@@ -144,289 +308,85 @@ daemon 未运行时，CLI 应返回：
 
 日志统一走 `custom-utils` logger。prod 构建启用 `--features prod`，日志落文件，stdout 保持干净。
 
-## Cookie 与访问身份
+### 6.2 Cookie 与访问身份
 
-Cookie 文件由 `--cookie-file` 显式指定；未指定时解析到：
+Cookie 文件由 `--cookie-file` 显式指定；未指定时按 `resolve_*` 规则回退：
 
 ```text
 $ZERO_WORKSPACE/douyin/cookies.json
+# ZERO_WORKSPACE 未设置时回退到 $HOME(/USERPROFILE)/.config/zero
 ```
 
-文件支持两种形态：
-
-```json
-{"updated_at":"...","value":{"msToken":"...","s_v_web_id":"..."}}
-```
-
-或裸对象：
-
-```json
-{"msToken":"...","s_v_web_id":"..."}
-```
+文件支持 v1 结构 `{updated_at, value:{...}}` 或裸对象 `{...}`。
 
 Cookie 属于敏感凭据：
 
-- 不在 stdout 中输出 Cookie 值。
-- 不在日志中输出 Cookie 值。
-- `cookie-status` 只返回字段数量、必要字段是否存在、登录态探测结果。
+- 不在 stdout / 日志中输出 Cookie 值。
+- `cookie-status` 只返回字段数量、必要字段是否存在（msToken/s_v_web_id/ttwid + session）、登录态实测结果。
 
-后续如果引入通用 credential store，`douyin` 应改为引用 `credential_id`，由外部 Agent 包装层解析真实 Cookie。
+> 🔭 后续如引入通用 credential store，`douyin` 应改为引用 `credential_id`，由外部 Agent 包装层解析真实 Cookie。
 
-## 下载任务模型
+### 6.3 风控与网络策略
 
-当前 `download-submit` 的输入是 `aweme_id` 列表：
-
-```text
-douyin download-submit --ids 123,456 --cookie-file <path> --task-dir <path> --out-dir <path>
-```
-
-返回：
-
-```json
-{"task_id":"dy...","state":"queued","total":2}
-```
-
-worker 逐个处理：
-
-1. 读取 job 文件。
-2. 读取 Cookie。
-3. 通过 `aweme_detail` 获取 `play_addr` URL。
-4. 下载到 `<out_dir>/<aweme_id>.mp4`。
-5. 增量原子写入 status。
-
-状态机：
-
-```text
-queued -> running -> succeeded
-queued -> running -> partial
-queued -> running -> failed
-```
-
-当前下载幂等策略是：目标 mp4 已存在则跳过下载并返回已有路径。后续应增强为 `.partial` 写入、完成后 atomic rename，并记录 `content_length` / `sha256`。
-
-## 任务状态与恢复
-
-任务目录中保存两类文件：
-
-```text
-<task_id>.job.json
-<task_id>.status.json
-```
-
-status 使用临时文件加 rename 的方式原子替换，避免 Agent 读到半截 JSON。
-
-当前恢复能力是“可查询已完成/部分完成状态”。下一阶段如果改为常驻服务，应增加：
-
-- `heartbeat_at`
-- `attempt`
-- `next_retry_at`
-- `error_kind`
-- stale running 任务扫描
-- `retry <task_id>`
-- `cancel <task_id>`
-
-服务启动时应把 heartbeat 超时的 `running` 任务重新判定为 `queued` 或 `failed`。
-
-## 风控与网络策略
-
-抖音相关接口可能返回空 200、`verify_check`、抽稀列表、403、429 或其他风控信号。当前实现将部分信号映射为：
-
-- `cookie_missing`
-- `anti_bot`
-- `not_found`
-- `network_error`
-- `api_failure`
-- `parse_error`
+抖音接口可能返回空 200、`verify_check`、抽稀列表、403、429。当前实现映射为 error_kind：`cookie_missing` / `anti_bot` / `not_found` / `network_error` / `api_failure` / `parse_error`。
 
 初期策略：
 
 - 不对疑似风控做高频自动重试。
-- `search-user` 被风控时，引导使用主页 URL。
-- `list-works` 返回 `throttled` 信号，告知调用方当前出口 IP 可能被抽稀。
+- `search-user` 集群已被 verify_check 锁，降级为 anti_bot 引导（改用主页 URL）。
+- `list-works` 返回 `throttled` 信号：判定 = `has_more 已结束 但 count < aweme_count * 0.9`（确定性抽稀，与每页平均条数无关）。告知调用方当前出口 IP 可能被抽稀。
 
-后续服务化时，应增加 network profile：
+> 🔭 服务化时增加 network profile（proxy / per-domain 并发 / 延迟 / 健康），按 domain + credential + profile 调度与熔断。
 
-```text
-network_profile -> proxy / per-domain concurrency / delay / health
-```
+---
 
-并按 domain + credential + network_profile 进行调度与熔断。
+## 7. 机制演进：worker → daemon
 
-## 文件交付
+第 2 章差距表里的"契约欠债"必须补，但**补的机制有两档**，可按痛点优先级推进，不必一步到位 daemon。
 
-当前交付方式是本地路径：
+### 7.1 轻量档：CLI 触发的恢复，不引新依赖
 
-```json
-{"files":["D:\\...\\123.mp4"]}
-```
+在当前 spawn-worker 模型上即可补齐大部分契约：
 
-这适合同机 Agent 和本地工具链。未来如果引入通用 `artifact-store`，`douyin` 不应直接承担个人存储职责，而应作为生产者注册 artifact：
+1. **L2 原子下载**：`.partial` + content_length 校验 + atomic rename。（最高优先——决定判重可信）
+2. **item 账本驱动**：submit 时建全量 item 记录，worker 消费账本而非靠文件存在判重。
+3. **heartbeat + reap**：worker 定时写 `heartbeat_at`；新增 `reap` 命令（或任意 CLI 调用顺带）扫描 stale running 降回 queued。
+4. **retry / cancel 命令**：retry 重跑非 done item；cancel 写标志文件。
+5. **list 命令**：扫 task_dir 列任务，按 state 过滤。
 
-```json
-{
-  "artifact_id": "art_...",
-  "source": {"kind": "douyin", "aweme_id": "123"},
-  "local_path": "...",
-  "sha256": "...",
-  "content_type": "video/mp4"
-}
-```
+这一档不需要常驻进程，适合现在就做。
 
-Agent 包装层再根据场景提供 `artifact_id`、`local_path` 或 HTTP URL。
+### 7.2 完整档：daemon + HTTP API
 
-## 任务完成通知
+当出现以下痛点时，再升级为常驻 daemon：
 
-任务完成通知不应只依赖“调用方一直轮询”。推荐采用 webhook + event log 双轨。
+| 触发痛点 | 演进方案 |
+|---|---|
+| callback 三次失败 / worker 发回调前崩溃 → 回调永久丢失 | **持久 callback 队列**：pending→sending→delivered/failed→pending，daemon 重启后补发。记录 callback_id/event/target_url/attempt/next_retry_at/delivered_at |
+| 跑了什么、何时、为何失败无法观测 | **event log**（append-only）：job.created/started、item.succeeded/failed、job.succeeded、callback.delivered。供 Web 时间线 / CLI events 查询 |
+| CLI、Web、Agent 包装层要复用同一套任务接口 | **daemon + HTTP API**：`Agent → CLI → daemon(127.0.0.1:8787) → worker/store`。API 草案：`POST /v1/jobs`、`GET /v1/jobs/{id}`、`GET /v1/jobs?state=`、`POST /v1/jobs/{id}/retry|cancel`、`GET /v1/events` |
+| 本地用户要可视化运维 | **Web 模块**（`douyin serve --bind 127.0.0.1:8787`）：Jobs / Job Detail / Artifacts / Credentials / Network Profiles / Callbacks。默认只听 127.0.0.1、不展示 Cookie 原文；监听 0.0.0.0 须显式 token。候选 `axum` + `tower-http` |
+| 下载产物要被多方按 id 引用 / 远程访问 | **artifact-store**：产物注册为 `{artifact_id, source, local_path, sha256, content_type}`，Agent 包装层按场景给 artifact_id / local_path / HTTP URL |
 
-### Webhook
+> daemon 未运行时，CLI 应返回明确错误而非静默降级为前台长任务（那会重新引入超时问题）：
+> ```json
+> {"error":"douyin service 未运行","error_kind":"service_unavailable","hint":"运行 douyin serve"}
+> ```
+> 开发场景可保留 `--local-worker` / 当前隐藏 worker 模式作为兼容路径。
 
-submit 时调用方可以附带通知配置：
-
-```json
-{
-  "notify": {
-    "mode": "webhook",
-    "url": "http://127.0.0.1:9001/messages",
-    "delivery_handle": "dh_...",
-    "session_id": "sess-...",
-    "events": ["succeeded", "partial", "failed"]
-  }
-}
-```
-
-任务进入终态时，daemon POST：
-
-```json
-{
-  "sender_id": "system:callback",
-  "text": "<callback kind=\"douyin-download-done\" task_id=\"job_...\"/>",
-  "metadata": {
-    "callback": {
-      "kind": "douyin-download-done",
-      "payload": {
-        "job_id": "job_...",
-        "task_id": "job_...",
-        "state": "succeeded",
-        "artifact_ids": ["art_..."],
-        "session_id": "sess-..."
-      }
-    },
-    "delivery_handle": "dh_..."
-  }
-}
-```
-
-通知发送需要持久化状态：
+### 7.3 推荐推进顺序（按痛点优先级，非平铺）
 
 ```text
-pending -> sending -> delivered
-pending -> sending -> failed
-failed -> pending
+✅ P0  L2 .partial + atomic rename        # 已完成：修掉"判重不可信"最大隐患
+✅ P0  heartbeat + reap + retry (process) # 已完成：process 任务可发现、可重启
+   P0  heartbeat + reap + retry 推广      # download / list_works 套用同一模式
+   P1  item 账本驱动去重 + cancel + list   # 补齐长任务契约接口面
+   P1  持久 callback 队列                  # 修掉"任务完成但通知丢失"
+   P2  event log                         # 可观测性
+   P2  daemon + HTTP API                 # 多入口复用 + 超时治理
+   P3  Web 模块                           # 本地运维可视化
+   P3  credential store / artifact-store  # 解耦凭据与产物
 ```
 
-至少记录：
-
-- `callback_id`
-- `job_id`
-- `event`
-- `target_url`
-- `attempt`
-- `last_error`
-- `next_retry_at`
-- `delivered_at`
-
-这样 daemon 重启后可以继续补发未送达通知，避免任务完成但发布方永远不知道。
-
-### Event Log
-
-daemon 同时写入 append-only event log：
-
-```text
-job.created
-job.started
-item.succeeded
-item.failed
-job.succeeded
-callback.delivered
-```
-
-用途：
-
-- Web UI 展示任务时间线。
-- CLI 查询最近事件。
-- webhook 失败时，发布方仍可通过轮询发现终态。
-- 后续实现 SSE / WebSocket 实时刷新。
-
-CLI 查询事件：
-
-```text
-douyin events --job-id job_...
-```
-
-HTTP API：
-
-```text
-GET /v1/events?job_id=job_...
-```
-
-通知语义上，webhook 是主动提醒，event log 是最终可信记录。
-
-## Web 模块
-
-需要增加一个只面向本地用户和 Agent 运维的 Web 模块，默认由 daemon 提供。
-
-建议命令：
-
-```text
-douyin serve --bind 127.0.0.1:8787
-```
-
-Web 模块包含两部分：
-
-- JSON API：给 CLI、Agent 包装层和前端页面使用。
-- 静态页面：给用户查看任务状态、错误、产物和 Cookie/network 健康情况。
-
-默认安全策略：
-
-- 默认只监听 `127.0.0.1`。
-- 不展示 Cookie 原文。
-- 不展示完整敏感 Header。
-- artifact 下载 URL 默认本机可访问。
-- 如需监听 `0.0.0.0`，必须显式配置 token。
-
-页面建议：
-
-- Jobs：任务列表，按 `queued/running/succeeded/partial/failed/cancelled` 过滤。
-- Job Detail：单任务进度、item 明细、错误、事件时间线、artifact 列表。
-- Artifacts：已下载文件、大小、hash、本地路径、HTTP 下载入口。
-- Credentials：Cookie 健康状态、过期提示、最近验证结果。
-- Network Profiles：出口健康、限流/封禁状态、冷却时间。
-- Callbacks：通知发送状态、失败重试记录。
-
-前端可以先做成极简静态页面，不必引入复杂前端框架。第一版只需要 HTML + 少量 JS 轮询：
-
-```text
-GET /api/jobs
-GET /api/jobs/{job_id}
-GET /api/events?job_id=...
-```
-
-如果要在 Rust 内实现 Web server，需要新增依赖。候选：
-
-- `axum`：生态成熟，适合 JSON API + 静态资源。
-- `poem`：API 设计直接，也适合小服务。
-- `tiny_http` 或 `rouille`：依赖更轻，但异步和生态弱一些。
-
-本项目已经使用 `tokio` 和 `reqwest`，若用户同意新增依赖，优先建议 `axum` + `tower-http`。如果暂时不新增依赖，可以先把 Web 模块作为设计保留，或用外部静态页面读取 daemon API。
-
-## 后续阶段
-
-1. 下载写入改为 `.partial` + atomic rename。
-2. status 增加 `error_kind`、`attempt`、`heartbeat_at`。
-3. 增加 `retry` / `cancel` 命令。
-4. 将 Cookie 从文件路径升级为 credential id。
-5. 将输出文件注册到通用 artifact-store。
-6. 将 worker 模式升级为可选 daemon，并接入 `custom-utils` daemon feature。
-7. 增加本地 HTTP API，CLI 通过 API 与 daemon 通信。
-8. 增加 callback 持久队列和 event log。
-9. 增加 Web 模块，提供任务、事件、artifact、credential、network profile 查看页面。
+P0/P1 多数落在"轻量档"，不引新依赖、可立即推进；P2 起才进入 daemon 形态。
+已完成的两项 P0 即是范例：全程未引入新依赖，仅在现有 spawn-worker + 文件模型上补契约。

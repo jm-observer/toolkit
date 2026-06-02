@@ -190,6 +190,21 @@ enum Command {
         #[arg(long)]
         task_id: String,
     },
+    /// 重启一个「下载+ASR」任务（重 spawn worker，已完成 item 靠幂等自动跳过）。
+    ProcessRetry {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 扫描并重启心跳超时（stale）的 running「下载+ASR」任务。
+    ProcessReap {
+        #[arg(long)]
+        task_dir: Option<PathBuf>,
+        /// 心跳超时阈值（秒）：running 任务心跳距今超过此值即判 stale 并重启。
+        #[arg(long, default_value_t = 600)]
+        stale_secs: i64,
+    },
     /// 内部：后台 process worker（由 process-submit spawn，勿手动调）。
     #[command(hide = true)]
     ProcessWorker {
@@ -371,6 +386,13 @@ async fn main() -> Result<()> {
         Command::ProcessStatus { task_dir, task_id } => {
             douyin::run_process_status(&douyin::resolve_task_dir(task_dir)?, &task_id)?
         }
+        Command::ProcessRetry { task_dir, task_id } => {
+            douyin::run_process_retry(&douyin::resolve_task_dir(task_dir)?, &task_id)?
+        }
+        Command::ProcessReap {
+            task_dir,
+            stale_secs,
+        } => douyin::run_process_reap(&douyin::resolve_task_dir(task_dir)?, stale_secs)?,
         Command::DownloadWorker { .. }
         | Command::ListWorksWorker { .. }
         | Command::ProcessWorker { .. }

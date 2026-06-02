@@ -48,6 +48,11 @@ pub struct TaskStatus {
     pub skipped: usize,
     pub results: Vec<ItemResult>,
     pub updated_at: String,
+    /// worker 存活证明：running 期间周期性刷新。与 `updated_at`（进度变更时刻）区分——
+    /// reap 据此判定 stale（worker 崩了 status 永远停在 running 而心跳不再更新）。
+    /// `default` 保证旧 status 文件（无此字段）仍可反序列化。
+    #[serde(default)]
+    pub heartbeat_at: Option<String>,
     #[serde(default)]
     pub notified: bool,
 }
@@ -117,6 +122,82 @@ pub fn read_status(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>>
     Ok(Some(serde_json::from_str(&raw)?))
 }
 
+/// 重启一个任务：把 status 标回 queued 并重 spawn worker。worker 会重建进度，
+/// 已完成（有 transcript 缓存）的 item 自动 skip——靠幂等续传，不重下已完成内容。
+/// 返回 None 表示 job 文件不存在（无从重启）。
+pub fn retry(task_dir: &Path, task_id: &str) -> Result<Option<TaskStatus>> {
+    if !job_path(task_dir, task_id).exists() {
+        return Ok(None);
+    }
+    if let Some(mut st) = read_status(task_dir, task_id)? {
+        st.state = "queued".into();
+        st.updated_at = now();
+        st.heartbeat_at = Some(now());
+        st.notified = false;
+        write_status(task_dir, &st)?;
+    }
+    spawn_worker(task_dir, task_id)?;
+    read_status(task_dir, task_id)
+}
+
+/// 扫描并重启心跳超时（stale）的 running 任务。返回被 reap 的 task_id 列表。
+/// 无 daemon 模型下的恢复入口：由 `process-reap` 命令（或定时调用）触发。
+pub fn reap(task_dir: &Path, stale_secs: i64) -> Result<Vec<String>> {
+    let ids = stale_running_task_ids(task_dir, stale_secs)?;
+    for id in &ids {
+        retry(task_dir, id)?;
+    }
+    Ok(ids)
+}
+
+/// 列出 task_dir 下所有 stale 的 running process 任务 id。
+fn stale_running_task_ids(task_dir: &Path, stale_secs: i64) -> Result<Vec<String>> {
+    let now = chrono::Utc::now();
+    let mut out = Vec::new();
+    let rd = match std::fs::read_dir(task_dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // 只认 process 任务：文件名 <task_id>.status.json 且 task_id 以 dyproc 开头。
+        let Some(task_id) = name.strip_suffix(".status.json") else {
+            continue;
+        };
+        if !task_id.starts_with("dyproc") {
+            continue;
+        }
+        // 解析失败（如 download 任务的 status 结构不同）自然跳过。
+        let Ok(Some(st)) = read_status(task_dir, task_id) else {
+            continue;
+        };
+        if is_stale_running(&st, stale_secs, now) {
+            out.push(task_id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// 判定一个任务是否 stale running：state==running 且心跳（缺则退化用 updated_at）
+/// 距今 ≥ stale_secs。心跳时间无法解析时保守判定为非 stale（不误杀）。
+fn is_stale_running(
+    st: &TaskStatus,
+    stale_secs: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if st.state != "running" {
+        return false;
+    }
+    let ts = st.heartbeat_at.as_deref().unwrap_or(&st.updated_at);
+    let Ok(hb) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return false;
+    };
+    (now - hb.with_timezone(&chrono::Utc)).num_seconds() >= stale_secs
+}
+
 fn transcript_path(transcript_dir: &Path, aweme_id: &str) -> PathBuf {
     transcript_dir.join(format!("{aweme_id}.json"))
 }
@@ -181,10 +262,19 @@ pub fn submit(
         skipped: 0,
         results: vec![],
         updated_at: now(),
+        heartbeat_at: None,
         notified: false,
     };
     write_status(task_dir, &st)?;
 
+    spawn_worker(task_dir, &task_id)?;
+
+    Ok((st, already))
+}
+
+/// spawn 脱离的 process worker 子进程（同一二进制的隐藏子命令）。父进程退出后子进程继续。
+/// submit / retry / reap 共用。test 下不真正起进程。
+fn spawn_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     #[cfg(not(test))]
     {
         let exe = std::env::current_exe().context("取当前可执行路径")?;
@@ -193,12 +283,15 @@ pub fn submit(
             .arg("--task-dir")
             .arg(task_dir)
             .arg("--task-id")
-            .arg(&task_id)
+            .arg(task_id)
             .spawn()
             .context("spawn process worker")?;
     }
-
-    Ok((st, already))
+    #[cfg(test)]
+    {
+        let _ = (task_dir, task_id);
+    }
+    Ok(())
 }
 
 /// worker 入口：逐个 aweme_id 下载 + 转写，增量更新 status，完成发回调。
@@ -234,6 +327,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
         skipped: 0,
         results: vec![],
         updated_at: now(),
+        heartbeat_at: Some(now()),
         notified: false,
     };
     write_status(task_dir, &st)?;
@@ -256,6 +350,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
                 error: None,
             });
             st.updated_at = now();
+            st.heartbeat_at = Some(now());
             write_status(task_dir, &st)?;
             continue;
         }
@@ -286,6 +381,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
             }
         }
         st.updated_at = now();
+        st.heartbeat_at = Some(now());
         write_status(task_dir, &st)?;
     }
 
@@ -425,6 +521,7 @@ fn write_all_failed(task_dir: &Path, job: &Job, error: String) -> Result<()> {
             })
             .collect(),
         updated_at: now(),
+        heartbeat_at: None,
         notified: false,
     };
     write_status(task_dir, &st)
@@ -553,12 +650,125 @@ mod tests {
                 error: None,
             }],
             updated_at: now(),
+            heartbeat_at: Some(now()),
             notified: false,
         };
         write_status(&dir, &st).unwrap();
         let back = read_status(&dir, "dyproc1").unwrap().unwrap();
         assert_eq!(back.done, 1);
         assert_eq!(back.results.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn running_status(task_id: &str, heartbeat: &str) -> TaskStatus {
+        TaskStatus {
+            task_id: task_id.into(),
+            state: "running".into(),
+            total: 1,
+            done: 0,
+            failed: 0,
+            skipped: 0,
+            results: vec![],
+            updated_at: heartbeat.into(),
+            heartbeat_at: Some(heartbeat.into()),
+            notified: false,
+        }
+    }
+
+    #[test]
+    fn old_status_without_heartbeat_deserializes() {
+        // 旧 status 文件（无 heartbeat_at 字段）应能反序列化，字段退化为 None。
+        let raw = r#"{"task_id":"dyproc1","state":"running","total":1,"done":0,
+            "failed":0,"skipped":0,"results":[],"updated_at":"2026-05-31T00:00:00Z"}"#;
+        let st: TaskStatus = serde_json::from_str(raw).unwrap();
+        assert!(st.heartbeat_at.is_none());
+    }
+
+    #[test]
+    fn is_stale_running_detects_timeout() {
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        let fresh = (now - chrono::Duration::seconds(10)).to_rfc3339();
+        // running + 心跳超时 → stale
+        assert!(is_stale_running(&running_status("dyproc1", &old), 600, now));
+        // running + 心跳新鲜 → 非 stale
+        assert!(!is_stale_running(&running_status("dyproc1", &fresh), 600, now));
+        // 终态即使心跳很旧也不 reap
+        let mut done = running_status("dyproc1", &old);
+        done.state = "succeeded".into();
+        assert!(!is_stale_running(&done, 600, now));
+    }
+
+    #[test]
+    fn is_stale_running_falls_back_to_updated_at() {
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        let mut st = running_status("dyproc1", &old);
+        st.heartbeat_at = None; // 旧任务无心跳，退化用 updated_at
+        st.updated_at = old;
+        assert!(is_stale_running(&st, 600, now));
+    }
+
+    #[test]
+    fn stale_scan_picks_only_stale_process_running() {
+        let dir = tempdir();
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
+        let fresh = now.to_rfc3339();
+        // stale running process 任务 → 命中
+        write_status(&dir, &running_status("dyproc_stale", &old)).unwrap();
+        // 新鲜 running → 不命中
+        write_status(&dir, &running_status("dyproc_fresh", &fresh)).unwrap();
+        // 终态 → 不命中
+        let mut done = running_status("dyproc_done", &old);
+        done.state = "succeeded".into();
+        write_status(&dir, &done).unwrap();
+        // 非 dyproc 前缀（如 download 任务）→ 不命中
+        write_status(&dir, &running_status("dy_download", &old)).unwrap();
+
+        let mut ids = stale_running_task_ids(&dir, 600).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["dyproc_stale".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retry_missing_job_returns_none() {
+        let dir = tempdir();
+        assert!(retry(&dir, "nope").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retry_requeues_existing_task() {
+        let dir = tempdir();
+        let cookie = dir.join("cookie.json");
+        let out_dir = dir.join("out");
+        let transcript_dir = dir.join("transcripts");
+        std::fs::write(&cookie, "{}").unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let (st, _) = submit(
+            &dir,
+            &out_dir,
+            &transcript_dir,
+            &cookie,
+            vec!["123".to_string()],
+            "http://127.0.0.1:8091/x".to_string(),
+            "sense-voice".to_string(),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // 模拟 worker 崩在 running
+        let mut running = read_status(&dir, &st.task_id).unwrap().unwrap();
+        running.state = "running".into();
+        write_status(&dir, &running).unwrap();
+        // retry 应标回 queued（test 下 spawn 不真正起进程）
+        let back = retry(&dir, &st.task_id).unwrap().unwrap();
+        assert_eq!(back.state, "queued");
         std::fs::remove_dir_all(&dir).ok();
     }
 
