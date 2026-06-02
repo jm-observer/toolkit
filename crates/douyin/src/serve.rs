@@ -58,6 +58,7 @@ pub async fn run(task_dir: PathBuf, bind: String, tick_secs: u64, stale_secs: i6
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/healthz", get(healthz))
+        .route("/v1/jobs", post(submit_job))
         .route("/v1/tasks", get(list_tasks))
         .route("/v1/tasks/{task_id}", get(get_task))
         .route("/v1/tasks/{task_id}/events", get(get_events))
@@ -96,6 +97,21 @@ async fn dashboard() -> Html<&'static str> {
 
 async fn healthz() -> Json<Value> {
     Json(json!({ "ok": true, "service": "douyin" }))
+}
+
+#[derive(serde::Deserialize)]
+struct SubmitReq {
+    kind: String,
+    #[serde(default)]
+    params: Value,
+}
+
+async fn submit_job(State(s): State<AppState>, Json(req): Json<SubmitReq>) -> Json<Value> {
+    Json(
+        crate::run_submit_job(&s.task_dir, &req.kind, &req.params)
+            .await
+            .unwrap_or_else(err_json),
+    )
 }
 
 async fn list_tasks(

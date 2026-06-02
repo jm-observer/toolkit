@@ -258,6 +258,65 @@ pub async fn run_callback_flush(task_dir: &Path) -> Result<Value> {
     Ok(json!({ "delivered": delivered, "pending": pending, "failed": failed }))
 }
 
+/// `submit_job`：HTTP `POST /v1/jobs` 的统一入队入口，按 kind 分派到三类 submit。
+/// params 缺省路径走 `resolve_*` 默认（与 CLI 一致）。daemon 进程内 spawn worker，
+/// worker 脱离 daemon 独立跑。仅 127.0.0.1 可达，信任模型同 CLI。
+pub async fn run_submit_job(task_dir: &Path, kind: &str, params: &Value) -> Result<Value> {
+    let get_str = |k: &str| params.get(k).and_then(|v| v.as_str()).map(String::from);
+    let ids = |k: &str| -> Vec<String> {
+        params
+            .get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let cookie = resolve_cookie_file(get_str("cookie_file").map(PathBuf::from))?;
+    match kind {
+        "douyin.download" | "download" => {
+            let out = resolve_out_dir(get_str("out_dir").map(PathBuf::from))?;
+            run_download_submit(&cookie, task_dir, &out, ids("ids")).await
+        }
+        "douyin.list-works" | "list-works" => {
+            let input = get_str("input").unwrap_or_default();
+            let max_pages = params.get("max_pages").and_then(|v| v.as_u64()).unwrap_or(60) as usize;
+            run_list_works_submit(
+                &cookie,
+                task_dir,
+                &input,
+                max_pages,
+                get_str("delivery_handle").as_deref(),
+                get_str("session_id").as_deref(),
+            )
+            .await
+        }
+        "douyin.process" | "process" => {
+            let out = resolve_out_dir(get_str("out_dir").map(PathBuf::from))?;
+            let tr = resolve_transcript_dir(get_str("transcript_dir").map(PathBuf::from))?;
+            let asr_url = get_str("asr_url").unwrap_or_else(|| {
+                "http://127.0.0.1:8091/v1/audio/transcriptions/from-source".to_string()
+            });
+            let asr_model = get_str("asr_model").unwrap_or_else(|| "sense-voice".to_string());
+            let vad = params.get("vad").and_then(|v| v.as_bool()).unwrap_or(true);
+            run_process_submit(
+                task_dir,
+                &out,
+                &tr,
+                &cookie,
+                ids("ids"),
+                asr_url,
+                asr_model,
+                vad,
+                get_str("delivery_handle"),
+                get_str("unique_id"),
+                get_str("session_id"),
+            )
+        }
+        other => Ok(
+            json!({ "error": format!("未知 kind: {other}"), "error_kind": "invalid_input" }),
+        ),
+    }
+}
+
 /// `events`：读某任务的 append-only 事件时间线。
 pub fn run_events(task_dir: &Path, task_id: &str) -> Result<Value> {
     let evs = events::read_all(task_dir, task_id)?;
