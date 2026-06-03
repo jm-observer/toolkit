@@ -283,6 +283,9 @@ pub async fn run_submit_job(
             .unwrap_or_default()
     };
     let cookie = resolve_cookie_file(get_str("cookie_file").map(PathBuf::from))?;
+    // traceparent 优先取入站 HTTP 头（serve 提取）；缺省时回退 params（nova 发起的
+    // 工具调用 zero 设不了头，由 skill 把 traceparent 放进 params 透传）。
+    let trace_context = trace_context.or_else(|| get_str("traceparent"));
     let result: Value = match kind {
         "douyin.download" | "download" => {
             let out = resolve_out_dir(get_str("out_dir").map(PathBuf::from))?;
