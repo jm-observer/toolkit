@@ -1,0 +1,14 @@
+{
+  "embedding": {
+    "endpoint": "http://127.0.0.1:8092/v1/embeddings",
+    "model": "BAAI/bge-m3",
+    "api_key_env": null,
+    "dim": 1024,
+    "timeout_secs": 30
+  },
+  "store": {
+    "db_path": "rag.db"
+  },
+  "chunk_max_chars": 800,
+  "chunk_overlap_chars": 80
+}

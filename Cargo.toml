@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/github-commit-info", "crates/hf-watcher", "crates/douyin"]
+members = ["crates/github-commit-info", "crates/hf-watcher", "crates/douyin", "crates/rag"]
 resolver = "2"
 
 [workspace.package]
@@ -18,6 +18,9 @@ custom-utils = { version = "0.15.0", features = ["updater"] }
 anyhow = "1"
 sm3 = "0.4"
 axum = "0.8"
+async-trait = "0.1"
+rusqlite = { version = "0.31", default-features = false, features = ["bundled"] }
+sqlite-vec = "0.1"
 
 [profile.release]
 strip = true
