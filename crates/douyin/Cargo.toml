@@ -11,7 +11,7 @@ chrono = { workspace = true }
 tokio = { workspace = true, features = ["time", "fs", "net", "signal"] }
 log = { workspace = true }
 clap = { workspace = true }
-custom-utils = { workspace = true }
+custom-utils = { workspace = true, features = ["trace"] }
 anyhow = { workspace = true }
 sm3 = { workspace = true }
 axum = { workspace = true }

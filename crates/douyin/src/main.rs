@@ -359,6 +359,13 @@ async fn main() -> Result<()> {
     let _ =
         custom_utils::logger::logger_feature("douyin", "info,reqwest=warn", Info, false).build();
 
+    // 全生命周期追踪：仅当设 TRACE_HUB_ENDPOINT 时启用（未设零影响）。daemon 与
+    // worker 子进程都经此 main，故二者均接入（worker 继承父进程环境变量）。
+    if let Ok(endpoint) = std::env::var("TRACE_HUB_ENDPOINT") {
+        custom_utils::trace::init(custom_utils::trace::TraceConfig::new(endpoint, "douyin"));
+        log::info!("trace enabled → trace-hub");
+    }
+
     let args = Args::parse();
 
     // worker 与 update 是特殊路径：不走 JSON stdout 契约。

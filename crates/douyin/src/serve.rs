@@ -13,6 +13,7 @@
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxPath, Query, State},
+    http::HeaderMap,
     response::Html,
     routing::{get, post},
     Json, Router,
@@ -106,9 +107,18 @@ struct SubmitReq {
     params: Value,
 }
 
-async fn submit_job(State(s): State<AppState>, Json(req): Json<SubmitReq>) -> Json<Value> {
+async fn submit_job(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SubmitReq>,
+) -> Json<Value> {
+    // 入站提取 zero 注入的 traceparent，透传到 worker→callback 续接同一条 trace。
+    let trace_context = headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     Json(
-        crate::run_submit_job(&s.task_dir, &req.kind, &req.params)
+        crate::run_submit_job(&s.task_dir, &req.kind, &req.params, trace_context)
             .await
             .unwrap_or_else(err_json),
     )
@@ -139,7 +149,11 @@ async fn cancel_task(State(s): State<AppState>, AxPath(task_id): AxPath<String>)
 }
 
 async fn flush_callbacks(State(s): State<AppState>) -> Json<Value> {
-    Json(crate::run_callback_flush(&s.task_dir).await.unwrap_or_else(err_json))
+    Json(
+        crate::run_callback_flush(&s.task_dir)
+            .await
+            .unwrap_or_else(err_json),
+    )
 }
 
 async fn run_maintenance_now(State(s): State<AppState>) -> Json<Value> {

@@ -9,6 +9,7 @@
 //! failed（超 MAX_ATTEMPTS 放弃）。callback_id == task_id（一任务一回调，重入队覆盖）。
 
 use anyhow::{Context, Result};
+use custom_utils::trace::{self, SpanRecord, SpanStatus, TraceContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,9 @@ pub struct CallbackRecord {
     pub created_at: String,
     #[serde(default)]
     pub delivered_at: Option<String>,
+    /// 提交时捕获的 W3C traceparent（来自 zero），用于跨异步续接同一条 trace。
+    #[serde(default)]
+    pub trace_context: Option<String>,
 }
 
 fn now() -> String {
@@ -47,6 +51,60 @@ fn now() -> String {
 
 fn callback_path(task_dir: &Path, task_id: &str) -> PathBuf {
     task_dir.join(format!("{task_id}.callback.json"))
+}
+
+fn trace_path(task_dir: &Path, task_id: &str) -> PathBuf {
+    task_dir.join(format!("{task_id}.trace"))
+}
+
+/// 写提交时捕获的 traceparent 侧文件（由 `run_submit_job` 在 submit 后调用）。
+/// 与按 kind 改 Job 结构相比，侧文件对所有任务类型统一生效、零侵入。
+pub fn write_trace(task_dir: &Path, task_id: &str, traceparent: &str) -> Result<()> {
+    atomic_write(&trace_path(task_dir, task_id), traceparent)
+}
+
+/// 读侧文件里的 traceparent；不存在 / 空则 None。
+fn read_trace(task_dir: &Path, task_id: &str) -> Option<String> {
+    std::fs::read_to_string(trace_path(task_dir, task_id))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// callback 投递成功时记「抖音任务完成」span（续用提交时的 trace_id）。
+fn record_done_span(rec: &CallbackRecord) {
+    let Some(tp) = rec.trace_context.as_deref() else {
+        return;
+    };
+    let Some(remote) = TraceContext::from_traceparent(tp) else {
+        return;
+    };
+    let ctx = TraceContext::continued(remote.trace_id, remote.span_id);
+    let start = chrono::DateTime::parse_from_rfc3339(&rec.created_at)
+        .map(|t| t.timestamp_millis())
+        .unwrap_or_else(|_| trace::now_ms());
+    let status = if rec.kind.contains("failed") {
+        SpanStatus::Error(rec.kind.clone())
+    } else {
+        SpanStatus::Ok
+    };
+    trace::record_span(SpanRecord {
+        trace_id: ctx.trace_id,
+        span_id: ctx.span_id,
+        parent_span_id: ctx.parent_span_id,
+        service: String::new(),
+        kind: "douyin_done".to_string(),
+        flow_name: Some("抖音任务完成".to_string()),
+        start_ms: start,
+        end_ms: trace::now_ms(),
+        status,
+        summary: json!({ "task_id": rec.task_id, "callback_kind": rec.kind }),
+        detail: Value::Object(rec.payload.clone()),
+        request_body: None,
+        response_body: None,
+        body_truncated: false,
+        links: Vec::new(),
+    });
 }
 
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
@@ -93,6 +151,7 @@ pub fn enqueue(
         next_retry_at: None,
         created_at: now(),
         delivered_at: None,
+        trace_context: read_trace(task_dir, task_id),
     };
     write(task_dir, &rec)
 }
@@ -112,14 +171,17 @@ fn build_body(rec: &CallbackRecord) -> Value {
     })
 }
 
-async fn post_once(url: &str, body: &Value) -> Result<()> {
+async fn post_once(url: &str, body: &Value, trace_context: Option<&str>) -> Result<()> {
     let client = reqwest::Client::new();
-    let resp = client
+    let mut req = client
         .post(url)
         .json(body)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await?;
+        .timeout(std::time::Duration::from_secs(10));
+    // 把提交时的 trace 透传给 gateway，zero 据此续接同一条 trace。
+    if let Some(tp) = trace_context {
+        req = req.header("traceparent", tp);
+    }
+    let resp = req.send().await?;
     if resp.status().is_success() {
         Ok(())
     } else {
@@ -164,12 +226,13 @@ pub async fn deliver(task_dir: &Path, task_id: &str, url: &str) -> Result<bool> 
         return Ok(true);
     }
     let body = build_body(&rec);
-    match post_once(url, &body).await {
+    match post_once(url, &body, rec.trace_context.as_deref()).await {
         Ok(()) => {
             apply_success(&mut rec);
             write(task_dir, &rec)?;
             mark_status_notified(task_dir, task_id);
             crate::events::append(task_dir, task_id, "callback.delivered", None);
+            record_done_span(&rec);
             Ok(true)
         }
         Err(e) => {
@@ -302,7 +365,14 @@ mod tests {
     #[test]
     fn enqueue_then_read_roundtrip() {
         let dir = tempdir();
-        enqueue(&dir, "dyproc1", "douyin-process-done", "dh_x", sample_payload()).unwrap();
+        enqueue(
+            &dir,
+            "dyproc1",
+            "douyin-process-done",
+            "dh_x",
+            sample_payload(),
+        )
+        .unwrap();
         let rec = read(&dir, "dyproc1").unwrap().unwrap();
         assert_eq!(rec.state, "pending");
         assert_eq!(rec.attempt, 0);
@@ -315,6 +385,24 @@ mod tests {
     fn read_missing_returns_none() {
         let dir = tempdir();
         assert!(read(&dir, "nope").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enqueue_picks_up_trace_side_file() {
+        let dir = tempdir();
+        let tp = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01";
+        write_trace(&dir, "dyproc_t", tp).unwrap();
+        enqueue(
+            &dir,
+            "dyproc_t",
+            "douyin-process-done",
+            "dh_x",
+            sample_payload(),
+        )
+        .unwrap();
+        let rec = read(&dir, "dyproc_t").unwrap().unwrap();
+        assert_eq!(rec.trace_context.as_deref(), Some(tp));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -332,6 +420,7 @@ mod tests {
             next_retry_at: None,
             created_at: now(),
             delivered_at: None,
+            trace_context: None,
         };
         let body = build_body(&rec);
         assert_eq!(body["sender_id"], "system:callback");
@@ -357,6 +446,7 @@ mod tests {
             next_retry_at: None,
             created_at: now(),
             delivered_at: None,
+            trace_context: None,
         };
         // 前几次失败 → pending + 设退避
         apply_failure(&mut rec, "boom".into());
@@ -386,6 +476,7 @@ mod tests {
             next_retry_at: Some(now()),
             created_at: now(),
             delivered_at: None,
+            trace_context: None,
         };
         apply_success(&mut rec);
         assert_eq!(rec.state, "delivered");
@@ -425,6 +516,7 @@ mod tests {
             next_retry_at: None,
             created_at: now(),
             delivered_at: Some(now()),
+            trace_context: None,
         };
         write(&dir, &delivered_rec).unwrap();
         // failed → 计 failed，不投递
