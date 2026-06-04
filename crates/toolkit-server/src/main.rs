@@ -11,6 +11,9 @@ struct Cli {
     /// 数据目录（SQLite 文件 + 中间产物）
     #[arg(long, env = "TOOLKIT_DATA_DIR", default_value = "./data")]
     data_dir: std::path::PathBuf,
+    /// Web 控制台目录（含 index.html / app.js / style.css）。默认 `./web`。
+    #[arg(long, env = "TOOLKIT_WEB_DIR", default_value = "./web")]
+    web_dir: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -21,6 +24,7 @@ async fn main() -> Result<()> {
     run(Config {
         bind,
         data_dir: cli.data_dir,
+        web_dir: cli.web_dir,
     })
     .await
 }

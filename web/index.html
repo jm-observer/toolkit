@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>toolkit 控制台</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<header>
+  <h1>toolkit 控制台</h1>
+  <small>本机功能工具集 · 抖音流程</small>
+</header>
+
+<main>
+  <section id="sec-cookie">
+    <h2>1. Cookie 状态</h2>
+    <div class="status-row">
+      <button data-action="refresh-cookie">刷新</button>
+      <pre id="cookie-status" class="json">点「刷新」加载</pre>
+    </div>
+    <details>
+      <summary>手动粘贴 Cookie</summary>
+      <p class="hint">从浏览器 DevTools → Network → 抖音请求头复制 <code>Cookie</code> 整串粘到此处。Chrome 扩展正常工作时无需手动操作。</p>
+      <textarea id="cookie-raw" rows="4" placeholder="msToken=...; ttwid=...; sessionid_ss=..."></textarea>
+      <button data-action="set-cookie">写入</button>
+      <pre id="cookie-set-result" class="json"></pre>
+    </details>
+  </section>
+
+  <section id="sec-resolve">
+    <h2>2. 解析博主</h2>
+    <p class="hint">输入博主主页 URL / 短链 / sec_uid，返回完整资料（含 unique_id 与 aweme_count）。</p>
+    <div class="form-row">
+      <input type="text" id="resolve-handle" placeholder="https://www.douyin.com/user/MS4w..." />
+      <button data-action="resolve">查询</button>
+    </div>
+    <pre id="resolve-result" class="json"></pre>
+  </section>
+
+  <section id="sec-sync">
+    <h2>3. 同步作品（异步任务）</h2>
+    <p class="hint">提交后立刻返回 task_id，作品列表抓取在后台跑；进度看下面「任务列表」。</p>
+    <div class="form-row">
+      <input type="text" id="sync-handle" placeholder="https://www.douyin.com/user/MS4w..." />
+      <input type="number" id="sync-max-pages" value="60" min="1" max="200" />
+      <button data-action="sync-works">提交</button>
+    </div>
+    <pre id="sync-result" class="json"></pre>
+  </section>
+
+  <section id="sec-tags">
+    <h2>4. 看标签</h2>
+    <p class="hint">已抓过作品的博主才有标签数据（先做完 3）。</p>
+    <div class="form-row">
+      <input type="text" id="tags-unique-id" placeholder="抖音号 (unique_id)" />
+      <button data-action="tags">查询</button>
+    </div>
+    <pre id="tags-result" class="json"></pre>
+  </section>
+
+  <section id="sec-filter">
+    <h2>5. 按标签筛作品</h2>
+    <div class="form-row">
+      <input type="text" id="filter-unique-id" placeholder="unique_id" />
+      <input type="text" id="filter-tags" placeholder="标签（逗号或空格分隔）" />
+      <select id="filter-match">
+        <option value="all">全部命中 (and)</option>
+        <option value="any">任一命中 (or)</option>
+      </select>
+      <button data-action="filter">筛</button>
+    </div>
+    <pre id="filter-result" class="json"></pre>
+  </section>
+
+  <section id="sec-download">
+    <h2>6. 下载（异步任务）</h2>
+    <p class="hint">aweme_id 一行一个，或逗号分隔。</p>
+    <textarea id="download-ids" rows="4" placeholder="7123...&#10;7124..."></textarea>
+    <button data-action="download">提交</button>
+    <pre id="download-result" class="json"></pre>
+  </section>
+
+  <section id="sec-transcribe">
+    <h2>7. 转写（异步任务，含下载 + ASR）</h2>
+    <textarea id="transcribe-ids" rows="4" placeholder="7123...&#10;7124..."></textarea>
+    <div class="form-row">
+      <label><input type="checkbox" id="transcribe-vad" checked /> 启用 VAD</label>
+      <input type="text" id="transcribe-unique-id" placeholder="可选：unique_id" />
+      <button data-action="transcribe">提交</button>
+    </div>
+    <pre id="transcribe-result" class="json"></pre>
+  </section>
+
+  <section id="sec-kb">
+    <h2>8. 知识库录入（同步）</h2>
+    <p class="hint">只录文案：only_ids 留空 = 全部已抓作品；填了就只录这些。</p>
+    <div class="form-row">
+      <input type="text" id="kb-unique-id" placeholder="unique_id" />
+    </div>
+    <textarea id="kb-only-ids" rows="3" placeholder="可选：aweme_id 列表，留空 = 全部"></textarea>
+    <button data-action="kb-publish">录入</button>
+    <pre id="kb-result" class="json"></pre>
+  </section>
+
+  <section id="sec-tasks">
+    <h2>9. 任务列表</h2>
+    <div class="form-row">
+      <label><input type="checkbox" id="tasks-auto" checked /> 每 3 秒自动刷新</label>
+      <button data-action="refresh-tasks">立即刷新</button>
+      <select id="tasks-filter-state">
+        <option value="">全部状态</option>
+        <option value="queued">queued</option>
+        <option value="running">running</option>
+        <option value="succeeded">succeeded</option>
+        <option value="failed">failed</option>
+        <option value="interrupted">interrupted</option>
+      </select>
+    </div>
+    <table id="tasks-table">
+      <thead>
+        <tr>
+          <th>task_id</th>
+          <th>kind</th>
+          <th>state</th>
+          <th>created_at</th>
+          <th>progress / output</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  <small>endpoints: <a href="/api/web/health" target="_blank">/api/web/health</a></small>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

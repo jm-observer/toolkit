@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "toolkit-link",
+  "version": "0.1.0",
+  "description": "把当前抖音 tab 的 URL 与 Cookie 推送给 toolkit-server。",
+  "permissions": ["tabs", "cookies", "storage"],
+  "host_permissions": [
+    "*://*.douyin.com/*",
+    "http://127.0.0.1/*",
+    "http://192.168.0.68/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

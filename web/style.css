@@ -1,0 +1,120 @@
+/* toolkit dashboard — 极简风，可读优先 */
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1em;
+  background: #fafafa;
+  color: #222;
+  line-height: 1.5;
+}
+header { border-bottom: 1px solid #ddd; padding-bottom: 0.5em; margin-bottom: 1em; }
+header h1 { margin: 0; font-size: 1.4em; }
+header small { color: #666; }
+
+section {
+  background: #fff;
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+  padding: 1em 1.2em;
+  margin-bottom: 1.2em;
+}
+section h2 {
+  margin: 0 0 0.5em 0;
+  font-size: 1.1em;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 0.3em;
+}
+.hint { color: #666; font-size: 0.9em; margin: 0 0 0.6em 0; }
+
+.form-row {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  margin: 0.4em 0;
+  flex-wrap: wrap;
+}
+.form-row input[type=text], .form-row input[type=number], .form-row select {
+  flex: 1;
+  min-width: 160px;
+  padding: 0.35em 0.5em;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font: inherit;
+}
+textarea {
+  width: 100%;
+  padding: 0.4em;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+button {
+  padding: 0.35em 0.9em;
+  border: 1px solid #1976d2;
+  background: #1976d2;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover { background: #1565c0; }
+button:disabled { background: #bbb; border-color: #bbb; cursor: not-allowed; }
+
+.json {
+  background: #f4f4f4;
+  padding: 0.6em;
+  border-radius: 4px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  overflow-x: auto;
+  max-height: 400px;
+  margin: 0.4em 0 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.json:empty::before { content: "（空）"; color: #999; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+  margin-top: 0.5em;
+}
+th, td {
+  padding: 0.4em 0.5em;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+}
+th { background: #f0f0f0; font-weight: 600; }
+td.cell-state { font-weight: 600; }
+td.cell-state.queued     { color: #888; }
+td.cell-state.running    { color: #1976d2; }
+td.cell-state.succeeded  { color: #2e7d32; }
+td.cell-state.failed     { color: #c62828; }
+td.cell-state.interrupted{ color: #ef6c00; }
+td.cell-state.cancelled  { color: #555; }
+td .raw {
+  max-height: 100px;
+  overflow: auto;
+  background: #f9f9f9;
+  padding: 0.3em;
+  border-radius: 3px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+details summary { cursor: pointer; color: #1976d2; margin: 0.5em 0; }
+
+footer {
+  text-align: center;
+  color: #888;
+  padding: 1em 0;
+  font-size: 0.85em;
+}
+footer a { color: #1976d2; text-decoration: none; }

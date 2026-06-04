@@ -16,6 +16,7 @@ impl TestServer {
         let cfg = Config {
             bind: addr,
             data_dir: dir.path().to_path_buf(),
+            web_dir: std::path::PathBuf::from("/__nonexistent__"),
         };
         let state = bootstrap(&cfg).unwrap();
         let handle = tokio::spawn(serve_with_listener(listener, state));
