@@ -1,0 +1,30 @@
+[package]
+name = "toolkit-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+toolkit-core = { path = "../toolkit-core" }
+toolkit-tasks = { path = "../toolkit-tasks" }
+douyin = { path = "../douyin" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal", "net", "time"] }
+async-trait = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+log = { workspace = true }
+env_logger = "0.11"
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+
+[[bin]]
+name = "toolkit-server"
+path = "src/main.rs"
