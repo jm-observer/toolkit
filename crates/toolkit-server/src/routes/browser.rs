@@ -135,7 +135,7 @@ async fn cookie(
 
     // 同步写一份 douyin 兼容格式（cookies.json），让 douyin crate 可直接读用。失败仅警告。
     if let Err(e) =
-        crate::douyin_mod::cookie_bridge::write_from_raw_header(&s.data_dir, &body.raw_header).await
+        crate::douyin_mod::cookie_bridge::write_from_raw_header(&s.workspace, &body.raw_header).await
     {
         log::warn!("cookie bridge to douyin failed: {e:#}");
     }

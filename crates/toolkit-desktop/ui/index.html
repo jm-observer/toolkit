@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>toolkit-desktop</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #14161a;
+        --fg: #e6e6e6;
+        --muted: #8a8f98;
+        --accent: #5eb1ff;
+        --ok: #6ed27a;
+        --warn: #f4c04e;
+        --err: #ef6f6f;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 16px;
+        font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+        background: var(--bg); color: var(--fg);
+      }
+      h1 { font-size: 14px; margin: 0 0 12px; }
+      label { display: block; margin-top: 10px; color: var(--muted); }
+      input[type=text], input[type=password] {
+        width: 100%; padding: 6px 8px; margin-top: 4px;
+        background: #1d2026; color: var(--fg);
+        border: 1px solid #2a2e36; border-radius: 4px;
+      }
+      button {
+        margin-top: 12px; padding: 6px 14px;
+        background: var(--accent); color: #0b1118;
+        border: 0; border-radius: 4px; cursor: pointer; font-weight: 600;
+      }
+      button.secondary { background: #2a2e36; color: var(--fg); }
+      .row { display: flex; gap: 8px; }
+      .row > button { flex: 1; }
+      .card {
+        margin-top: 14px; padding: 10px 12px;
+        background: #1a1d23; border: 1px solid #2a2e36; border-radius: 6px;
+      }
+      .pill {
+        display: inline-block; font-size: 11px; padding: 3px 9px;
+        border-radius: 10px; border: 1px solid var(--muted); color: var(--muted);
+        cursor: pointer; user-select: none;
+      }
+      .pill-ok { color: var(--ok); border-color: var(--ok); }
+      .pill-warn { color: var(--warn); border-color: var(--warn); }
+      .pill-err { color: var(--err); border-color: var(--err); }
+      .pill-muted { color: var(--muted); border-color: var(--muted); }
+      .state-uploaded { color: var(--ok); }
+      .state-waiting_login { color: var(--warn); }
+      .state-error { color: var(--err); }
+      .state-unchanged, .state-forced { color: var(--muted); }
+      pre {
+        margin: 6px 0 0; padding: 6px 8px;
+        background: #0f1115; color: var(--muted);
+        font-size: 11px; overflow-x: auto; border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h1 style="margin:0;">toolkit-desktop · douyin cookie 桥</h1>
+      <span id="connPill" class="pill pill-muted" title="点击立即重试">—</span>
+    </div>
+
+    <label>G10 server base
+      <input id="server" type="text" placeholder="http://g10:8788" />
+    </label>
+    <div class="row" style="margin-top:4px;">
+      <button class="secondary" data-preset="http://127.0.0.1:8788" style="margin-top:0;padding:3px 10px;font-size:11px;">本机</button>
+      <button class="secondary" data-preset="http://g10:8788" style="margin-top:0;padding:3px 10px;font-size:11px;">G10</button>
+    </div>
+    <label>Bearer token（可选）
+      <input id="token" type="password" placeholder="留空则不带 Authorization" />
+    </label>
+    <div class="row">
+      <button id="save">保存配置</button>
+      <button id="login" class="secondary">打开抖音登录</button>
+    </div>
+    <div class="row">
+      <button id="force" class="secondary">立即上传</button>
+      <button id="closeLogin" class="secondary">关闭登录窗</button>
+      <button id="inspect" class="secondary">诊断 cookies</button>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>状态：<span id="state" class="state-unchanged">idle</span></div>
+        <button id="copyDetail" class="secondary" style="margin:0;padding:2px 8px;font-size:11px;">复制</button>
+      </div>
+      <div>上次成功上传：<span id="lastAt">—</span></div>
+      <pre id="detail">等待 uploader tick…</pre>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between;">
+        <span>近期上传</span>
+        <button id="refreshHistory" class="secondary" style="margin:0;padding:2px 8px;font-size:11px;">刷新</button>
+      </div>
+      <pre id="history">—</pre>
+    </div>
+
+    <div class="card">
+      <div>workspace</div>
+      <pre id="wsPath">—</pre>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

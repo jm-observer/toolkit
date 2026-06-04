@@ -9,7 +9,7 @@ async fn start_with_web(web_dir: std::path::PathBuf) -> (SocketAddr, TempDir, Ap
     let dir = tempfile::tempdir().unwrap();
     let cfg = Config {
         bind: addr,
-        data_dir: dir.path().to_path_buf(),
+        workspace: dir.path().to_path_buf(),
         web_dir: web_dir.clone(),
     };
     let state = bootstrap(&cfg).unwrap();

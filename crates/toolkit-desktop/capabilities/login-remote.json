@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "login-remote",
+  "description": "login 窗口加载的是远端 douyin.com，必须显式 remote 允许列表里才允许 invoke 自定义命令（用于 msToken hook 回传）。",
+  "windows": ["login"],
+  "remote": {
+    "urls": [
+      "https://*.douyin.com/*",
+      "https://www.douyin.com/*",
+      "https://douyin.com/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}

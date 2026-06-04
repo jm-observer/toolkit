@@ -17,6 +17,19 @@ use tower_http::services::ServeDir;
 pub use config::Config;
 pub use state::AppState;
 
+/// workspace 根：优先 `TOOLKIT_WORKSPACE` 环境变量；未设置时回退到
+/// `$HOME/.config/toolkit-server`（Windows 走 `%USERPROFILE%`）。
+/// 与 `LinuxService` 安装期 `{workspace}` 模板默认对齐。
+pub fn workspace_dir() -> Result<PathBuf> {
+    if let Some(ws) = std::env::var_os("TOOLKIT_WORKSPACE") {
+        return Ok(PathBuf::from(ws));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("TOOLKIT_WORKSPACE 与 HOME/USERPROFILE 均未设置，无法定位 workspace")?;
+    Ok(PathBuf::from(home).join(".config").join("toolkit-server"))
+}
+
 /// 启动服务，阻塞直至 Ctrl+C。
 pub async fn run(cfg: Config) -> Result<()> {
     let web_dir = cfg.web_dir.clone();
@@ -26,9 +39,9 @@ pub async fn run(cfg: Config) -> Result<()> {
 
 /// 仅做装配（pool/migrate/registry/recovery），不监听 socket。供测试复用。
 pub fn bootstrap(cfg: &Config) -> Result<AppState> {
-    std::fs::create_dir_all(&cfg.data_dir)
-        .with_context(|| format!("create data_dir {}", cfg.data_dir.display()))?;
-    let db_path = cfg.data_dir.join("toolkit.db");
+    std::fs::create_dir_all(&cfg.workspace)
+        .with_context(|| format!("create workspace {}", cfg.workspace.display()))?;
+    let db_path = cfg.workspace.join("toolkit.db");
     let pool = toolkit_core::open_pool(&db_path)?;
     toolkit_core::migrate(&pool)?;
 
@@ -45,7 +58,7 @@ pub fn bootstrap(cfg: &Config) -> Result<AppState> {
         pool,
         registry: Arc::new(registry),
         db_path,
-        data_dir: cfg.data_dir.clone(),
+        workspace: cfg.workspace.clone(),
     })
 }
 
@@ -94,7 +107,10 @@ pub fn build_router(state: AppState, web_dir: &std::path::Path) -> axum::Router 
             "web_dir {} not present; falling back to embedded dashboard",
             web_dir.display()
         );
-        router = router.route("/", axum::routing::get(static_assets::dashboard));
+        router = router
+            .route("/", axum::routing::get(static_assets::dashboard))
+            .route("/app.js", axum::routing::get(static_assets::app_js))
+            .route("/style.css", axum::routing::get(static_assets::style_css));
     }
 
     router.layer(cors).with_state(state)
@@ -115,10 +131,10 @@ pub async fn serve_with_listener(listener: tokio::net::TcpListener, state: AppSt
 }
 
 /// helper：构造 Config 给测试用
-pub fn test_config(data_dir: PathBuf) -> Config {
+pub fn test_config(workspace: PathBuf) -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        data_dir,
+        workspace,
         web_dir: PathBuf::from("/__nonexistent__"),
     }
 }

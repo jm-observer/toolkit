@@ -8,5 +8,6 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub registry: Arc<Registry>,
     pub db_path: PathBuf,
-    pub data_dir: PathBuf,
+    /// workspace 根（toolkit.db / douyin/cookies.json / downloads/ / knowledge/ 等都在此下）。
+    pub workspace: PathBuf,
 }

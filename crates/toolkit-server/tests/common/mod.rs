@@ -15,7 +15,7 @@ impl TestServer {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config {
             bind: addr,
-            data_dir: dir.path().to_path_buf(),
+            workspace: dir.path().to_path_buf(),
             web_dir: std::path::PathBuf::from("/__nonexistent__"),
         };
         let state = bootstrap(&cfg).unwrap();

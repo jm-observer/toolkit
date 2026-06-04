@@ -37,7 +37,7 @@ async fn submit_task(
     match toolkit_tasks::submit(
         &s.registry,
         &s.pool,
-        &s.data_dir,
+        &s.workspace,
         &body.kind,
         body.input,
         body.callback_url,

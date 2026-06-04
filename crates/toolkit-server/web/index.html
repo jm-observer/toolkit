@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>toolkit-server</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>toolkit-server</h1>
+      <div id="status-pills">
+        <span class="pill" id="pill-health">health: —</span>
+        <span class="pill" id="pill-cookie">cookie: —</span>
+      </div>
+    </header>
+
+    <nav id="tabs">
+      <button data-tab="overview" class="active">概览</button>
+      <button data-tab="douyin">抖音</button>
+      <button data-tab="tasks">任务</button>
+      <button data-tab="kb">知识库</button>
+    </nav>
+
+    <main>
+      <!-- ===== 概览 ===== -->
+      <section id="tab-overview" class="active">
+        <div class="card">
+          <h2>Health</h2>
+          <pre id="health-detail">—</pre>
+        </div>
+        <div class="card">
+          <h2>Cookie 状态（来自桌面端推送）</h2>
+          <pre id="cookie-detail">—</pre>
+        </div>
+        <div class="card">
+          <div class="row-head">
+            <h2>近 10 个任务</h2>
+            <button class="secondary" id="overview-refresh">刷新</button>
+          </div>
+          <table id="overview-tasks"><thead>
+            <tr><th>task_id</th><th>kind</th><th>state</th><th>updated_at</th></tr>
+          </thead><tbody></tbody></table>
+        </div>
+      </section>
+
+      <!-- ===== 抖音 ===== -->
+      <section id="tab-douyin">
+        <div class="card">
+          <h2>博主</h2>
+          <label>handle / URL / sec_uid
+            <input id="dy-handle" type="text" placeholder="https://www.douyin.com/user/MS4w... 或 unique_id" />
+          </label>
+          <div class="row">
+            <button data-act="creator">resolve user</button>
+            <button data-act="works" class="secondary">list works（同步）</button>
+            <button data-act="cookie_status" class="secondary">cookie 自检</button>
+          </div>
+          <pre id="dy-out">—</pre>
+        </div>
+        <div class="card">
+          <h2>标签筛选（已抓作品）</h2>
+          <label>unique_id
+            <input id="dy-uid" type="text" placeholder="博主 unique_id" />
+          </label>
+          <label>tags（逗号或空格分隔）
+            <input id="dy-tags" type="text" placeholder="美食, 旅行" />
+          </label>
+          <label>match
+            <select id="dy-match">
+              <option value="all">all（同时含全部）</option>
+              <option value="any">any（含任一）</option>
+            </select>
+          </label>
+          <div class="row">
+            <button data-act="tags">tags 聚合</button>
+            <button data-act="filter" class="secondary">filter 作品</button>
+          </div>
+          <pre id="dy-filter-out">—</pre>
+        </div>
+        <div class="card">
+          <h2>长任务</h2>
+          <label>JSON input
+            <textarea id="dy-task-input" rows="6" placeholder='{"input": "https://www.douyin.com/user/...", "max_pages": 60}'></textarea>
+          </label>
+          <div class="row">
+            <button data-task="sync_works">sync_works</button>
+            <button data-task="download" class="secondary">download</button>
+            <button data-task="transcribe" class="secondary">transcribe</button>
+          </div>
+          <pre id="dy-task-out">—</pre>
+        </div>
+      </section>
+
+      <!-- ===== 任务 ===== -->
+      <section id="tab-tasks">
+        <div class="card">
+          <div class="row-head">
+            <h2>任务列表</h2>
+            <div class="row">
+              <input id="tasks-kind" type="text" placeholder="kind 过滤" style="width:120px" />
+              <input id="tasks-state" type="text" placeholder="state 过滤" style="width:120px" />
+              <input id="tasks-limit" type="number" placeholder="limit" value="50" style="width:80px" />
+              <button class="secondary" id="tasks-refresh">刷新</button>
+            </div>
+          </div>
+          <table id="tasks-table"><thead>
+            <tr><th>task_id</th><th>kind</th><th>state</th><th>created_at</th><th>updated_at</th></tr>
+          </thead><tbody></tbody></table>
+        </div>
+        <div class="card">
+          <div class="row-head">
+            <h2>任务详情</h2>
+            <div class="row">
+              <input id="task-id" type="text" placeholder="task_id" style="width:280px" />
+              <button class="secondary" id="task-detail-btn">查询</button>
+            </div>
+          </div>
+          <pre id="task-detail">点上方表格行或填 task_id 后查询</pre>
+        </div>
+
+        <div class="card">
+          <h2>提交任意 kind</h2>
+          <label>kind <input id="submit-kind" type="text" placeholder="例：echo / douyin_list_works" /></label>
+          <label>input (JSON) <textarea id="submit-input" rows="6">{}</textarea></label>
+          <label>callback_url（可选） <input id="submit-cb" type="text" /></label>
+          <button id="submit-btn">提交</button>
+          <pre id="submit-out">—</pre>
+        </div>
+      </section>
+
+      <!-- ===== 知识库 ===== -->
+      <section id="tab-kb">
+        <div class="card">
+          <h2>knowledge publish</h2>
+          <label>unique_id
+            <input id="kb-uid" type="text" placeholder="博主 unique_id" />
+          </label>
+          <label>only_ids（逗号分隔，留空则全量）
+            <textarea id="kb-ids" rows="3" placeholder="aweme1, aweme2, ..."></textarea>
+          </label>
+          <button id="kb-btn">publish</button>
+          <pre id="kb-out">—</pre>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>endpoints:</span>
+      <code>/api/web/*</code>
+      <code>/api/web/douyin/*</code>
+      <code>/api/browser/*</code>
+      <code>/api/agent/*</code>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

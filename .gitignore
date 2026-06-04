@@ -5,3 +5,5 @@ dist/
 .idea
 .cargo-cache-aarch64
 target-aarch64
+/data/
+crates/toolkit-desktop/gen/

@@ -1,4 +1,4 @@
-//! 从 toolkit `data_dir` 解析 douyin crate 所需的各项目录/文件路径。
+//! 从 toolkit workspace 解析 douyin crate 所需的各项目录/文件路径。
 //!
 //! 与 douyin 库自身的 `resolve_*` 函数语义对齐，但**不依赖** `ZERO_WORKSPACE` 环境变量。
 
@@ -16,15 +16,15 @@ pub struct DouyinPaths {
 }
 
 impl DouyinPaths {
-    pub fn new(data_dir: &Path) -> Self {
-        let douyin = data_dir.join("douyin");
+    pub fn new(workspace: &Path) -> Self {
+        let douyin = workspace.join("douyin");
         Self {
             cookie_file: douyin.join("cookies.json"),
             task_dir: douyin.join("tasks"),
-            out_dir: data_dir.join("downloads").join("douyin"),
+            out_dir: workspace.join("downloads").join("douyin"),
             transcript_dir: douyin.join("transcripts"),
             works_dir: douyin.join("works"),
-            knowledge_dir: data_dir.join("knowledge").join("douyin"),
+            knowledge_dir: workspace.join("knowledge").join("douyin"),
         }
     }
 
