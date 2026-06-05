@@ -10,6 +10,24 @@
   const BRIDGE = "http://127.0.0.1:28788/mstoken";
   let last = "";
 
+  // ===== 周期扫 document.cookie 兜底 =====
+  // 普通 Chrome 里 SDK 把 msToken 写进 cookie；WebView2 里有时不写。但如果某次写了，
+  // URL fetch scan 可能错过那一刻（msToken 还没被用就过期了），这里 5s 一扫兜底。
+  function scanDocCookie() {
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)msToken=([^;]+)/);
+      if (m && m[1]) {
+        const v = decodeURIComponent(m[1]);
+        if (v.length > 16) {
+          try { console.log("[toolkit-desktop] msToken from document.cookie, len=" + v.length); } catch (e) {}
+          send(v);
+        }
+      }
+    } catch (e) {}
+  }
+  scanDocCookie();
+  try { setInterval(scanDocCookie, 5000); } catch (e) {}
+
   // ===== 修复"点头像/视频卡片无反应" =====
   // 抖音 feed 里点头像/作品几乎都是 target=_blank 或 window.open，WebView2 默认
   // 拦截弹窗 → 点了没反应。这里把所有"新窗导航"劫成"同窗导航"，让导航生效，
