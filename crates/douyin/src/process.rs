@@ -184,11 +184,7 @@ fn stale_running_task_ids(task_dir: &Path, stale_secs: i64) -> Result<Vec<String
 
 /// 判定一个任务是否 stale running：state==running 且心跳（缺则退化用 updated_at）
 /// 距今 ≥ stale_secs。心跳时间无法解析时保守判定为非 stale（不误杀）。
-fn is_stale_running(
-    st: &TaskStatus,
-    stale_secs: i64,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
+fn is_stale_running(st: &TaskStatus, stale_secs: i64, now: chrono::DateTime<chrono::Utc>) -> bool {
     if st.state != "running" {
         return false;
     }
@@ -538,7 +534,10 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
                 );
             }
             Err(e) => {
-                log::warn!("[process callback] enqueue/deliver failed task_id={}: {e}", st.task_id);
+                log::warn!(
+                    "[process callback] enqueue/deliver failed task_id={}: {e}",
+                    st.task_id
+                );
             }
         }
     }
@@ -765,7 +764,11 @@ mod tests {
         // running + 心跳超时 → stale
         assert!(is_stale_running(&running_status("dyproc1", &old), 600, now));
         // running + 心跳新鲜 → 非 stale
-        assert!(!is_stale_running(&running_status("dyproc1", &fresh), 600, now));
+        assert!(!is_stale_running(
+            &running_status("dyproc1", &fresh),
+            600,
+            now
+        ));
         // 终态即使心跳很旧也不 reap
         let mut done = running_status("dyproc1", &old);
         done.state = "succeeded".into();
@@ -824,7 +827,11 @@ mod tests {
             asr_model: "m".into(),
             transcribed_at: now(),
         };
-        atomic_write(&transcript_path(&dir, "7a"), &serde_json::to_string(&t).unwrap()).unwrap();
+        atomic_write(
+            &transcript_path(&dir, "7a"),
+            &serde_json::to_string(&t).unwrap(),
+        )
+        .unwrap();
         let ledger = build_ledger(&dir, &["7a".to_string(), "7b".to_string()]);
         assert_eq!(ledger.len(), 2);
         assert_eq!(ledger[0].state, "skipped");
@@ -843,10 +850,38 @@ mod tests {
             failed: 0,
             skipped: 0,
             results: vec![
-                ItemResult { aweme_id: "a".into(), state: "succeeded".into(), downloaded: true, transcribed: true, has_segments: false, error: None },
-                ItemResult { aweme_id: "b".into(), state: "skipped".into(), downloaded: true, transcribed: true, has_segments: false, error: None },
-                ItemResult { aweme_id: "c".into(), state: "failed".into(), downloaded: false, transcribed: false, has_segments: false, error: Some("e".into()) },
-                ItemResult { aweme_id: "d".into(), state: "queued".into(), downloaded: false, transcribed: false, has_segments: false, error: None },
+                ItemResult {
+                    aweme_id: "a".into(),
+                    state: "succeeded".into(),
+                    downloaded: true,
+                    transcribed: true,
+                    has_segments: false,
+                    error: None,
+                },
+                ItemResult {
+                    aweme_id: "b".into(),
+                    state: "skipped".into(),
+                    downloaded: true,
+                    transcribed: true,
+                    has_segments: false,
+                    error: None,
+                },
+                ItemResult {
+                    aweme_id: "c".into(),
+                    state: "failed".into(),
+                    downloaded: false,
+                    transcribed: false,
+                    has_segments: false,
+                    error: Some("e".into()),
+                },
+                ItemResult {
+                    aweme_id: "d".into(),
+                    state: "queued".into(),
+                    downloaded: false,
+                    transcribed: false,
+                    has_segments: false,
+                    error: None,
+                },
             ],
             updated_at: now(),
             heartbeat_at: None,

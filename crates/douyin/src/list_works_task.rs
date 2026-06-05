@@ -744,7 +744,11 @@ mod tests {
         let old = (now - chrono::Duration::seconds(1000)).to_rfc3339();
         let fresh = (now - chrono::Duration::seconds(10)).to_rfc3339();
         assert!(is_stale_running(&running_status("dylw1", &old), 600, now));
-        assert!(!is_stale_running(&running_status("dylw1", &fresh), 600, now));
+        assert!(!is_stale_running(
+            &running_status("dylw1", &fresh),
+            600,
+            now
+        ));
         let mut done = running_status("dylw1", &old);
         done.state = "succeeded".into();
         assert!(!is_stale_running(&done, 600, now));

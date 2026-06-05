@@ -50,14 +50,18 @@ pub async fn is_alive_at(base: &str) -> bool {
 async fn req(method: reqwest::Method, path: &str, body: Option<Value>) -> Value {
     let url = format!("{}{}", daemon_base(), path);
     let client = reqwest::Client::new();
-    let mut rb = client.request(method, &url).timeout(Duration::from_secs(30));
+    let mut rb = client
+        .request(method, &url)
+        .timeout(Duration::from_secs(30));
     if let Some(b) = body {
         rb = rb.json(&b);
     }
     match rb.send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(v) => v,
-            Err(e) => json!({ "error": format!("解析 daemon 响应失败: {e}"), "error_kind": "internal" }),
+            Err(e) => {
+                json!({ "error": format!("解析 daemon 响应失败: {e}"), "error_kind": "internal" })
+            }
         },
         // 连接被拒 / DNS / 连不上 → daemon 没起。
         Err(e) if e.is_connect() => service_unavailable(),

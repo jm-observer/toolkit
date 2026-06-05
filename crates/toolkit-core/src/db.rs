@@ -10,8 +10,10 @@ pub type SqlitePool = r2d2::Pool<SqliteConnectionManager>;
 /// 父目录必须已存在；本函数不创建目录。
 pub fn open_pool(path: &Path) -> Result<SqlitePool> {
     let manager = SqliteConnectionManager::file(path).with_init(|c| {
+        // busy_timeout 先设，让后续 PRAGMA 在并发预热时能内部等而非立刻 "database is locked"。
         c.execute_batch(
-            "PRAGMA journal_mode=WAL;\n\
+            "PRAGMA busy_timeout=5000;\n\
+             PRAGMA journal_mode=WAL;\n\
              PRAGMA synchronous=NORMAL;\n\
              PRAGMA foreign_keys=OFF;",
         )
