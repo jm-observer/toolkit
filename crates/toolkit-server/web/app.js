@@ -191,9 +191,58 @@ $("kb-btn").onclick = async () => {
   } catch (e) { out.textContent = e.message; }
 };
 
+// -------- desktop 桥（127.0.0.1:28788） --------
+const DESKTOP_BRIDGE = "http://127.0.0.1:28788";
+let lastDesktopCtx = null;
+
+async function refreshDesktop() {
+  const pill = $("pill-desktop");
+  try {
+    const res = await fetch(DESKTOP_BRIDGE + "/context", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const ctx = await res.json();
+    lastDesktopCtx = ctx;
+    const loginOk = ctx.login && ctx.login.has_window;
+    const msOk = ctx.ms_token && ctx.ms_token.present;
+    const thsOk = ctx.ths && ctx.ths.has_required && !ctx.ths.ticket_is_session;
+    const parts = [];
+    parts.push(loginOk ? "login✓" : "login✗");
+    parts.push(msOk ? "msToken✓" : "msToken✗");
+    parts.push(thsOk ? "ths✓" : "ths-");
+    pill.textContent = "desktop: " + parts.join(" ");
+    pill.className = "pill " + (loginOk && msOk ? "ok" : "warn");
+    const det = $("ctx-detail");
+    if (det) det.textContent = JSON.stringify(ctx, null, 2);
+  } catch (e) {
+    lastDesktopCtx = null;
+    pill.textContent = "desktop: 离线";
+    pill.className = "pill err";
+    pill.title = String(e);
+    const det = $("ctx-detail");
+    if (det && !det.textContent.startsWith("{")) {
+      det.textContent = "未连接到 desktop 桥 (127.0.0.1:28788): " + e.message;
+    }
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const r = document.getElementById("ctx-refresh");
+  if (r) r.onclick = refreshDesktop;
+  const u = document.getElementById("ctx-use-url");
+  if (u) u.onclick = () => {
+    const url = lastDesktopCtx && lastDesktopCtx.login && lastDesktopCtx.login.url;
+    if (!url) { alert("desktop login 窗口未打开，或还没导航"); return; }
+    $("dy-handle").value = url;
+    $("dy-handle").scrollIntoView({behavior: "smooth", block: "nearest"});
+  };
+});
+$("pill-desktop").onclick = refreshDesktop;
+
 // init
 refreshHealth();
 refreshCookie();
 refreshOverviewTasks();
-// 30s 自动刷新概览状态
+refreshDesktop();
+// 30s 自动刷新概览状态；desktop 桥 10s 一次
 setInterval(() => { refreshHealth(); refreshCookie(); }, 30000);
+setInterval(refreshDesktop, 10000);

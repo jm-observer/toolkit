@@ -133,7 +133,11 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
-            bridge::spawn(ctx.uploader.clone());
+            bridge::spawn(bridge::BridgeCtx {
+                app: app.handle().clone(),
+                uploader: ctx.uploader.clone(),
+                workspace: ctx.workspace.clone(),
+            });
             ths_watcher::spawn(app.handle().clone(), ctx.clone());
             Ok(())
         })

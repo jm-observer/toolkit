@@ -12,6 +12,7 @@
       <div id="status-pills">
         <span class="pill" id="pill-health">health: —</span>
         <span class="pill" id="pill-cookie">cookie: —</span>
+        <span class="pill" id="pill-desktop" title="点击立即刷新 desktop 桥状态">desktop: —</span>
       </div>
     </header>
 
@@ -46,6 +47,14 @@
 
       <!-- ===== 抖音 ===== -->
       <section id="tab-douyin">
+        <div class="card" id="desktop-ctx-card">
+          <h2>desktop 上下文（从本机 127.0.0.1:28788 拉）</h2>
+          <div class="row">
+            <button class="secondary" id="ctx-refresh">刷新</button>
+            <button class="secondary" id="ctx-use-url">使用 desktop 当前 URL 填入 handle</button>
+          </div>
+          <pre id="ctx-detail">未连接到 desktop 桥；请确认桌面端在跑（cargo tauri dev 或 toolkit-desktop run）。</pre>
+        </div>
         <div class="card">
           <h2>博主</h2>
           <label>handle / URL / sec_uid
