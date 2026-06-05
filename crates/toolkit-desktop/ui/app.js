@@ -78,19 +78,52 @@ async function refreshServerCookie() {
 }
 $("g10Pill").onclick = refreshServerCookie;
 
-// ============ 抖音登录窗 ============
-$("login").onclick = async () => {
-  // 登录前先查 G10：还活着的话提醒一下，避免无谓重登
-  await refreshServerCookie();
-  if (lastServerCookie && lastServerCookie.logged_in && lastServerCookie.has_required) {
-    const ok = confirm(
-      `G10 已有有效 cookie（${lastServerCookie.fields} 个字段，user_uid=${lastServerCookie.user_uid || "?"}）。\n\n` +
-      `通常不必重登。仍要打开登录窗口吗？`
-    );
-    if (!ok) { toast("跳过登录 · G10 cookie 仍有效"); return; }
+// ============ 登录 cookie 失效时间 ============
+function fmtDuration(secs) {
+  if (secs == null) return "?";
+  if (secs < 0) return "已过期";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  if (d > 0) return `${d}d${h}h`;
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return `${h}h${m}m`;
+  return `${m}m`;
+}
+
+async function refreshLoginExpiry() {
+  try {
+    const r = await invoke("cmd_login_expiry");
+    const line = $("expiryInfo");
+    if (r.state === "no_window") {
+      line.textContent = "登录失效信息：未打开登录窗";
+      line.style.color = "var(--muted)";
+      return;
+    }
+    if (!r.critical || r.critical.length === 0) {
+      line.textContent = `登录失效信息：未检测到关键 cookie（共 ${r.cookies_total || 0} 条）`;
+      line.style.color = "var(--warn)";
+      return;
+    }
+    const remaining = r.earliest_remaining_secs;
+    const at = r.earliest_expires_at ? r.earliest_expires_at.slice(0, 19) : "?";
+    let color = "var(--muted)";
+    if (remaining != null) {
+      if (remaining < 0) color = "var(--err)";
+      else if (remaining < 3 * 86400) color = "var(--warn)";
+      else color = "var(--ok)";
+    }
+    line.style.color = color;
+    line.textContent = `登录失效：${at} (余 ${fmtDuration(remaining)})`;
+    line.title = r.critical
+      .map((c) => `${c.name}: ${c.is_session ? "session 票" : (c.expires_at || "?") + " (余 " + fmtDuration(c.remaining_secs) + ")"}`)
+      .join("\n");
+  } catch (e) {
+    $("expiryInfo").textContent = "登录失效信息：" + String(e);
   }
-  await invoke("cmd_open_login");
-};
+}
+
+// ============ 抖音登录窗（点了就开，不拦截） ============
+$("login").onclick = () => invoke("cmd_open_login");
 $("closeLogin").onclick = () => invoke("cmd_close_login");
 $("force").onclick = () => invoke("cmd_force_upload_now");
 $("inspect").onclick = async () => {
@@ -155,8 +188,9 @@ listen("uploader:status", (e) => {
       setPill("loginPill", `login: 已传·${p.fields || 0}`, "ok");
       setPill("msPill", "msToken: 在", "ok");
       toast(`✓ cookie 已同步到 G10 · ${p.fields || 0} 字段`);
-      // 上传成功也顺手刷一下 g10 pill
+      // 上传成功顺手刷 g10 pill 和 expiry
       refreshServerCookie();
+      refreshLoginExpiry();
       break;
     case "unchanged":
       setPill("loginPill", `login: ok·${p.fields || 0}`, "ok");
@@ -241,5 +275,7 @@ loadSettings();
 pingServer();
 initialThs();
 refreshServerCookie();
+refreshLoginExpiry();
 setInterval(pingServer, 15000);
 setInterval(refreshServerCookie, 30000);
+setInterval(refreshLoginExpiry, 60000);

@@ -130,6 +130,7 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
             cmd_close_ths_login,
             cmd_ths_status,
             cmd_check_server_cookie,
+            cmd_login_expiry,
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
@@ -236,6 +237,64 @@ async fn cmd_close_ths_login(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn cmd_ths_status(ctx: tauri::State<'_, AppCtx>) -> ths::StatusReport {
     ths::status_report(&ctx.workspace)
+}
+
+/// 解析 login 窗里关键 cookie 的失效时间（持久 cookie 含 expires，session cookie 标记为 null）。
+/// 关键 cookie 名：sessionid_ss / ttwid / sid_guard / sid_tt。返回最早过期时间 + 各字段明细。
+#[tauri::command]
+async fn cmd_login_expiry(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use chrono::TimeZone;
+    let Some(login) = app.get_webview_window("login") else {
+        return Ok(serde_json::json!({ "state": "no_window" }));
+    };
+    let target: url::Url = "https://www.douyin.com"
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
+    let cookies = login.cookies_for_url(target).map_err(|e| e.to_string())?;
+
+    const CRITICAL: &[&str] = &["sessionid_ss", "ttwid", "sid_guard", "sid_tt"];
+    let now = chrono::Utc::now().timestamp();
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut earliest: Option<i64> = None;
+    for c in &cookies {
+        if !CRITICAL.contains(&c.name()) {
+            continue;
+        }
+        let ts = match c.expires() {
+            Some(tauri::webview::cookie::Expiration::DateTime(dt)) => Some(dt.unix_timestamp()),
+            _ => None,
+        };
+        let iso = ts.and_then(|t| {
+            chrono::Utc
+                .timestamp_opt(t, 0)
+                .single()
+                .map(|d| d.with_timezone(&chrono::Local).to_rfc3339())
+        });
+        let remaining = ts.map(|t| t - now);
+        if let Some(t) = ts {
+            earliest = Some(earliest.map_or(t, |e| e.min(t)));
+        }
+        entries.push(serde_json::json!({
+            "name": c.name(),
+            "expires_at": iso,
+            "remaining_secs": remaining,
+            "is_session": ts.is_none(),
+        }));
+    }
+    let earliest_iso = earliest.and_then(|t| {
+        chrono::Utc
+            .timestamp_opt(t, 0)
+            .single()
+            .map(|d| d.with_timezone(&chrono::Local).to_rfc3339())
+    });
+    let earliest_remaining = earliest.map(|t| t - now);
+    Ok(serde_json::json!({
+        "state": "ok",
+        "critical": entries,
+        "earliest_expires_at": earliest_iso,
+        "earliest_remaining_secs": earliest_remaining,
+        "cookies_total": cookies.len(),
+    }))
 }
 
 // 业务下沉：所有抖音 / 同花顺业务操作走 G10 web UI。
