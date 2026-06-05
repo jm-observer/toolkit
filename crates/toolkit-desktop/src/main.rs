@@ -388,8 +388,10 @@ async fn cmd_check_server_cookie(
     }
 }
 
-/// 强制立刻把当前 cookies 上传一次（清掉 dedup hash，下次 tick 必然上传）。
-/// 诊断：列出 login 窗口能看到的所有 douyin cookie（仅名字 + 长度，避免回显敏感值到 UI）。
+/// 诊断：分三个视角查 cookie，定位 msToken 究竟在不在 cookie store 里。
+/// - `all`：`webview.cookies()` 整个 WebView2 cookie store
+/// - `www`：`cookies_for_url("https://www.douyin.com")` 仅匹配本域
+/// - `api`：`cookies_for_url("https://api.douyin.com")`（msToken 在抖音也常挂这个子域）
 #[tauri::command]
 async fn cmd_inspect_cookies(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let Some(login) = app.get_webview_window("login") else {
@@ -398,40 +400,55 @@ async fn cmd_inspect_cookies(app: tauri::AppHandle) -> Result<serde_json::Value,
             "hint": "请先点「打开抖音登录」按钮，并保持窗口不关闭",
         }));
     };
-    let url: url::Url = "https://www.douyin.com".parse().map_err(|e: url::ParseError| e.to_string())?;
-    let cookies = login.cookies_for_url(url).map_err(|e| e.to_string())?;
-    let summary: Vec<serde_json::Value> = cookies
-        .iter()
-        .map(|c| {
+
+    fn summarize(cookies: &[tauri::webview::cookie::Cookie<'static>]) -> serde_json::Value {
+        let names: Vec<&str> = cookies.iter().map(|c| c.name()).collect();
+        let has_ms = names.contains(&"msToken");
+        let ms_info = cookies.iter().find(|c| c.name() == "msToken").map(|c| {
             serde_json::json!({
-                "name": c.name(),
                 "len": c.value().len(),
                 "domain": c.domain(),
                 "path": c.path(),
                 "http_only": c.http_only(),
                 "secure": c.secure(),
             })
+        });
+        let list: Vec<serde_json::Value> = cookies
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name(),
+                    "len": c.value().len(),
+                    "domain": c.domain(),
+                    "path": c.path(),
+                    "http_only": c.http_only(),
+                    "secure": c.secure(),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "count": cookies.len(),
+            "has_ms_token": has_ms,
+            "ms_token": ms_info,
+            "names": names,
+            "all": list,
         })
-        .collect();
-    let names: Vec<&str> = cookies.iter().map(|c| c.name()).collect();
-    let required = ["ttwid", "sessionid_ss"];
-    let missing: Vec<&str> = required.iter().copied().filter(|k| !names.contains(k)).collect();
-    let has_ms_token = names.contains(&"msToken");
-    let session_variants: Vec<&str> = ["sessionid", "sessionid_ss", "sid_tt", "sid_guard", "passport_csrf_token"]
-        .iter()
-        .copied()
-        .filter(|k| names.contains(k))
-        .collect();
+    }
+
+    let all = login.cookies().map_err(|e| e.to_string())?;
+    let www = login
+        .cookies_for_url("https://www.douyin.com".parse::<url::Url>().unwrap())
+        .map_err(|e| e.to_string())?;
+    let api = login
+        .cookies_for_url("https://api.douyin.com".parse::<url::Url>().unwrap())
+        .map_err(|e| e.to_string())?;
+
     Ok(serde_json::json!({
         "state": "ok",
-        "count": cookies.len(),
-        "missing_required": missing,
-        "has_ms_token": has_ms_token,
-        "ms_token_hint": if has_ms_token { serde_json::Value::Null } else {
-            serde_json::Value::String("msToken 由抖音前端 JS 动态写入，浏览首页/视频后会出现；缺它不影响上传".into())
-        },
-        "session_variants_present": session_variants,
-        "cookies": summary,
+        "view_all":  summarize(&all),
+        "view_www":  summarize(&www),
+        "view_api":  summarize(&api),
+        "hint": "比对三栏的 has_ms_token：若 view_all=true 但 view_www=false → msToken 是设在某个子域（domain 字段会告诉你），uploader 拼 header 时按 view_all 取即可。",
     }))
 }
 

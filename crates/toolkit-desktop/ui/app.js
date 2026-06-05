@@ -62,6 +62,16 @@ $("login").onclick = () => invoke("cmd_open_login");
 $("closeLogin").onclick = () => invoke("cmd_close_login");
 $("thsLogin").onclick = () => invoke("cmd_open_ths_login");
 $("thsClose").onclick = () => invoke("cmd_close_ths_login");
+$("inspect").onclick = async () => {
+  $("detail").textContent = "inspecting…";
+  try {
+    const r = await invoke("cmd_inspect_cookies");
+    $("detail").textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    $("detail").textContent = String(e);
+  }
+};
+
 $("trackCreator").onclick = async () => {
   $("detail").textContent = "解析中…";
   try {
