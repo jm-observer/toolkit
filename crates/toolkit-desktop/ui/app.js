@@ -62,6 +62,17 @@ $("login").onclick = () => invoke("cmd_open_login");
 $("closeLogin").onclick = () => invoke("cmd_close_login");
 $("thsLogin").onclick = () => invoke("cmd_open_ths_login");
 $("thsClose").onclick = () => invoke("cmd_close_ths_login");
+$("trackCreator").onclick = async () => {
+  $("detail").textContent = "解析中…";
+  try {
+    const r = await invoke("cmd_track_current_creator");
+    $("detail").textContent = JSON.stringify(r, null, 2);
+    toast(`✓ 已加入博主库: ${r.nickname || r.unique_id || "?"}`);
+  } catch (e) {
+    $("detail").textContent = String(e);
+    toast("解析失败", "err");
+  }
+};
 
 // ============ G10 连接 pill ============
 async function pingServer() {

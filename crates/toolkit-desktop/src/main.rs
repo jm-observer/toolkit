@@ -131,6 +131,7 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
             cmd_ths_status,
             cmd_check_server_cookie,
             cmd_login_expiry,
+            cmd_track_current_creator,
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
@@ -237,6 +238,45 @@ async fn cmd_close_ths_login(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn cmd_ths_status(ctx: tauri::State<'_, AppCtx>) -> ths::StatusReport {
     ths::status_report(&ctx.workspace)
+}
+
+/// 读 login 窗当前 URL → POST G10 `/api/web/douyin/creators` 解析 + upsert 到博主库。
+/// desktop 唯一的业务"动作"，因为博主上下文（用户当前看的是谁）只在登录窗里。
+/// 解析结果由 G10 落库，web 端去拉列表展示，desktop 不存。
+#[tauri::command]
+async fn cmd_track_current_creator(
+    ctx: tauri::State<'_, AppCtx>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let login = app
+        .get_webview_window("login")
+        .ok_or_else(|| "没有打开抖音登录窗口".to_string())?;
+    let url = login.url().map_err(|e| format!("读 login URL: {e}"))?.to_string();
+
+    let settings = config::load(&workspace::config_path(&ctx.workspace));
+    if !settings.is_configured() {
+        return Err("Server base 未配置".to_string());
+    }
+    let base = settings.server_base.trim_end_matches('/');
+    let endpoint = format!("{base}/api/web/douyin/creators");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut req = client
+        .post(&endpoint)
+        .json(&serde_json::json!({ "handle": url }));
+    if let Some(tok) = settings.auth_token.as_deref().filter(|s| !s.is_empty()) {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("server {status}: {body}"));
+    }
+    Ok(body)
 }
 
 /// 解析 login 窗里关键 cookie 的失效时间（持久 cookie 含 expires，session cookie 标记为 null）。

@@ -22,6 +22,7 @@ document.querySelectorAll("nav#tabs button").forEach((b) => {
     b.classList.add("active");
     $("tab-" + b.dataset.tab).classList.add("active");
     if (b.dataset.tab === "tasks") refreshTasks();
+    if (b.dataset.tab === "douyin") refreshCreators();
   };
 });
 
@@ -228,40 +229,61 @@ async function refreshDesktop() {
 document.addEventListener("DOMContentLoaded", () => {
   const r = document.getElementById("ctx-refresh");
   if (r) r.onclick = refreshDesktop;
-  const u = document.getElementById("ctx-use-url");
-  if (u) u.onclick = () => {
-    const url = lastDesktopCtx && lastDesktopCtx.login && lastDesktopCtx.login.url;
-    if (!url) { alert("desktop login 窗口未打开，或还没导航"); return; }
-    $("dy-handle").value = url;
-    $("dy-handle").scrollIntoView({behavior: "smooth", block: "nearest"});
-  };
-  const rn = document.getElementById("ctx-resolve-now");
-  if (rn) rn.onclick = async () => {
-    // 先拿最新 desktop URL（不依赖 10s 缓存）
-    let url;
-    try {
-      const r = await fetch(DESKTOP_BRIDGE + "/login-url", { cache: "no-store" });
-      const j = await r.json();
-      if (!j.has_window) { alert("desktop 登录窗未打开。请到桌面端点「抖音登录」。"); return; }
-      url = j.url;
-      if (!url) { alert("desktop 已有登录窗但 URL 为空。"); return; }
-    } catch (e) {
-      alert("拉 desktop 桥失败 (127.0.0.1:28788): " + e.message); return;
-    }
-    $("dy-handle").value = url;
-    $("ctx-detail").textContent = `→ 当前 URL: ${url}\n→ 调 GET /api/web/douyin/creator ...`;
-    try {
-      const creator = await api(`/api/web/douyin/creator?handle=${encodeURIComponent(url)}`);
-      $("ctx-detail").textContent = `URL: ${url}\n\n${JSON.stringify(creator, null, 2)}`;
-      // 同时同步到博主区下面的 pre 框，方便用户继续点 list works
-      $("dy-out").textContent = JSON.stringify(creator, null, 2);
-      // 自动把 unique_id 灌进标签区，省一次复制
-      if (creator.unique_id) $("dy-uid").value = creator.unique_id;
-    } catch (e) {
-      $("ctx-detail").textContent = `URL: ${url}\n\nresolve 失败: ${e.message}`;
-    }
-  };
+  const cr = document.getElementById("creators-refresh");
+  if (cr) cr.onclick = refreshCreators;
 });
+
+async function refreshCreators() {
+  const tbody = $("creators-table").querySelector("tbody");
+  try {
+    const r = await api("/api/web/douyin/creators?limit=200");
+    const list = r.creators || [];
+    if (!list.length) {
+      tbody.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">空。到桌面端点「解析当前博主」加入。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = list.map((c) => {
+      const last = c.last_synced_at ? c.last_synced_at.slice(0, 19).replace("T", " ") : "—";
+      return `<tr data-uid="${c.unique_id}" data-secuid="${c.sec_uid || ""}" data-url="https://www.douyin.com/user/${c.sec_uid || ""}">
+        <td>${c.nickname || "—"}</td>
+        <td><code>${c.unique_id}</code></td>
+        <td>${c.aweme_count ?? "—"}</td>
+        <td>${c.follower_count ?? "—"}</td>
+        <td style="color:var(--muted)">${last}</td>
+        <td>
+          <button class="secondary act-tags" style="margin:0;padding:3px 8px;font-size:10px;">tags</button>
+          <button class="secondary act-sync" style="margin:0;padding:3px 8px;font-size:10px;">sync_works</button>
+        </td>
+      </tr>`;
+    }).join("");
+    tbody.querySelectorAll("tr").forEach((tr) => {
+      const uid = tr.dataset.uid;
+      const url = tr.dataset.url;
+      tr.querySelector(".act-tags").onclick = async (ev) => {
+        ev.stopPropagation();
+        try {
+          const r = await api(`/api/web/douyin/tags?unique_id=${encodeURIComponent(uid)}`);
+          $("dy-uid").value = uid;
+          $("dy-filter-out").textContent = JSON.stringify(r, null, 2);
+        } catch (e) { alert(e.message); }
+      };
+      tr.querySelector(".act-sync").onclick = async (ev) => {
+        ev.stopPropagation();
+        try {
+          const r = await api(`/api/web/douyin/sync_works`, {
+            method: "POST",
+            body: JSON.stringify({ input: url, max_pages: 60 }),
+          });
+          $("dy-task-out").textContent = JSON.stringify(r, null, 2);
+          refreshTasks();
+        } catch (e) { alert(e.message); }
+      };
+      tr.onclick = () => { $("dy-handle").value = url; };
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6">${e.message}</td></tr>`;
+  }
+}
 $("pill-desktop").onclick = refreshDesktop;
 
 // init

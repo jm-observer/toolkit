@@ -47,14 +47,24 @@
 
       <!-- ===== 抖音 ===== -->
       <section id="tab-douyin">
+        <div class="card" id="creators-card">
+          <div class="row-head">
+            <h2>已追踪博主</h2>
+            <button class="secondary" id="creators-refresh">刷新</button>
+          </div>
+          <table id="creators-table"><thead>
+            <tr><th>nickname</th><th>unique_id</th><th>aweme</th><th>fans</th><th>last_synced</th><th></th></tr>
+          </thead><tbody></tbody></table>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px;">
+            桌面端登录窗里点进博主主页 → 桌面端「解析当前博主」→ G10 落库 → 这里出现。
+          </div>
+        </div>
         <div class="card" id="desktop-ctx-card">
-          <h2>desktop 上下文（从本机 127.0.0.1:28788 拉）</h2>
-          <div class="row">
-            <button id="ctx-resolve-now">解析当前博主主页</button>
-            <button class="secondary" id="ctx-use-url">仅填入 handle</button>
+          <div class="row-head">
+            <h2>desktop 当前 URL</h2>
             <button class="secondary" id="ctx-refresh">刷新</button>
           </div>
-          <pre id="ctx-detail">未连接到 desktop 桥；请确认桌面端在跑。「解析当前博主主页」会读 desktop 登录窗的 URL → 直接 GET creator API → 展示结果。</pre>
+          <pre id="ctx-detail">未连接到 desktop 桥。</pre>
         </div>
         <div class="card">
           <h2>博主</h2>
