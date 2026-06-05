@@ -8,6 +8,8 @@
       :root {
         color-scheme: light dark;
         --bg: #14161a;
+        --panel: #1a1d23;
+        --border: #2a2e36;
         --fg: #e6e6e6;
         --muted: #8a8f98;
         --accent: #5eb1ff;
@@ -17,119 +19,105 @@
       }
       * { box-sizing: border-box; }
       body {
-        margin: 0; padding: 16px;
-        font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+        margin: 0; padding: 14px;
+        font: 12.5px/1.5 "Segoe UI", system-ui, sans-serif;
         background: var(--bg); color: var(--fg);
       }
-      h1 { font-size: 14px; margin: 0 0 12px; }
-      label { display: block; margin-top: 10px; color: var(--muted); }
+      h1 { font-size: 13px; margin: 0 0 10px; font-weight: 600; }
+      h2 { font-size: 11px; margin: 0 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+      label { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
       input[type=text], input[type=password] {
-        width: 100%; padding: 6px 8px; margin-top: 4px;
+        width: 100%; padding: 5px 7px; margin-top: 3px;
         background: #1d2026; color: var(--fg);
-        border: 1px solid #2a2e36; border-radius: 4px;
+        border: 1px solid var(--border); border-radius: 4px;
+        font-size: 12px;
       }
       button {
-        margin-top: 12px; padding: 6px 14px;
+        margin-top: 8px; padding: 5px 11px;
         background: var(--accent); color: #0b1118;
-        border: 0; border-radius: 4px; cursor: pointer; font-weight: 600;
+        border: 0; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11.5px;
       }
-      button.secondary { background: #2a2e36; color: var(--fg); }
-      .row { display: flex; gap: 8px; }
-      .row > button { flex: 1; }
+      button.secondary { background: #2a2e36; color: var(--fg); font-weight: 500; }
+      button:active { opacity: 0.7; }
+      .row { display: flex; gap: 6px; flex-wrap: wrap; }
+      .row > button { margin-top: 8px; flex: 0 0 auto; }
       .card {
-        margin-top: 14px; padding: 10px 12px;
-        background: #1a1d23; border: 1px solid #2a2e36; border-radius: 6px;
+        margin-top: 10px; padding: 9px 11px;
+        background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
       }
+      .pills { display: flex; flex-wrap: wrap; gap: 6px; }
       .pill {
-        display: inline-block; font-size: 11px; padding: 3px 9px;
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 11px; padding: 3px 9px;
         border-radius: 10px; border: 1px solid var(--muted); color: var(--muted);
-        cursor: pointer; user-select: none;
+        cursor: default; user-select: none; white-space: nowrap;
       }
       .pill-ok { color: var(--ok); border-color: var(--ok); }
       .pill-warn { color: var(--warn); border-color: var(--warn); }
       .pill-err { color: var(--err); border-color: var(--err); }
       .pill-muted { color: var(--muted); border-color: var(--muted); }
-      .state-uploaded { color: var(--ok); }
-      .state-waiting_login { color: var(--warn); }
-      .state-error { color: var(--err); }
-      .state-unchanged, .state-forced { color: var(--muted); }
+      .pill-clickable { cursor: pointer; }
       pre {
         margin: 6px 0 0; padding: 6px 8px;
         background: #0f1115; color: var(--muted);
-        font-size: 11px; overflow-x: auto; border-radius: 4px;
+        font-size: 10.5px; overflow: auto; border-radius: 4px;
+        max-height: 160px;
+        white-space: pre-wrap; word-break: break-all;
       }
+      .footer { margin-top: 10px; color: var(--muted); font-size: 10px; }
+      .footer code { background: var(--panel); padding: 1px 5px; border-radius: 3px; color: var(--fg); }
     </style>
   </head>
   <body>
     <div style="display:flex;justify-content:space-between;align-items:center;">
-      <h1 style="margin:0;">toolkit-desktop · douyin cookie 桥</h1>
-      <span id="connPill" class="pill pill-muted" title="点击立即重试">—</span>
-    </div>
-
-    <label>G10 server base
-      <input id="server" type="text" placeholder="http://g10:8788" />
-    </label>
-    <div class="row" style="margin-top:4px;">
-      <button class="secondary" data-preset="http://127.0.0.1:8788" style="margin-top:0;padding:3px 10px;font-size:11px;">本机</button>
-      <button class="secondary" data-preset="http://g10:8788" style="margin-top:0;padding:3px 10px;font-size:11px;">G10</button>
-    </div>
-    <label>Bearer token（可选）
-      <input id="token" type="password" placeholder="留空则不带 Authorization" />
-    </label>
-    <div class="row">
-      <button id="save">保存配置</button>
-      <button id="login" class="secondary">打开抖音登录</button>
-    </div>
-    <div class="row">
-      <button id="force" class="secondary">立即上传</button>
-      <button id="closeLogin" class="secondary">关闭登录窗</button>
-      <button id="inspect" class="secondary">诊断 cookies</button>
+      <h1>toolkit-desktop · 后台桥</h1>
+      <button id="copyDetail" class="secondary" style="margin:0;padding:2px 8px;font-size:10px;">复制日志</button>
     </div>
 
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div>状态：<span id="state" class="state-unchanged">idle</span></div>
-        <button id="copyDetail" class="secondary" style="margin:0;padding:2px 8px;font-size:11px;">复制</button>
-      </div>
-      <div>上次成功上传：<span id="lastAt">—</span></div>
-      <pre id="detail">等待 uploader tick…</pre>
-    </div>
-
-    <div class="card">
-      <strong>抖音博主操作</strong>
-      <div style="color:var(--muted);margin-top:4px;font-size:11px;">
-        登录窗里点进某博主主页，回这里点解析。
+      <div class="pills">
+        <span id="connPill" class="pill pill-muted pill-clickable" title="点击重试">conn: —</span>
+        <span id="loginPill" class="pill pill-muted">login: —</span>
+        <span id="msPill" class="pill pill-muted">msToken: —</span>
+        <span id="thsPill" class="pill pill-muted">ths: —</span>
       </div>
       <div class="row">
-        <button id="dyResolve">解析当前博主</button>
-      </div>
-      <pre id="dyResolveOut">—</pre>
-    </div>
-
-    <div class="card">
-      <div style="display:flex; justify-content:space-between;">
-        <span>近期上传</span>
-        <button id="refreshHistory" class="secondary" style="margin:0;padding:2px 8px;font-size:11px;">刷新</button>
-      </div>
-      <pre id="history">—</pre>
-    </div>
-
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <strong>同花顺（10jqka）</strong>
-        <span id="thsPill" class="pill pill-muted" style="cursor:default;">—</span>
+        <button id="login">抖音登录</button>
+        <button id="closeLogin" class="secondary">关</button>
+        <button id="thsLogin">同花顺登录</button>
+        <button id="thsClose" class="secondary">关</button>
       </div>
       <div class="row">
-        <button id="thsLogin" class="secondary">打开同花顺登录</button>
-        <button id="thsClose" class="secondary">关窗</button>
-        <button id="thsRefresh" class="secondary">刷新</button>
+        <button id="force" class="secondary">立即上传 cookie</button>
+        <button id="inspect" class="secondary">诊断 cookies</button>
       </div>
-      <pre id="thsDetail">点「打开同花顺登录」，登录窗里完成账号 + 滑块，务必勾「记住我」。</pre>
     </div>
 
     <div class="card">
-      <div>workspace</div>
-      <pre id="wsPath">—</pre>
+      <h2>Server</h2>
+      <label>G10 server base
+        <input id="server" type="text" placeholder="http://g10:8788" />
+      </label>
+      <div class="row" style="margin-top:2px;">
+        <button class="secondary" data-preset="http://127.0.0.1:8788" style="margin-top:0;padding:2px 8px;font-size:10px;">本机</button>
+        <button class="secondary" data-preset="http://g10:8788" style="margin-top:0;padding:2px 8px;font-size:10px;">G10</button>
+      </div>
+      <label>Bearer token（可选）
+        <input id="token" type="password" />
+      </label>
+      <div class="row">
+        <button id="save">保存</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>详情 / 日志</h2>
+      <pre id="detail">等待 uploader / watcher tick…</pre>
+    </div>
+
+    <div class="footer">
+      workspace: <code id="wsPath">—</code><br/>
+      bridge: <code>127.0.0.1:28788</code>　业务操作请到 G10 web 控制台
     </div>
 
     <script src="app.js"></script>
