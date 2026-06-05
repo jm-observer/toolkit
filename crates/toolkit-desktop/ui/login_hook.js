@@ -10,6 +10,33 @@
   const BRIDGE = "http://127.0.0.1:28788/mstoken";
   let last = "";
 
+  // ===== 修复"点头像/视频卡片无反应" =====
+  // 抖音 feed 里点头像/作品几乎都是 target=_blank 或 window.open，WebView2 默认
+  // 拦截弹窗 → 点了没反应。这里把所有"新窗导航"劫成"同窗导航"，让导航生效，
+  // 用户跳到博主主页后，URL 变化会被 desktop 桥的 /login-url 接口读到。
+  try {
+    const _open = window.open;
+    window.open = function (url) {
+      if (url) { try { window.location.href = url; } catch (e) {} return null; }
+      return _open.apply(this, arguments);
+    };
+  } catch (e) {}
+  try {
+    document.addEventListener("click", function (ev) {
+      let el = ev.target;
+      while (el && el !== document) {
+        if (el.tagName === "A" && el.target === "_blank" && el.href) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          try { window.location.href = el.href; } catch (e) {}
+          return;
+        }
+        el = el.parentElement;
+      }
+    }, true);
+  } catch (e) {}
+
+
   function send(v) {
     if (!v || v === last) return;
     last = v;
