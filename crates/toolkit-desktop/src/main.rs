@@ -129,6 +129,7 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
             cmd_open_ths_login,
             cmd_close_ths_login,
             cmd_ths_status,
+            cmd_check_server_cookie,
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
@@ -240,6 +241,53 @@ fn cmd_ths_status(ctx: tauri::State<'_, AppCtx>) -> ths::StatusReport {
 // 业务下沉：所有抖音 / 同花顺业务操作走 G10 web UI。
 // desktop 不再代理业务调用，仅提供本机上下文（登录窗 URL / cookie / msToken / ths）
 // 给 G10 web 通过 127.0.0.1:28788 bridge 拉取。
+//
+// 例外：cookie_status — 桌面端在「打开抖音登录」前需要先问一下 G10 cookie 是否还活，
+// 给用户「可能不必重登」的判断依据，所以走 desktop 后端代理一次。
+
+/// 拉 `<server>/api/web/douyin/cookie_status`，给桌面端做「是否需要重登」预判用。
+/// 4s 超时；不抛业务错，返回结构化 {state, ...}。
+#[tauri::command]
+async fn cmd_check_server_cookie(
+    ctx: tauri::State<'_, AppCtx>,
+) -> Result<serde_json::Value, String> {
+    let settings = config::load(&workspace::config_path(&ctx.workspace));
+    if !settings.is_configured() {
+        return Ok(serde_json::json!({ "state": "unconfigured" }));
+    }
+    let base = settings.server_base.trim_end_matches('/');
+    let url = format!("{base}/api/web/douyin/cookie_status");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut req = client.get(&url);
+    if let Some(tok) = settings.auth_token.as_deref().filter(|s| !s.is_empty()) {
+        req = req.bearer_auth(tok);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(serde_json::json!({
+                        "state": "parse_err", "error": e.to_string(),
+                    }));
+                }
+            };
+            if !status.is_success() {
+                return Ok(serde_json::json!({
+                    "state": "http_err", "status": status.as_u16(), "body": body,
+                }));
+            }
+            Ok(serde_json::json!({ "state": "ok", "body": body }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "state": "unreachable", "error": e.to_string(),
+        })),
+    }
+}
 
 /// 强制立刻把当前 cookies 上传一次（清掉 dedup hash，下次 tick 必然上传）。
 /// 诊断：列出 login 窗口能看到的所有 douyin cookie（仅名字 + 长度，避免回显敏感值到 UI）。

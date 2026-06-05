@@ -8,6 +8,15 @@ function fmt(v) {
   try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
 
+let toastTimer = null;
+function toast(msg, kind /* "" | "warn" | "err" */) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (kind ? " toast-" + kind : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 3200);
+}
+
 // ============ 设置 ============
 async function loadSettings() {
   const s = await invoke("cmd_get_settings");
@@ -31,8 +40,57 @@ document.querySelectorAll("button[data-preset]").forEach((b) => {
   b.onclick = () => { $("server").value = b.dataset.preset; };
 });
 
+// ============ 服务器 cookie 状态（g10 pill + 登录前预判） ============
+let lastServerCookie = null; // { logged_in, has_required, fields, user_uid, missing }
+
+async function refreshServerCookie() {
+  setPill("g10Pill", "g10: …", "muted");
+  try {
+    const r = await invoke("cmd_check_server_cookie");
+    if (r.state === "unconfigured") {
+      setPill("g10Pill", "g10: 未配置", "muted");
+      lastServerCookie = null;
+      return;
+    }
+    if (r.state !== "ok") {
+      setPill("g10Pill", "g10: " + r.state, "err");
+      $("g10Pill").title = JSON.stringify(r, null, 2);
+      lastServerCookie = null;
+      return;
+    }
+    const b = r.body || {};
+    lastServerCookie = b;
+    if (b.logged_in && b.has_required) {
+      setPill("g10Pill", `g10: 有效·${b.fields || 0}`, "ok");
+      $("g10Pill").title = `登录态 OK\nuser_uid=${b.user_uid || "?"}\nfields=${b.fields}`;
+    } else if (b.has_required) {
+      setPill("g10Pill", "g10: 字段全但未登录", "warn");
+      $("g10Pill").title = "logged_in=false（cookie 完整但 self_info 验证失败）";
+    } else {
+      setPill("g10Pill", `g10: 缺 ${(b.missing || []).join(",") || "字段"}`, "warn");
+      $("g10Pill").title = JSON.stringify(b, null, 2);
+    }
+  } catch (e) {
+    setPill("g10Pill", "g10: err", "err");
+    $("g10Pill").title = String(e);
+    lastServerCookie = null;
+  }
+}
+$("g10Pill").onclick = refreshServerCookie;
+
 // ============ 抖音登录窗 ============
-$("login").onclick = () => invoke("cmd_open_login");
+$("login").onclick = async () => {
+  // 登录前先查 G10：还活着的话提醒一下，避免无谓重登
+  await refreshServerCookie();
+  if (lastServerCookie && lastServerCookie.logged_in && lastServerCookie.has_required) {
+    const ok = confirm(
+      `G10 已有有效 cookie（${lastServerCookie.fields} 个字段，user_uid=${lastServerCookie.user_uid || "?"}）。\n\n` +
+      `通常不必重登。仍要打开登录窗口吗？`
+    );
+    if (!ok) { toast("跳过登录 · G10 cookie 仍有效"); return; }
+  }
+  await invoke("cmd_open_login");
+};
 $("closeLogin").onclick = () => invoke("cmd_close_login");
 $("force").onclick = () => invoke("cmd_force_upload_now");
 $("inspect").onclick = async () => {
@@ -96,6 +154,9 @@ listen("uploader:status", (e) => {
     case "uploaded":
       setPill("loginPill", `login: 已传·${p.fields || 0}`, "ok");
       setPill("msPill", "msToken: 在", "ok");
+      toast(`✓ cookie 已同步到 G10 · ${p.fields || 0} 字段`);
+      // 上传成功也顺手刷一下 g10 pill
+      refreshServerCookie();
       break;
     case "unchanged":
       setPill("loginPill", `login: ok·${p.fields || 0}`, "ok");
@@ -167,8 +228,18 @@ $("copyDetail").onclick = async () => {
 // ============ workspace 显示 ============
 invoke("cmd_workspace_path").then(s => $("wsPath").textContent = s);
 
+// 同花顺落盘也吐 toast
+listen("ths:status", (e) => {
+  const p = e.payload || {};
+  if (p.state === "saved") {
+    toast(`✓ 同花顺 cookie 已落盘 · ${p.count || 0} 条`);
+  }
+});
+
 // init
 loadSettings();
 pingServer();
 initialThs();
+refreshServerCookie();
 setInterval(pingServer, 15000);
+setInterval(refreshServerCookie, 30000);

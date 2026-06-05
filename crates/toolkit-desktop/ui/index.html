@@ -66,9 +66,20 @@
       }
       .footer { margin-top: 10px; color: var(--muted); font-size: 10px; }
       .footer code { background: var(--panel); padding: 1px 5px; border-radius: 3px; color: var(--fg); }
+      #toast {
+        position: fixed; top: 12px; left: 50%; transform: translateX(-50%) translateY(-20px);
+        background: var(--ok); color: #0b1118; font-weight: 600;
+        padding: 6px 14px; border-radius: 14px; font-size: 11.5px;
+        opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+        box-shadow: 0 2px 12px rgba(0,0,0,.4); z-index: 100; white-space: nowrap;
+      }
+      #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      #toast.toast-warn { background: var(--warn); }
+      #toast.toast-err { background: var(--err); color: #fff; }
     </style>
   </head>
   <body>
+    <div id="toast"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <h1>toolkit-desktop · 后台桥</h1>
       <button id="copyDetail" class="secondary" style="margin:0;padding:2px 8px;font-size:10px;">复制日志</button>
@@ -79,6 +90,7 @@
         <span id="connPill" class="pill pill-muted pill-clickable" title="点击重试">conn: —</span>
         <span id="loginPill" class="pill pill-muted">login: —</span>
         <span id="msPill" class="pill pill-muted">msToken: —</span>
+        <span id="g10Pill" class="pill pill-muted pill-clickable" title="G10 当前 cookie 状态（点击刷新）">g10: —</span>
         <span id="thsPill" class="pill pill-muted">ths: —</span>
       </div>
       <div class="row">
