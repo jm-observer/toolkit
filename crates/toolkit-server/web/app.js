@@ -235,6 +235,32 @@ document.addEventListener("DOMContentLoaded", () => {
     $("dy-handle").value = url;
     $("dy-handle").scrollIntoView({behavior: "smooth", block: "nearest"});
   };
+  const rn = document.getElementById("ctx-resolve-now");
+  if (rn) rn.onclick = async () => {
+    // 先拿最新 desktop URL（不依赖 10s 缓存）
+    let url;
+    try {
+      const r = await fetch(DESKTOP_BRIDGE + "/login-url", { cache: "no-store" });
+      const j = await r.json();
+      if (!j.has_window) { alert("desktop 登录窗未打开。请到桌面端点「抖音登录」。"); return; }
+      url = j.url;
+      if (!url) { alert("desktop 已有登录窗但 URL 为空。"); return; }
+    } catch (e) {
+      alert("拉 desktop 桥失败 (127.0.0.1:28788): " + e.message); return;
+    }
+    $("dy-handle").value = url;
+    $("ctx-detail").textContent = `→ 当前 URL: ${url}\n→ 调 GET /api/web/douyin/creator ...`;
+    try {
+      const creator = await api(`/api/web/douyin/creator?handle=${encodeURIComponent(url)}`);
+      $("ctx-detail").textContent = `URL: ${url}\n\n${JSON.stringify(creator, null, 2)}`;
+      // 同时同步到博主区下面的 pre 框，方便用户继续点 list works
+      $("dy-out").textContent = JSON.stringify(creator, null, 2);
+      // 自动把 unique_id 灌进标签区，省一次复制
+      if (creator.unique_id) $("dy-uid").value = creator.unique_id;
+    } catch (e) {
+      $("ctx-detail").textContent = `URL: ${url}\n\nresolve 失败: ${e.message}`;
+    }
+  };
 });
 $("pill-desktop").onclick = refreshDesktop;
 

@@ -50,10 +50,11 @@
         <div class="card" id="desktop-ctx-card">
           <h2>desktop 上下文（从本机 127.0.0.1:28788 拉）</h2>
           <div class="row">
+            <button id="ctx-resolve-now">解析当前博主主页</button>
+            <button class="secondary" id="ctx-use-url">仅填入 handle</button>
             <button class="secondary" id="ctx-refresh">刷新</button>
-            <button class="secondary" id="ctx-use-url">使用 desktop 当前 URL 填入 handle</button>
           </div>
-          <pre id="ctx-detail">未连接到 desktop 桥；请确认桌面端在跑（cargo tauri dev 或 toolkit-desktop run）。</pre>
+          <pre id="ctx-detail">未连接到 desktop 桥；请确认桌面端在跑。「解析当前博主主页」会读 desktop 登录窗的 URL → 直接 GET creator API → 展示结果。</pre>
         </div>
         <div class="card">
           <h2>博主</h2>
