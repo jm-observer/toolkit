@@ -121,7 +121,6 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
             cmd_workspace_path,
             cmd_ping_server,
             cmd_inspect_cookies,
-            cmd_capture_ms_token,
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
@@ -181,27 +180,6 @@ async fn cmd_open_login(app: tauri::AppHandle) -> Result<(), String> {
         .initialization_script(LOGIN_HOOK_JS)
         .build()
         .map_err(|e| format!("create login window: {e}"))?;
-    Ok(())
-}
-
-/// login_hook.js 抓到 msToken 后回传，缓存到 UploaderState；下一 tick uploader 拼进 cookie 上传。
-#[tauri::command]
-async fn cmd_capture_ms_token(
-    ctx: tauri::State<'_, AppCtx>,
-    value: String,
-) -> Result<(), String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.len() < 16 {
-        return Ok(());
-    }
-    let mut slot = ctx.uploader.ms_token.lock().await;
-    let changed = slot.as_deref() != Some(trimmed.as_str());
-    if changed {
-        log::info!("captured new msToken (len={})", trimmed.len());
-        *slot = Some(trimmed);
-        // 让 uploader 下一 tick 必传一次新版本。
-        *ctx.uploader.last_hash.lock().await = None;
-    }
     Ok(())
 }
 
