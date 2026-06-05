@@ -129,6 +129,7 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
             cmd_open_ths_login,
             cmd_close_ths_login,
             cmd_ths_status,
+            cmd_resolve_current_creator,
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
@@ -231,6 +232,50 @@ async fn cmd_close_ths_login(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn cmd_ths_status(ctx: tauri::State<'_, AppCtx>) -> ths::StatusReport {
     ths::status_report(&ctx.workspace)
+}
+
+/// 读 login 窗当前 URL，转给 G10 server 解析为博主资料。
+/// UX 思路：用户在内嵌浏览器里点进某博主主页，主窗点按钮即可，不必复制粘贴 URL。
+#[tauri::command]
+async fn cmd_resolve_current_creator(
+    ctx: tauri::State<'_, AppCtx>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let login = app
+        .get_webview_window("login")
+        .ok_or_else(|| "没有打开抖音登录窗口，请先「打开抖音登录」并导航到博主主页".to_string())?;
+    let url = login.url().map_err(|e| format!("读 login URL: {e}"))?;
+    let url_str = url.to_string();
+
+    let settings = config::load(&workspace::config_path(&ctx.workspace));
+    if !settings.is_configured() {
+        return Err("Server base 未配置".to_string());
+    }
+    let base = settings.server_base.trim_end_matches('/');
+    let endpoint = format!("{base}/api/web/douyin/creator");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut req = client.get(&endpoint).query(&[("handle", url_str.as_str())]);
+    if let Some(tok) = settings.auth_token.as_deref().filter(|s| !s.is_empty()) {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 server JSON: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("server {status}: {body}"));
+    }
+    Ok(serde_json::json!({
+        "source_url": url_str,
+        "endpoint": endpoint,
+        "creator": body,
+    }))
 }
 
 /// 强制立刻把当前 cookies 上传一次（清掉 dedup hash，下次 tick 必然上传）。

@@ -144,6 +144,16 @@ async function refreshThs() {
     $("thsDetail").textContent = String(e);
   }
 }
+$("dyResolve").onclick = async () => {
+  $("dyResolveOut").textContent = "loading…";
+  try {
+    const r = await invoke("cmd_resolve_current_creator");
+    $("dyResolveOut").textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    $("dyResolveOut").textContent = String(e);
+  }
+};
+
 $("thsLogin").onclick = () => invoke("cmd_open_ths_login");
 $("thsClose").onclick = () => invoke("cmd_close_ths_login");
 $("thsRefresh").onclick = refreshThs;
