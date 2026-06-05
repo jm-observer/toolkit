@@ -63,10 +63,16 @@ $("closeLogin").onclick = () => invoke("cmd_close_login");
 $("thsLogin").onclick = () => invoke("cmd_open_ths_login");
 $("thsClose").onclick = () => invoke("cmd_close_ths_login");
 $("inspect").onclick = async () => {
+  // 自动冻结，防止 5s 一次的 uploader tick 把诊断结果冲掉
+  if (!detailFrozen) {
+    detailFrozen = true;
+    $("freezeDetail").textContent = "▶ 恢复";
+  }
   $("detail").textContent = "inspecting…";
   try {
     const r = await invoke("cmd_inspect_cookies");
     $("detail").textContent = JSON.stringify(r, null, 2);
+    toast("诊断完成 · 已冻结详情区");
   } catch (e) {
     $("detail").textContent = String(e);
   }
@@ -187,7 +193,7 @@ function recomputeMsToken() {
 // ============ uploader 事件接收 ============
 listen("uploader:status", (e) => {
   lastUploader = e.payload || {};
-  $("detail").textContent = fmt(lastUploader);
+  if (!detailFrozen) $("detail").textContent = fmt(lastUploader);
   recomputeDouyin();
   recomputeMsToken();
   if (lastUploader.state === "uploaded") {
@@ -281,10 +287,12 @@ async function refreshLoginExpiry() {
   }
 }
 
-// ============ 复制日志 ============
-$("copyDetail").onclick = async () => {
+// ============ 复制 / 冻结详情 ============
+let detailFrozen = false;
+
+async function copyDetail() {
   const text = $("detail").textContent || "";
-  try { await navigator.clipboard.writeText(text); toast("已复制"); }
+  try { await navigator.clipboard.writeText(text); toast("已复制 " + text.length + " 字符"); }
   catch (e) {
     const r = document.createRange(); r.selectNodeContents($("detail"));
     const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
@@ -292,6 +300,14 @@ $("copyDetail").onclick = async () => {
     catch (e2) { toast("复制失败", "err"); }
     sel.removeAllRanges();
   }
+}
+$("copyDetail").onclick = copyDetail;
+$("copyDetailNear").onclick = copyDetail;
+
+$("freezeDetail").onclick = () => {
+  detailFrozen = !detailFrozen;
+  $("freezeDetail").textContent = detailFrozen ? "▶ 恢复" : "⏸ 冻结";
+  toast(detailFrozen ? "已冻结，自动刷新不会覆盖" : "已恢复自动刷新");
 };
 
 // ============ workspace ============
