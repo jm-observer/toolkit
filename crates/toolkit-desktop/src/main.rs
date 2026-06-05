@@ -3,6 +3,8 @@
 mod bridge;
 mod config;
 mod db;
+mod ths;
+mod ths_watcher;
 mod uploader;
 mod workspace;
 
@@ -51,6 +53,7 @@ pub struct AppCtx {
     pub workspace: PathBuf,
     pub db: Arc<db::Db>,
     pub uploader: Arc<UploaderState>,
+    pub ths: Arc<ths_watcher::ThsState>,
 }
 
 fn main() -> Result<()> {
@@ -103,10 +106,12 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
 
     let db = Arc::new(db::Db::open(&workspace::db_path(&workspace)).context("open state.db")?);
     let uploader = Arc::new(UploaderState::default());
+    let ths = Arc::new(ths_watcher::ThsState::default());
     let ctx = AppCtx {
         workspace: workspace.clone(),
         db: db.clone(),
         uploader: uploader.clone(),
+        ths: ths.clone(),
     };
 
     tauri::Builder::default()
@@ -121,10 +126,14 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
             cmd_workspace_path,
             cmd_ping_server,
             cmd_inspect_cookies,
+            cmd_open_ths_login,
+            cmd_close_ths_login,
+            cmd_ths_status,
         ])
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
             bridge::spawn(ctx.uploader.clone());
+            ths_watcher::spawn(app.handle().clone(), ctx.clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -189,6 +198,39 @@ async fn cmd_close_login(app: tauri::AppHandle) -> Result<(), String> {
         let _ = w.close();
     }
     Ok(())
+}
+
+/// 打开/前置同花顺登录窗口。重复调用幂等。watcher tick 拿到关键 cookie 后落盘到
+/// `<workspace>/ths/cookies.json`（与 stock-trade/ths 项目兼容格式）。
+#[tauri::command]
+async fn cmd_open_ths_login(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("ths-login") {
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let target: url::Url = ths::LOGIN_URL
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
+    WebviewWindowBuilder::new(&app, "ths-login", WebviewUrl::External(target))
+        .title("同花顺登录 - toolkit-desktop")
+        .inner_size(1180.0, 820.0)
+        .center()
+        .build()
+        .map_err(|e| format!("create ths login window: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn cmd_close_ths_login(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("ths-login") {
+        let _ = w.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn cmd_ths_status(ctx: tauri::State<'_, AppCtx>) -> ths::StatusReport {
+    ths::status_report(&ctx.workspace)
 }
 
 /// 强制立刻把当前 cookies 上传一次（清掉 dedup hash，下次 tick 必然上传）。

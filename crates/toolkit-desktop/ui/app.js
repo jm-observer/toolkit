@@ -126,8 +126,36 @@ async function pingServer() {
 }
 $("connPill").onclick = pingServer;
 
+async function refreshThs() {
+  try {
+    const r = await invoke("cmd_ths_status");
+    const p = $("thsPill");
+    if (!r.exists) {
+      p.textContent = "未登录"; p.className = "pill pill-muted";
+    } else if (!r.has_required) {
+      p.textContent = "缺字段"; p.className = "pill pill-warn";
+    } else if (r.ticket_is_session) {
+      p.textContent = "session 票"; p.className = "pill pill-warn";
+    } else {
+      p.textContent = `已登录 · ${r.count}`; p.className = "pill pill-ok";
+    }
+    $("thsDetail").textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    $("thsDetail").textContent = String(e);
+  }
+}
+$("thsLogin").onclick = () => invoke("cmd_open_ths_login");
+$("thsClose").onclick = () => invoke("cmd_close_ths_login");
+$("thsRefresh").onclick = refreshThs;
+listen("ths:status", (e) => {
+  const p = e.payload || {};
+  $("thsDetail").textContent = JSON.stringify(p, null, 2);
+  if (p.state === "saved") refreshThs();
+});
+
 loadSettings();
 loadWorkspace();
 loadHistory();
 pingServer();
+refreshThs();
 setInterval(pingServer, 15000);
