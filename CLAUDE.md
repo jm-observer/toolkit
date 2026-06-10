@@ -17,8 +17,9 @@ workspace，作为 zero/Agent 生态的统一工具底座。架构目标：
 |---|---|
 | `toolkit-core` | 领域类型 + SQLite schema/迁移（`schema.rs` 的 `DDL_V1`）+ URL 模式识别。`open_pool` / `migrate` / `new_task_id` / `now_iso8601`。 |
 | `toolkit-tasks` | **通用长任务引擎**：`TaskKind` trait + `Registry` 注册、`submit` 即 spawn、`run_task` 状态机、`store` 持久化到 `tasks` 表。 |
-| `toolkit-server` | axum daemon。`bootstrap` 装配 pool/migrate/registry/recovery；`/api/web`、`/api/web/douyin`、`/api/agent`、`/api/browser` 路由 + web 控制台。systemd 安装 / 自更新（`custom-utils` updater）。 |
+| `toolkit-server` | axum daemon。`bootstrap` 装配 pool/migrate/registry/recovery；`/api/web`、`/api/web/audio`（TTS 代理）、`/api/web/douyin`、`/api/agent`、`/api/browser` 路由 + web 控制台。systemd 安装 / 自更新（`custom-utils` updater）。 |
 | `toolkit-desktop` | Tauri 桌面端：抖音 / 同花顺登录窗（headless_chrome/CDP）、msToken 采集、cookie 自动上传 G10。**需 Tauri 工具链**，CI 式环境通常排除。 |
+| `asr-server` | 独立 OpenAI 兼容 ASR HTTP 服务（sherpa-onnx）：`/healthz`、`/v1/models`、`/v1/audio/transcriptions`（multipart）、`/v1/audio/transcriptions/from-source`（JSON file:///http）。由 streaming-speech 整 crate 迁入（Phase 1）。模型走 `<workspace>/models/`，不入仓库。douyin process 调它的 from-source 端点。 |
 | `douyin` | 抖音 web 工具：a-bogus 签名、creator/works/tags API、下载 + ASR 管线、knowledge md 生成。既是库（被 server 调）也有独立 daemon/CLI。 |
 | `rag` | 抖音 knowledge md 的语义检索 → sqlite-vec。CLI `ingest`/`search`，HTTP `serve`。 |
 | `github-commit-info` | 独立 CLI：取 GitHub 仓库指定时间范围 commit。 |
@@ -73,6 +74,20 @@ pwsh ./deploy-g10.ps1 -SkipBuild # 仅复制已有产物
 `trace` feature），**未设则完全无副作用**。`toolkit-tasks` 的 runner 用 `SpanScope` 两阶段 API 给每个
 任务打 anchor（submit 时 in-flight + 输入摘要）+ 完成 span（成功/失败 + 耗时）。创建任务的 HTTP handler
 透传 W3C `traceparent`。详见下方《文档目录》。
+
+## 语音底座（ASR / TTS，Phase 1）
+
+- **ASR**：`asr-server` crate（见成员表）。同机部署，douyin process 的 `asr_url` 默认
+  指向 `http://127.0.0.1:8091/.../from-source`。模型放 `<workspace>/models/sherpa-sense-voice/`，
+  不入仓库。`silero_vad.onnx` 随 crate 提交。
+- **TTS 代理**：`toolkit-server` 的 `/api/web/audio/tts`（POST，转发请求体到上游
+  CosyVoice2 `POST /tts`，回传 WAV bytes）与 `/api/web/audio/voices`（GET，代理 `/voices`）。
+  上游地址由环境变量 **`TTS_BASE_URL`**（如 `http://127.0.0.1:8095`）配置；**未配置时
+  两端口返回 503** 并提示。TTS 生成可能 10s+，代理超时 180s。调用上有 `SpanScope`
+  两阶段 trace（`tts_proxy` / `tts_voices` span；trace 未启用时 no-op）。本阶段只代理，
+  不落盘 / 不任务化（落盘任务化是 Phase 3 AudioForge）。
+- **编排**：`deploy/asr-tts/`（compose + README）——ASR + TTS 与 toolkit-server 同机
+  部署的最小可用编排。
 
 ## 文档目录（动手前按主题查）
 
