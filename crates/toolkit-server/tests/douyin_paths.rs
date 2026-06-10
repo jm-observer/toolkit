@@ -20,6 +20,10 @@ fn paths_layout_matches_design() {
         std::path::PathBuf::from("/tmp/toolkit/douyin/transcripts")
     );
     assert_eq!(
+        p.refined_dir,
+        std::path::PathBuf::from("/tmp/toolkit/douyin/refined")
+    );
+    assert_eq!(
         p.works_dir,
         std::path::PathBuf::from("/tmp/toolkit/douyin/works")
     );
@@ -37,6 +41,7 @@ fn ensure_dirs_creates_everything() {
     assert!(p.task_dir.exists());
     assert!(p.out_dir.exists());
     assert!(p.transcript_dir.exists());
+    assert!(p.refined_dir.exists());
     assert!(p.works_dir.exists());
     assert!(p.knowledge_dir.exists());
     assert!(p.cookie_file.parent().unwrap().exists());
