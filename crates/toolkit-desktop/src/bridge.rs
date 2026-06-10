@@ -1,84 +1,32 @@
-//! 本地 HTTP 桥 — login 远端窗口 ↔ desktop 后端 + desktop ↔ G10 web 上下文交换。
+//! 本地 HTTP 桥 — G10 web ↔ desktop 上下文交换。
 //!
-//! 设计：login 窗加载 `https://www.douyin.com`（远端 origin），Tauri 2 默认不让远端
-//! 页面调任何 `#[tauri::command]`；同样，G10 web UI 跑在另一 origin（如 http://g10:8788）
-//! 想读 desktop 本机状态也是跨 origin。这里统一在 `127.0.0.1:BRIDGE_PORT` 起 axum，
-//! CORS 全开（私网仅本机可达，远端摸不到），承担：
-//!
-//! - **接收（写）**：login_hook.js fetch 喂 msToken / 通用 signal
-//! - **暴露（读）**：G10 web UI fetch 拿 desktop 实时上下文（当前 URL、cookie、msToken、ths）
+//! 切到 headless_chrome 后，桥**只剩"读"侧**：暴露 desktop 本机上下文给 G10 web。
+//! 以前给抖音 login_hook.js 喂 msToken 的 /mstoken /signal 端点不再需要——CDP 直接
+//! 拿全量 cookie 含 msToken。
 //!
 //! 路由：
-//! - `GET  /health`           — 探活
-//! - `GET  /mstoken?value=`   — login_hook 上传 msToken
-//! - `GET  /signal?name=&value=` — 通用 JS→Rust 槽
-//! - `GET  /context`          — 完整 desktop 上下文，G10 web 周期 poll
-//! - `GET  /login-url`        — 仅当前 login 窗 URL（轻量）
+//! - `GET /health`     — 探活
+//! - `GET /login-url`  — douyin tab 当前 URL（轻量）
+//! - `GET /context`    — 完整 desktop 上下文（douyin URL + cookies count + ths status）
 
+use crate::browser::Session;
 use crate::ths;
-use crate::uploader::UploaderState;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::Json;
 use axum::routing::get;
 use axum::Router;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager};
 use tower_http::cors::{Any, CorsLayer};
 
 pub const BRIDGE_PORT: u16 = 28788;
 
 #[derive(Clone)]
 pub struct BridgeCtx {
-    pub app: AppHandle,
-    pub uploader: Arc<UploaderState>,
+    pub douyin: Arc<Session>,
+    pub ths: Arc<Session>,
     pub workspace: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenQuery {
-    value: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SignalQuery {
-    name: String,
-    #[serde(default)]
-    value: String,
-}
-
-async fn capture_mstoken(
-    State(ctx): State<BridgeCtx>,
-    Query(q): Query<TokenQuery>,
-) -> &'static str {
-    record_ms_token(&ctx.uploader, q.value).await
-}
-
-async fn signal(State(ctx): State<BridgeCtx>, Query(q): Query<SignalQuery>) -> &'static str {
-    match q.name.as_str() {
-        "mstoken" => record_ms_token(&ctx.uploader, q.value).await,
-        other => {
-            log::debug!("bridge signal unhandled name={other} len={}", q.value.len());
-            "unknown_signal"
-        }
-    }
-}
-
-async fn record_ms_token(state: &UploaderState, value: String) -> &'static str {
-    let trimmed = value.trim().to_string();
-    if trimmed.len() < 16 {
-        return "skip";
-    }
-    let mut slot = state.ms_token.lock().await;
-    let changed = slot.as_deref() != Some(trimmed.as_str());
-    if changed {
-        log::info!("bridge captured new msToken (len={})", trimmed.len());
-        *slot = Some(trimmed);
-        *state.last_hash.lock().await = None;
-    }
-    "ok"
 }
 
 async fn health() -> &'static str {
@@ -86,50 +34,42 @@ async fn health() -> &'static str {
 }
 
 async fn login_url(State(ctx): State<BridgeCtx>) -> Json<Value> {
-    let (has_window, url) = match ctx.app.get_webview_window("login") {
-        Some(w) => (true, w.url().ok().map(|u| u.to_string())),
-        None => (false, None),
+    let has_window = ctx.douyin.is_open();
+    let url = if has_window {
+        ctx.douyin.current_url()
+    } else {
+        None
     };
     Json(json!({ "has_window": has_window, "url": url }))
 }
 
 async fn context(State(ctx): State<BridgeCtx>) -> Json<Value> {
-    // login 窗当前 URL + cookie 概览
-    let (login_has_window, login_url, login_cookies_count) = match ctx.app.get_webview_window("login") {
-        Some(w) => {
-            let u = w.url().ok().map(|u| u.to_string());
-            let count = "https://www.douyin.com"
-                .parse::<url::Url>()
-                .ok()
-                .and_then(|target| w.cookies_for_url(target).ok())
-                .map(|cs| cs.len() as i64);
-            (true, u, count)
-        }
-        None => (false, None, None),
+    let has_window = ctx.douyin.is_open();
+    let url = if has_window {
+        ctx.douyin.current_url()
+    } else {
+        None
     };
-
-    let ms_token_present = ctx.uploader.ms_token.lock().await.is_some();
-    let ms_token_len = ctx
-        .uploader
-        .ms_token
-        .lock()
-        .await
-        .as_ref()
-        .map(|s| s.len() as i64);
-
+    let cookies_count = if has_window {
+        ctx.douyin
+            .tab()
+            .and_then(|t| t.get_cookies().ok())
+            .map(|c| c.len() as i64)
+    } else {
+        None
+    };
     let ths_report = ths::status_report(&ctx.workspace);
-
+    let ths_has_window = ctx.ths.is_open();
     Json(json!({
         "login": {
-            "has_window": login_has_window,
-            "url": login_url,
-            "cookies_count": login_cookies_count,
+            "has_window": has_window,
+            "url": url,
+            "cookies_count": cookies_count,
         },
-        "ms_token": {
-            "present": ms_token_present,
-            "length": ms_token_len,
+        "ths": {
+            "has_window": ths_has_window,
+            "report": ths_report,
         },
-        "ths": ths_report,
     }))
 }
 
@@ -137,8 +77,6 @@ pub fn spawn(ctx: BridgeCtx) {
     tauri::async_runtime::spawn(async move {
         let app = Router::new()
             .route("/health", get(health))
-            .route("/mstoken", get(capture_mstoken))
-            .route("/signal", get(signal))
             .route("/login-url", get(login_url))
             .route("/context", get(context))
             .layer(

@@ -1,6 +1,10 @@
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 mod bridge;
+mod browser;
 mod config;
 mod db;
 mod ths;
@@ -14,7 +18,6 @@ use custom_utils::updater::UpdateConfig;
 use log::LevelFilter::Info;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use uploader::UploaderState;
 
 const REPO_OWNER: &str = "jm-observer";
@@ -24,7 +27,6 @@ const APP: &str = "toolkit-desktop";
 #[derive(Parser, Debug, Clone)]
 #[command(name = "toolkit-desktop", version)]
 struct Cli {
-    /// workspace 根目录，覆盖 `~/.config/toolkit-desktop` 默认。
     #[arg(long, env = "TOOLKIT_DESKTOP_WORKSPACE", global = true)]
     workspace: Option<String>,
     #[command(subcommand)]
@@ -33,17 +35,14 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    /// 启动 GUI（默认）。可通过 `--server` / `--token` 覆盖配置文件后写回 workspace。
     Run {
-        /// G10 server base URL（含 scheme，不含路径）。
         #[arg(long, env = "TOOLKIT_DESKTOP_SERVER")]
         server: Option<String>,
         #[arg(long, env = "TOOLKIT_DESKTOP_TOKEN")]
         token: Option<String>,
     },
-    /// 从 GitHub Release 自更新当前 exe（跨平台）。
     Update {
-        #[arg(short, long, help = "即使版本未升级也强制更新")]
+        #[arg(short, long)]
         force: bool,
     },
 }
@@ -54,6 +53,10 @@ pub struct AppCtx {
     pub db: Arc<db::Db>,
     pub uploader: Arc<UploaderState>,
     pub ths: Arc<ths_watcher::ThsState>,
+    /// 抖音登录用的 Chrome 子进程会话（headless_chrome / CDP）。
+    pub douyin_browser: Arc<browser::Session>,
+    /// 同花顺登录用的 Chrome 子进程会话。
+    pub ths_browser: Arc<browser::Session>,
 }
 
 fn main() -> Result<()> {
@@ -88,7 +91,6 @@ fn run_update(force: bool) -> Result<()> {
 }
 
 fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) -> Result<()> {
-    // CLI 覆盖立刻写盘，后续 uploader / UI 一致读 workspace/config.json。
     let cfg_path = workspace::config_path(&workspace);
     let mut s = config::load(&cfg_path);
     let mut changed = false;
@@ -106,12 +108,19 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
 
     let db = Arc::new(db::Db::open(&workspace::db_path(&workspace)).context("open state.db")?);
     let uploader = Arc::new(UploaderState::default());
-    let ths = Arc::new(ths_watcher::ThsState::default());
+    let ths_state = Arc::new(ths_watcher::ThsState::default());
+    // 持久 Chrome profile：登录态跨重启保留，profile 养熟后抖音 msToken 才会落库复用
+    //（实测全新临时 profile 永远拿不到 msToken，详见 browser.rs 模块注释）。
+    let login_profiles = workspace.join("login_profile");
+    let douyin_browser = Arc::new(browser::Session::new(login_profiles.join("douyin")));
+    let ths_browser = Arc::new(browser::Session::new(login_profiles.join("ths")));
     let ctx = AppCtx {
         workspace: workspace.clone(),
         db: db.clone(),
         uploader: uploader.clone(),
-        ths: ths.clone(),
+        ths: ths_state.clone(),
+        douyin_browser: douyin_browser.clone(),
+        ths_browser: ths_browser.clone(),
     };
 
     tauri::Builder::default()
@@ -136,8 +145,8 @@ fn run_gui(workspace: PathBuf, server: Option<String>, token: Option<String>) ->
         .setup(move |app| {
             uploader::spawn(app.handle().clone(), ctx.clone());
             bridge::spawn(bridge::BridgeCtx {
-                app: app.handle().clone(),
-                uploader: ctx.uploader.clone(),
+                douyin: ctx.douyin_browser.clone(),
+                ths: ctx.ths_browser.clone(),
                 workspace: ctx.workspace.clone(),
             });
             ths_watcher::spawn(app.handle().clone(), ctx.clone());
@@ -176,62 +185,45 @@ fn cmd_recent_uploads(
         .map_err(|e| format!("{e:#}"))
 }
 
-const LOGIN_HOOK_JS: &str = include_str!("../ui/login_hook.js");
+// ============ 抖音登录窗（Chrome 子进程） ============
 
-/// 打开/前置 douyin 登录窗口。重复调用幂等。
-/// 注入 login_hook.js：hook 出站请求 URL 抠 msToken（抖音 SDK 已不写 cookie）。
 #[tauri::command]
-async fn cmd_open_login(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("login") {
-        let _ = w.set_focus();
-        return Ok(());
-    }
-    let target: url::Url = "https://www.douyin.com"
-        .parse()
-        .map_err(|e: url::ParseError| e.to_string())?;
-    WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(target))
-        .title("抖音登录 - toolkit-desktop")
-        .inner_size(1280.0, 860.0)
-        .center()
-        .initialization_script(LOGIN_HOOK_JS)
-        .build()
-        .map_err(|e| format!("create login window: {e}"))?;
+async fn cmd_open_login(ctx: tauri::State<'_, AppCtx>) -> Result<(), String> {
+    let session = ctx.douyin_browser.clone();
+    tokio::task::spawn_blocking(move || session.open("https://www.douyin.com"))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?
+        .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
 #[tauri::command]
-async fn cmd_close_login(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("login") {
-        let _ = w.close();
-    }
+async fn cmd_close_login(ctx: tauri::State<'_, AppCtx>) -> Result<(), String> {
+    let session = ctx.douyin_browser.clone();
+    tokio::task::spawn_blocking(move || session.close())
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?;
     Ok(())
 }
 
-/// 打开/前置同花顺登录窗口。重复调用幂等。watcher tick 拿到关键 cookie 后落盘到
-/// `<workspace>/ths/cookies.json`（与 stock-trade/ths 项目兼容格式）。
+// ============ 同花顺登录窗（Chrome 子进程） ============
+
 #[tauri::command]
-async fn cmd_open_ths_login(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("ths-login") {
-        let _ = w.set_focus();
-        return Ok(());
-    }
-    let target: url::Url = ths::LOGIN_URL
-        .parse()
-        .map_err(|e: url::ParseError| e.to_string())?;
-    WebviewWindowBuilder::new(&app, "ths-login", WebviewUrl::External(target))
-        .title("同花顺登录 - toolkit-desktop")
-        .inner_size(1180.0, 820.0)
-        .center()
-        .build()
-        .map_err(|e| format!("create ths login window: {e}"))?;
+async fn cmd_open_ths_login(ctx: tauri::State<'_, AppCtx>) -> Result<(), String> {
+    let session = ctx.ths_browser.clone();
+    tokio::task::spawn_blocking(move || session.open(ths::LOGIN_URL))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?
+        .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
 #[tauri::command]
-async fn cmd_close_ths_login(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("ths-login") {
-        let _ = w.close();
-    }
+async fn cmd_close_ths_login(ctx: tauri::State<'_, AppCtx>) -> Result<(), String> {
+    let session = ctx.ths_browser.clone();
+    tokio::task::spawn_blocking(move || session.close())
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?;
     Ok(())
 }
 
@@ -240,18 +232,17 @@ fn cmd_ths_status(ctx: tauri::State<'_, AppCtx>) -> ths::StatusReport {
     ths::status_report(&ctx.workspace)
 }
 
-/// 读 login 窗当前 URL → POST G10 `/api/web/douyin/creators` 解析 + upsert 到博主库。
-/// desktop 唯一的业务"动作"，因为博主上下文（用户当前看的是谁）只在登录窗里。
-/// 解析结果由 G10 落库，web 端去拉列表展示，desktop 不存。
+// ============ 解析当前博主 ============
+
 #[tauri::command]
 async fn cmd_track_current_creator(
     ctx: tauri::State<'_, AppCtx>,
-    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let login = app
-        .get_webview_window("login")
-        .ok_or_else(|| "没有打开抖音登录窗口".to_string())?;
-    let url = login.url().map_err(|e| format!("读 login URL: {e}"))?.to_string();
+    let session = ctx.douyin_browser.clone();
+    let url = tokio::task::spawn_blocking(move || session.current_url())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "没有打开抖音登录窗口或读 URL 失败".to_string())?;
 
     let settings = config::load(&workspace::config_path(&ctx.workspace));
     if !settings.is_configured() {
@@ -279,30 +270,31 @@ async fn cmd_track_current_creator(
     Ok(body)
 }
 
-/// 解析 login 窗里关键 cookie 的失效时间（持久 cookie 含 expires，session cookie 标记为 null）。
-/// 关键 cookie 名：sessionid_ss / ttwid / sid_guard / sid_tt。返回最早过期时间 + 各字段明细。
+// ============ 登录 cookie 失效时间（CDP 拿） ============
+
 #[tauri::command]
-async fn cmd_login_expiry(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+async fn cmd_login_expiry(ctx: tauri::State<'_, AppCtx>) -> Result<serde_json::Value, String> {
     use chrono::TimeZone;
-    let Some(login) = app.get_webview_window("login") else {
+    let Some(tab) = ctx.douyin_browser.tab() else {
         return Ok(serde_json::json!({ "state": "no_window" }));
     };
-    let target: url::Url = "https://www.douyin.com"
-        .parse()
-        .map_err(|e: url::ParseError| e.to_string())?;
-    let cookies = login.cookies_for_url(target).map_err(|e| e.to_string())?;
+    let cookies = tokio::task::spawn_blocking(move || tab.get_cookies())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
 
     const CRITICAL: &[&str] = &["sessionid_ss", "ttwid", "sid_guard", "sid_tt"];
     let now = chrono::Utc::now().timestamp();
     let mut entries: Vec<serde_json::Value> = Vec::new();
     let mut earliest: Option<i64> = None;
     for c in &cookies {
-        if !CRITICAL.contains(&c.name()) {
+        if !CRITICAL.contains(&c.name.as_str()) {
             continue;
         }
-        let ts = match c.expires() {
-            Some(tauri::webview::cookie::Expiration::DateTime(dt)) => Some(dt.unix_timestamp()),
-            _ => None,
+        let ts = if c.expires > 0.0 {
+            Some(c.expires as i64)
+        } else {
+            None
         };
         let iso = ts.and_then(|t| {
             chrono::Utc
@@ -315,7 +307,7 @@ async fn cmd_login_expiry(app: tauri::AppHandle) -> Result<serde_json::Value, St
             earliest = Some(earliest.map_or(t, |e| e.min(t)));
         }
         entries.push(serde_json::json!({
-            "name": c.name(),
+            "name": c.name,
             "expires_at": iso,
             "remaining_secs": remaining,
             "is_session": ts.is_none(),
@@ -337,15 +329,8 @@ async fn cmd_login_expiry(app: tauri::AppHandle) -> Result<serde_json::Value, St
     }))
 }
 
-// 业务下沉：所有抖音 / 同花顺业务操作走 G10 web UI。
-// desktop 不再代理业务调用，仅提供本机上下文（登录窗 URL / cookie / msToken / ths）
-// 给 G10 web 通过 127.0.0.1:28788 bridge 拉取。
-//
-// 例外：cookie_status — 桌面端在「打开抖音登录」前需要先问一下 G10 cookie 是否还活，
-// 给用户「可能不必重登」的判断依据，所以走 desktop 后端代理一次。
+// ============ G10 server 探活 + cookie 状态 ============
 
-/// 拉 `<server>/api/web/douyin/cookie_status`，给桌面端做「是否需要重登」预判用。
-/// 4s 超时；不抛业务错，返回结构化 {state, ...}。
 #[tauri::command]
 async fn cmd_check_server_cookie(
     ctx: tauri::State<'_, AppCtx>,
@@ -388,71 +373,59 @@ async fn cmd_check_server_cookie(
     }
 }
 
-/// 诊断：分三个视角查 cookie，定位 msToken 究竟在不在 cookie store 里。
-/// - `all`：`webview.cookies()` 整个 WebView2 cookie store
-/// - `www`：`cookies_for_url("https://www.douyin.com")` 仅匹配本域
-/// - `api`：`cookies_for_url("https://api.douyin.com")`（msToken 在抖音也常挂这个子域）
 #[tauri::command]
-async fn cmd_inspect_cookies(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let Some(login) = app.get_webview_window("login") else {
+async fn cmd_inspect_cookies(ctx: tauri::State<'_, AppCtx>) -> Result<serde_json::Value, String> {
+    let Some(tab) = ctx.douyin_browser.tab() else {
         return Ok(serde_json::json!({
             "state": "no_login_window",
-            "hint": "请先点「打开抖音登录」按钮，并保持窗口不关闭",
+            "hint": "请先点「抖音登录」",
         }));
     };
+    let cookies = tokio::task::spawn_blocking(move || tab.get_cookies())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
 
-    fn summarize(cookies: &[tauri::webview::cookie::Cookie<'static>]) -> serde_json::Value {
-        let names: Vec<&str> = cookies.iter().map(|c| c.name()).collect();
-        let has_ms = names.contains(&"msToken");
-        let ms_info = cookies.iter().find(|c| c.name() == "msToken").map(|c| {
-            serde_json::json!({
-                "len": c.value().len(),
-                "domain": c.domain(),
-                "path": c.path(),
-                "http_only": c.http_only(),
-                "secure": c.secure(),
-            })
-        });
-        let list: Vec<serde_json::Value> = cookies
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "name": c.name(),
-                    "len": c.value().len(),
-                    "domain": c.domain(),
-                    "path": c.path(),
-                    "http_only": c.http_only(),
-                    "secure": c.secure(),
-                })
-            })
-            .collect();
+    let names: Vec<&str> = cookies.iter().map(|c| c.name.as_str()).collect();
+    let has_ms = names.contains(&"msToken");
+    // 从网络请求 harvest 到的 msToken（cookie 里没有时的兜底来源）。
+    let harvested = ctx.douyin_browser.harvested_ms_token();
+    let ms_info = cookies.iter().find(|c| c.name == "msToken").map(|c| {
         serde_json::json!({
-            "count": cookies.len(),
-            "has_ms_token": has_ms,
-            "ms_token": ms_info,
-            "names": names,
-            "all": list,
+            "len": c.value.len(),
+            "domain": c.domain,
+            "path": c.path,
+            "http_only": c.http_only,
+            "secure": c.secure,
+            "expires": c.expires,
         })
-    }
-
-    let all = login.cookies().map_err(|e| e.to_string())?;
-    let www = login
-        .cookies_for_url("https://www.douyin.com".parse::<url::Url>().unwrap())
-        .map_err(|e| e.to_string())?;
-    let api = login
-        .cookies_for_url("https://api.douyin.com".parse::<url::Url>().unwrap())
-        .map_err(|e| e.to_string())?;
-
+    });
+    let all: Vec<serde_json::Value> = cookies
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "len": c.value.len(),
+                "domain": c.domain,
+                "path": c.path,
+                "http_only": c.http_only,
+                "secure": c.secure,
+            })
+        })
+        .collect();
     Ok(serde_json::json!({
         "state": "ok",
-        "view_all":  summarize(&all),
-        "view_www":  summarize(&www),
-        "view_api":  summarize(&api),
-        "hint": "比对三栏的 has_ms_token：若 view_all=true 但 view_www=false → msToken 是设在某个子域（domain 字段会告诉你），uploader 拼 header 时按 view_all 取即可。",
+        "count": cookies.len(),
+        "has_ms_token": has_ms,
+        "ms_token": ms_info,
+        // harvest 兜底：cookie 没有但从外发请求抓到了，也算拿到 msToken。
+        "ms_token_harvested": harvested.as_deref(),
+        "has_ms_token_any": has_ms || harvested.is_some(),
+        "names": names,
+        "all": all,
     }))
 }
 
-/// 探活 `<server>/api/web/health`，前端 pill 用。3s 超时；不抛错，返回结构化结果。
 #[tauri::command]
 async fn cmd_ping_server(ctx: tauri::State<'_, AppCtx>) -> Result<serde_json::Value, String> {
     let settings = config::load(&workspace::config_path(&ctx.workspace));

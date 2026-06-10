@@ -54,8 +54,7 @@ pub fn load(path: &Path) -> Settings {
 
 pub fn save(path: &Path, s: &Settings) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(s)?;
     std::fs::write(path, body).with_context(|| format!("write {}", path.display()))?;

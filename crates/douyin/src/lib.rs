@@ -473,7 +473,8 @@ fn is_short_link(s: &str) -> bool {
 /// `cookie_status`：字段自检 + 登录态实测（query/user/）。
 pub async fn run_cookie_status(cookie_file: &Path) -> Result<Value> {
     let cookies = load_cookie_file(cookie_file)?;
-    let required = ["msToken", "s_v_web_id", "ttwid"];
+    // msToken 非必需（实测空值不影响 profile/list/detail，见 api.rs::from_cookies 注释）。
+    let required = ["s_v_web_id", "ttwid"];
     let missing: Vec<&str> = required
         .iter()
         .filter(|k| !cookies.contains_key(**k))
@@ -529,7 +530,8 @@ pub async fn run_set_cookie(cookie_file: &Path, raw: &str) -> Result<Value> {
             }
         }
     }
-    let required = ["msToken", "s_v_web_id", "ttwid"];
+    // msToken 非必需（实测空值不影响 profile/list/detail，见 api.rs::from_cookies 注释）。
+    let required = ["s_v_web_id", "ttwid"];
     let missing: Vec<&str> = required
         .iter()
         .filter(|k| !map.contains_key(**k))

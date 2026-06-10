@@ -1,13 +1,9 @@
-//! THS login 窗口 watcher：每 5s 读 cookie，关键三件套齐 + 内容变化时落盘。
-//!
-//! 与 uploader 的设计同形：无 ths-login 窗 → emit `no_login_window`；登录未完成 →
-//! `waiting_login` + missing；齐了且 hash 变化 → 写 `<workspace>/ths/cookies.json` 并 emit
-//! `saved`；hash 同上次 → `unchanged`。前端 `listen("ths:status")` 接所有状态。
+//! THS Chrome tab watcher：每 5s 通过 CDP 读 cookie，关键三件套齐 + 内容变化时落盘。
 
 use crate::ths;
 use crate::AppCtx;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 const POLL_SECS: u64 = 5;
@@ -29,20 +25,27 @@ pub fn spawn(app: AppHandle, ctx: AppCtx) {
 }
 
 async fn tick(app: &AppHandle, ctx: &AppCtx) {
-    let Some(login) = app.get_webview_window("ths-login") else {
+    if !ctx.ths_browser.is_open() {
         let _ = app.emit(
             "ths:status",
             serde_json::json!({ "state": "no_login_window" }),
         );
         return;
+    }
+    let Some(tab) = ctx.ths_browser.tab() else {
+        return;
     };
-    let records = match ths::read_records(&login) {
-        Ok(v) => v,
-        Err(e) => {
+    let records = match tokio::task::spawn_blocking(move || ths::read_records(&tab)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             let _ = app.emit(
                 "ths:status",
                 serde_json::json!({ "state": "error", "error": e.to_string() }),
             );
+            return;
+        }
+        Err(e) => {
+            log::warn!("ths spawn_blocking: {e}");
             return;
         }
     };
@@ -54,7 +57,7 @@ async fn tick(app: &AppHandle, ctx: &AppCtx) {
                 "state": "waiting_login",
                 "missing": missing,
                 "have": records.len(),
-                "hint": "请在登录窗里完成账号 + 滑块验证，务必勾「记住我」，否则 ticket 是 session cookie 关窗即失效。",
+                "hint": "请在登录窗里完成账号 + 滑块验证，务必勾「记住我」。",
             }),
         );
         return;

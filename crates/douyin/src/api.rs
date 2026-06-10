@@ -91,8 +91,12 @@ impl DouyinClient {
     pub fn from_cookies(cookies: &HashMap<String, String>) -> ApiResult<Self> {
         let s_v_web_id = cookies.get("s_v_web_id").cloned().unwrap_or_default();
         let ms_token = cookies.get("msToken").cloned().unwrap_or_default();
+        // msToken 非必需（实测 2026-06-10）：a-bogus 签名只依赖 query、不含 msToken；
+        // self_info / profile.other / aweme.post 在空 msToken 下返回数据与带 msToken 完全
+        // 一致、不触发风控。抖音 web 新登录的纯净 profile 本就常常不写 msToken cookie，
+        // 故这里**不**因空 msToken 报错，留空照常发。
         if ms_token.is_empty() {
-            return Err(ApiError::new("cookie_missing", "cookie 缺少 msToken"));
+            log::debug!("msToken 为空，按空值继续（实测不影响 profile/list/detail）");
         }
         let uifid = cookies.get("UIFID").cloned().unwrap_or_default();
         let cookie_header = cookies

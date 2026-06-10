@@ -24,8 +24,8 @@ pub struct UploadRow {
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("open sqlite {}", path.display()))?;
+        let conn =
+            Connection::open(path).with_context(|| format!("open sqlite {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.execute_batch(
             r#"
@@ -48,7 +48,9 @@ impl Db {
             "#,
         )
         .context("migrate state.db")?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn record_upload(
@@ -64,7 +66,14 @@ impl Db {
         conn.execute(
             "INSERT INTO uploads(ts, hash, fields_count, success, server_response, error)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![ts, hash, fields_count, success as i64, server_response, error],
+            params![
+                ts,
+                hash,
+                fields_count,
+                success as i64,
+                server_response,
+                error
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }

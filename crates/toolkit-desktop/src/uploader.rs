@@ -1,37 +1,31 @@
-//! 后台轮询 WebView2 cookie store；登录态完整时打包 POST 到 toolkit-server。
+//! 后台轮询 CDP 控制的 Chrome 子进程 cookie store；登录态完整时打包 POST 到 toolkit-server。
 //!
-//! 流程：
-//! 1. 每 `POLL_SECS` 秒 `webview.cookies_for_url("https://www.douyin.com")` 取 cookies；
-//! 2. 必需字段（msToken / ttwid / sessionid_ss）齐全才视为登录态；
-//! 3. 对 cookie 串算 SHA256，与上次相同则跳过（避免重复上传同一份）；
-//! 4. 拼成 `k=v; k=v` header 串，POST `<server>/api/browser/cookie`，body 同
-//!    `extension-contract.md §四.3`：`{session_id, raw_header}`；
-//! 5. 上传结果写入 `state.db` uploads 表，并通过事件通知前端。
+//! 切到 headless_chrome 后流程简化：
+//! 1. 每 `POLL_SECS` 秒在 `spawn_blocking` 里调 `tab.get_cookies()`，直接读 cookie store
+//!    （不再需要 JS hook / 桥）
+//! 2. 登录态字段（ttwid / sessionid_ss）齐全才视为登录态；msToken 非必需（见 REQUIRED 注释）
+//! 3. SHA256 dedup
+//! 4. POST `<server>/api/browser/cookie`，body `{session_id, raw_header}`
+//! 5. 落 state.db + 事件通知前端
 
+use crate::config;
 use crate::workspace;
 use crate::AppCtx;
-use crate::config;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 const POLL_SECS: u64 = 5;
-const TARGET_URL: &str = "https://www.douyin.com";
-/// 判定「登录态可上传」的核心字段。三个都齐才上传：
-/// - `sessionid_ss` / `ttwid`：登录态
-/// - `msToken`：抖音前端 SDK 动态写入；缺它 G10 业务接口（DouyinClient::from_cookies）直接 cookie_missing，
-///   所以宁可不传不让 server 拿到不完整 cookie 覆盖旧的好版本。
-const REQUIRED: &[&str] = &["ttwid", "sessionid_ss", "msToken"];
+// msToken 非必需（实测 2026-06-10：空 msToken 下 profile/list/detail/self_info 返回数据
+// 一致、不触发风控；抖音新登录 profile 本就常不写 msToken cookie）。只认登录态字段。
+const REQUIRED: &[&str] = &["ttwid", "sessionid_ss"];
 
 #[derive(Default)]
 pub struct UploaderState {
     pub(crate) last_hash: Mutex<Option<String>>,
     session_id: Mutex<String>,
-    /// JS hook 从抖音 API URL 里抓到的最新 msToken。
-    pub(crate) ms_token: Mutex<Option<String>>,
 }
 
 impl UploaderState {
@@ -71,33 +65,26 @@ async fn tick(app: &AppHandle, ctx: &AppCtx, client: &reqwest::Client) -> Result
         );
         return Ok(());
     };
-    let Some(login) = app.get_webview_window("login") else {
+    if !ctx.douyin_browser.is_open() {
         let _ = app.emit(
             "uploader:status",
-            serde_json::json!({ "state": "no_login_window", "hint": "点「打开抖音登录」并保持窗口" }),
+            serde_json::json!({
+                "state": "no_login_window",
+                "hint": "点「抖音登录」打开 Chrome",
+            }),
         );
         return Ok(());
-    };
-    let mut pairs = read_cookies(&login).await?;
-    // 把 JS hook 抓到的 msToken 合进来（抖音不再写 cookie，仅出现在 API URL 上）。
-    if let Some(tok) = ctx.uploader.ms_token.lock().await.clone() {
-        if !pairs.iter().any(|(n, _)| n == "msToken") {
-            pairs.push(("msToken".to_string(), tok));
-        }
     }
+
+    let pairs = read_cookies(ctx).await?;
     let missing: Vec<&str> = REQUIRED
         .iter()
         .copied()
         .filter(|k| !pairs.iter().any(|(n, _)| n == k))
         .collect();
     if !missing.is_empty() {
-        let hint = if missing == ["msToken"] {
-            "已登录但缺 msToken — 抖音前端 SDK 还没把它写入 cookie。请在登录窗里滚动首页或点开一个视频几秒，桌面端会自动检测到并上传。"
-        } else if missing.iter().any(|k| *k == "sessionid_ss" || *k == "ttwid") {
-            "未检测到登录态：请在登录窗里完成抖音账号登录。"
-        } else {
-            "cookie 不完整，等待补齐后再上传。"
-        };
+        // msToken 已不在 REQUIRED（非必需）。缺的只会是登录态字段。
+        let hint = "未检测到登录态：请在登录窗里完成抖音账号登录。";
         let _ = app.emit(
             "uploader:status",
             serde_json::json!({
@@ -109,6 +96,7 @@ async fn tick(app: &AppHandle, ctx: &AppCtx, client: &reqwest::Client) -> Result
         );
         return Ok(());
     }
+
     let raw_header = build_header(&pairs);
     let hash = sha256_hex(&raw_header);
     {
@@ -131,12 +119,16 @@ async fn tick(app: &AppHandle, ctx: &AppCtx, client: &reqwest::Client) -> Result
     if let Some(tok) = settings.auth_token.as_deref().filter(|s| !s.is_empty()) {
         req = req.bearer_auth(tok);
     }
-    let send_result = req.send().await;
-    match send_result {
+    match req.send().await {
         Err(e) => {
-            let _ = ctx
-                .db
-                .record_upload(&now, &hash, pairs.len() as i64, false, None, Some(&e.to_string()));
+            let _ = ctx.db.record_upload(
+                &now,
+                &hash,
+                pairs.len() as i64,
+                false,
+                None,
+                Some(&e.to_string()),
+            );
             return Err(anyhow!("POST cookie: {e}"));
         }
         Ok(resp) => {
@@ -154,15 +146,9 @@ async fn tick(app: &AppHandle, ctx: &AppCtx, client: &reqwest::Client) -> Result
                 );
                 return Err(anyhow!(err_msg));
             }
-            let _ = ctx.db.record_upload(
-                &now,
-                &hash,
-                pairs.len() as i64,
-                true,
-                Some(&text),
-                None,
-            );
-            // 持久化 last_uploaded_at 到 config.json，供下次启动 UI 显示。
+            let _ = ctx
+                .db
+                .record_upload(&now, &hash, pairs.len() as i64, true, Some(&text), None);
             let mut s2 = settings.clone();
             s2.last_uploaded_at = Some(now.clone());
             if let Err(e) = config::save(&workspace::config_path(&ctx.workspace), &s2) {
@@ -183,15 +169,26 @@ async fn tick(app: &AppHandle, ctx: &AppCtx, client: &reqwest::Client) -> Result
     Ok(())
 }
 
-async fn read_cookies(login: &WebviewWindow) -> Result<Vec<(String, String)>> {
-    let url: url::Url = TARGET_URL.parse().context("parse target url")?;
-    let cookies = login
-        .cookies_for_url(url)
-        .map_err(|e| anyhow!("cookies_for_url: {e}"))?;
-    Ok(cookies
-        .into_iter()
-        .map(|c| (c.name().to_string(), c.value().to_string()))
-        .collect())
+/// 通过 CDP 拿 douyin tab 的全量 cookies。`tab.get_cookies()` 是同步阻塞 IO，扔进
+/// spawn_blocking 不阻塞 tokio runtime。
+async fn read_cookies(ctx: &AppCtx) -> Result<Vec<(String, String)>> {
+    let Some(tab) = ctx.douyin_browser.tab() else {
+        return Err(anyhow!("douyin browser not open"));
+    };
+    let mut pairs = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
+        let cookies = tab.get_cookies().map_err(|e| anyhow!("get_cookies: {e}"))?;
+        Ok(cookies.into_iter().map(|c| (c.name, c.value)).collect())
+    })
+    .await
+    .map_err(|e| anyhow!("spawn_blocking: {e}"))??;
+    // cookie store 里没有 msToken 时（新登录 profile 常如此），用从网络请求 harvest 到的
+    // 兜底补上。msToken 非必需，纯属锦上添花。
+    if !pairs.iter().any(|(n, _)| n == "msToken") {
+        if let Some(tok) = ctx.douyin_browser.harvested_ms_token() {
+            pairs.push(("msToken".to_string(), tok));
+        }
+    }
+    Ok(pairs)
 }
 
 fn build_header(pairs: &[(String, String)]) -> String {
@@ -211,7 +208,3 @@ fn sha256_hex(s: &str) -> String {
 fn json_err(msg: &str) -> serde_json::Value {
     serde_json::json!({ "state": "error", "error": msg })
 }
-
-// 让 Arc<UploaderState> 仍可通过 ctx.uploader 拿到 — 见 main.rs::AppCtx。
-#[allow(dead_code)]
-pub type UploaderRef = Arc<UploaderState>;
