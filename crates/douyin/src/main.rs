@@ -212,6 +212,8 @@ enum Command {
         #[arg(long)]
         transcript_dir: Option<PathBuf>,
         #[arg(long)]
+        refined_dir: Option<PathBuf>,
+        #[arg(long)]
         unique_id: String,
         /// 可选：仅录入这些 aweme_id（逗号分隔），用于标签筛选后录入子集。
         #[arg(long, value_delimiter = ',')]
@@ -543,12 +545,14 @@ async fn main() -> Result<()> {
             works_dir,
             knowledge_dir,
             transcript_dir,
+            refined_dir,
             unique_id,
             only_ids,
         } => douyin::run_publish_knowledge(
             &douyin::resolve_works_dir(works_dir)?,
             &douyin::resolve_knowledge_dir(knowledge_dir)?,
             &douyin::resolve_transcript_dir(transcript_dir)?,
+            &douyin::resolve_refined_dir(refined_dir)?,
             &unique_id,
             &only_ids,
         )?,

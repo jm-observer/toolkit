@@ -216,6 +216,7 @@ fn render_transcript_md(
     desc: &str,
     title: &str,
     transcript: Option<&crate::process::Transcript>,
+    refined: Option<&crate::refine::RefinedTranscript>,
 ) -> String {
     let tags_yaml = tags
         .iter()
@@ -269,6 +270,26 @@ fn render_transcript_md(
         ),
     };
 
+    // 整理稿（LLM refined）回填：有缓存则置于「视频内容」之前（rag ingest 把整段 md
+    // 向量化，整理稿在前 → 检索优先命中整理后的可读文本）。元信息进 frontmatter 便于追溯。
+    let (has_refined, refined_yaml, refined_section) = match refined {
+        Some(r) if !r.refined_text.trim().is_empty() => {
+            let yaml = format!(
+                "refined_model: \"{}\"\n\
+refined_prompt_version: \"{}\"\n\
+refined_prompt_hash: \"{}\"\n\
+refined_at: \"{}\"\n",
+                r.model.replace('"', "'"),
+                r.prompt_version.replace('"', "'"),
+                r.prompt_hash.replace('"', "'"),
+                r.refined_at.replace('"', "'"),
+            );
+            let section = format!("## 整理稿（LLM）\n{}\n\n", r.refined_text.trim());
+            (true, yaml, section)
+        }
+        _ => (false, String::new(), String::new()),
+    };
+
     format!(
         "---\n\
 aweme_id: \"{aweme_id}\"\n\
@@ -278,11 +299,14 @@ create_ym: \"{create_ym}\"\n\
 tags: [{tags_yaml}]\n\
 has_transcript: {has_transcript}\n\
 has_subtitle: {has_subtitle}\n\
+has_refined: {has_refined}\n\
 asr_model: {asr_model_yaml}\n\
+{refined_yaml}\
 ingested_at: \"{date}\"\n\
 ---\n\n\
 # {title}\n\n\
 ## 文案\n{desc_body}\n\n\
+{refined_section}\
 ## 视频内容（ASR）\n{asr_body}\n\n\
 ## 字幕（时间轴）\n{subtitle_body}\n",
         date = today(),
@@ -353,6 +377,7 @@ pub fn run_publish_knowledge(
     works_dir: &Path,
     knowledge_dir: &Path,
     transcript_dir: &Path,
+    refined_dir: &Path,
     unique_id: &str,
     only_ids: &[String],
 ) -> Result<Value> {
@@ -375,6 +400,7 @@ pub fn run_publish_knowledge(
     let mut written = 0usize;
     let mut with_transcript = 0usize;
     let mut with_subtitle = 0usize;
+    let mut with_refined = 0usize;
     // 时间倒序排索引行（works 已按抓取顺序，create_ym 倒序更友好）。
     let mut rows: Vec<(String, String)> = Vec::new(); // (create_ym, row)
     for w in &cache.works {
@@ -399,6 +425,11 @@ pub fn run_publish_knowledge(
                 with_subtitle += 1;
             }
         }
+        // 整理稿回填（Phase 2）：有缓存则进 md 整理稿栏，被 rag 优先索引。
+        let refined = crate::refine::read_refined(refined_dir, id);
+        if refined.is_some() {
+            with_refined += 1;
+        }
         let md = render_transcript_md(
             id,
             unique_id,
@@ -408,6 +439,7 @@ pub fn run_publish_knowledge(
             desc,
             &title,
             transcript.as_ref(),
+            refined.as_ref(),
         );
         std::fs::write(transcripts.join(format!("{id}.md")), md)
             .with_context(|| format!("写条目 {id}.md"))?;
@@ -433,6 +465,7 @@ pub fn run_publish_knowledge(
         "written": written,
         "with_transcript": with_transcript,
         "with_subtitle": with_subtitle,
+        "with_refined": with_refined,
         "path": root.to_string_lossy(),
     }))
 }
@@ -551,10 +584,12 @@ mod tests {
         let works = tempdir();
         let kb = tempdir();
         let tr = tempdir();
+        let rf = tempdir();
         write_cache(&works, "82933463317", &sample_cache()).unwrap();
-        let v = run_publish_knowledge(&works, &kb, &tr, "82933463317", &[]).unwrap();
+        let v = run_publish_knowledge(&works, &kb, &tr, &rf, "82933463317", &[]).unwrap();
         assert_eq!(v["written"], 3);
         assert_eq!(v["with_transcript"], 0);
+        assert_eq!(v["with_refined"], 0);
         let root = kb.join("82933463317");
         assert!(root.join("profile.md").exists());
         assert!(root.join("index.md").exists());
@@ -563,10 +598,12 @@ mod tests {
         assert!(root.join("transcripts/7c.md").exists());
         let md = std::fs::read_to_string(root.join("transcripts/7a.md")).unwrap();
         assert!(md.contains("has_transcript: false"));
+        assert!(md.contains("has_refined: false"));
         assert!(md.contains("## 字幕（时间轴）"));
         std::fs::remove_dir_all(&works).ok();
         std::fs::remove_dir_all(&kb).ok();
         std::fs::remove_dir_all(&tr).ok();
+        std::fs::remove_dir_all(&rf).ok();
     }
 
     #[test]
@@ -574,9 +611,17 @@ mod tests {
         let works = tempdir();
         let kb = tempdir();
         let tr = tempdir();
+        let rf = tempdir();
         write_cache(&works, "82933463317", &sample_cache()).unwrap();
-        let v = run_publish_knowledge(&works, &kb, &tr, "82933463317", &["7a".into(), "7c".into()])
-            .unwrap();
+        let v = run_publish_knowledge(
+            &works,
+            &kb,
+            &tr,
+            &rf,
+            "82933463317",
+            &["7a".into(), "7c".into()],
+        )
+        .unwrap();
         assert_eq!(v["written"], 2);
         let root = kb.join("82933463317");
         assert!(root.join("transcripts/7a.md").exists());
@@ -585,6 +630,7 @@ mod tests {
         std::fs::remove_dir_all(&works).ok();
         std::fs::remove_dir_all(&kb).ok();
         std::fs::remove_dir_all(&tr).ok();
+        std::fs::remove_dir_all(&rf).ok();
     }
 
     #[test]
@@ -592,6 +638,7 @@ mod tests {
         let works = tempdir();
         let kb = tempdir();
         let tr = tempdir();
+        let rf = tempdir();
         write_cache(&works, "82933463317", &sample_cache()).unwrap();
         let t = crate::process::Transcript {
             aweme_id: "7a".into(),
@@ -606,19 +653,36 @@ mod tests {
             transcribed_at: "2026-05-31T00:00:00Z".into(),
         };
         std::fs::write(tr.join("7a.json"), serde_json::to_string(&t).unwrap()).unwrap();
+        // 7a 同时有整理稿 → md 应含整理稿栏 + has_refined: true。
+        let refined = crate::refine::RefinedTranscript {
+            aweme_id: "7a".into(),
+            refined_text: "今天我们讲 ComfyUI 工作流。\n\n## 小结\n介绍工作流基础。".into(),
+            model: "qwen2.5".into(),
+            prompt_version: crate::refine::PROMPT_VERSION.into(),
+            prompt_hash: crate::refine::prompt_hash(),
+            refined_at: "2026-06-10T00:00:00Z".into(),
+        };
+        std::fs::write(rf.join("7a.json"), serde_json::to_string(&refined).unwrap()).unwrap();
 
-        let v = run_publish_knowledge(&works, &kb, &tr, "82933463317", &[]).unwrap();
+        let v = run_publish_knowledge(&works, &kb, &tr, &rf, "82933463317", &[]).unwrap();
         assert_eq!(v["with_transcript"], 1);
         assert_eq!(v["with_subtitle"], 1);
+        assert_eq!(v["with_refined"], 1);
         let md = std::fs::read_to_string(kb.join("82933463317/transcripts/7a.md")).unwrap();
         assert!(md.contains("has_transcript: true"));
         assert!(md.contains("has_subtitle: true"));
-        assert!(md.contains("今天讲 ComfyUI 工作流"));
+        assert!(md.contains("has_refined: true"));
+        assert!(md.contains("refined_model: \"qwen2.5\""));
+        assert!(md.contains("## 整理稿（LLM）"));
+        assert!(md.contains("今天我们讲 ComfyUI 工作流"));
+        assert!(md.contains("今天讲 ComfyUI 工作流")); // 原文仍保留
         assert!(md.contains("[00:00-00:04]"));
         let md_b = std::fs::read_to_string(kb.join("82933463317/transcripts/7b.md")).unwrap();
         assert!(md_b.contains("has_transcript: false"));
+        assert!(md_b.contains("has_refined: false"));
         std::fs::remove_dir_all(&works).ok();
         std::fs::remove_dir_all(&kb).ok();
         std::fs::remove_dir_all(&tr).ok();
+        std::fs::remove_dir_all(&rf).ok();
     }
 }

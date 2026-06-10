@@ -17,6 +17,7 @@ pub mod events;
 pub mod knowledge;
 pub mod list_works_task;
 pub mod process;
+pub mod refine;
 pub mod serve;
 pub mod sign;
 
@@ -90,6 +91,14 @@ pub fn resolve_transcript_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// 整理稿缓存目录：显式优先，否则 `$ZERO_WORKSPACE/douyin/refined`。
+pub fn resolve_refined_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => Ok(workspace_dir()?.join("douyin").join("refined")),
+    }
+}
+
 /// `list_tags`：聚合某博主已拉取作品的话题标签 + 计数。
 pub fn run_list_tags(works_dir: &Path, unique_id: &str) -> Result<Value> {
     knowledge::run_list_tags(works_dir, unique_id)
@@ -110,6 +119,7 @@ pub fn run_publish_knowledge(
     works_dir: &Path,
     knowledge_dir: &Path,
     transcript_dir: &Path,
+    refined_dir: &Path,
     unique_id: &str,
     only_ids: &[String],
 ) -> Result<Value> {
@@ -117,6 +127,7 @@ pub fn run_publish_knowledge(
         works_dir,
         knowledge_dir,
         transcript_dir,
+        refined_dir,
         unique_id,
         only_ids,
     )
