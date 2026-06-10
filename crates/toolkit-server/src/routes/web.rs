@@ -1,11 +1,22 @@
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// 从入站请求头解析 W3C `traceparent`，得到上游当前 span 的上下文（供任务接入同一条
+/// trace）。无头 / 格式非法返回 None。
+fn trace_ctx_from_headers(headers: &HeaderMap) -> Option<toolkit_tasks::TraceContext> {
+    custom_utils::trace::extract_traceparent(|name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    })
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -32,8 +43,10 @@ struct SubmitBody {
 
 async fn submit_task(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SubmitBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let trace_parent = trace_ctx_from_headers(&headers);
     match toolkit_tasks::submit(
         &s.registry,
         &s.pool,
@@ -41,6 +54,7 @@ async fn submit_task(
         &body.kind,
         body.input,
         body.callback_url,
+        trace_parent,
     ) {
         Ok(id) => Ok(Json(json!({ "task_id": id }))),
         Err(e) => Err((

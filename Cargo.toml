@@ -23,7 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 log = "0.4"
 clap = { version = "4.5", features = ["derive"] }
-custom-utils = { version = "0.15.0", features = ["updater"] }
+custom-utils = { version = "0.15.0", features = ["updater", "trace"] }
 anyhow = "1"
 sm3 = "0.4"
 axum = "0.8"
@@ -35,6 +35,12 @@ r2d2_sqlite = "0.24"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
+
+# trace feature 的 SpanScope 两阶段 API 在本地 custom-utils(0.15.0, rev 6254e58) 已实现，
+# 但尚未发布到 crates.io 的同版本号。本地开发态走 path patch 引用（与 timer-util/alarm-server
+# 接入 trace-hub 时的做法一致）；发布前需等 custom-utils 推新版后改回纯版本依赖。
+[patch.crates-io]
+custom-utils = { path = "../custom-utils" }
 
 [profile.release]
 strip = true

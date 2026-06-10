@@ -11,6 +11,8 @@ pub mod runner;
 pub mod store;
 
 pub use api::{list_tasks, status, submit, TaskListFilter, TaskStatusDto};
+// re-export 给上游 HTTP 入口透传 traceparent 用（避免直接依赖 custom-utils）。
+pub use custom_utils::trace::TraceContext;
 pub use echo::{EchoInput, EchoOutput, EchoTask};
 pub use kind::{Registry, TaskCtx, TaskKind};
 pub use runner::recover_interrupted;

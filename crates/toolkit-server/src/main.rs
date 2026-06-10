@@ -56,10 +56,25 @@ enum Command {
     },
 }
 
+/// 启用 trace-hub 全链路追踪——仅当设置了环境变量 `TRACE_HUB_ENDPOINT` 时生效；
+/// 未设则完全无副作用（record_* 全 no-op，不起后台任务）。
+fn init_trace() {
+    if let Ok(endpoint) = std::env::var("TRACE_HUB_ENDPOINT") {
+        custom_utils::trace::init(custom_utils::trace::TraceConfig::new(
+            endpoint,
+            "toolkit-server",
+        ));
+        log::info!("trace enabled → trace-hub");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = custom_utils::logger::logger_feature("toolkit-server", "info,reqwest=warn", Info, false)
-        .build();
+    let _ =
+        custom_utils::logger::logger_feature("toolkit-server", "info,reqwest=warn", Info, false)
+            .build();
+
+    init_trace();
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Serve {
@@ -90,10 +105,7 @@ async fn main() -> Result<()> {
         }
         Command::Install { dry_run, workspace } => {
             match linux_service()
-                .dispatch(DeployCommand::Install {
-                    dry_run,
-                    workspace,
-                })
+                .dispatch(DeployCommand::Install { dry_run, workspace })
                 .await
                 .context("安装失败")?
             {

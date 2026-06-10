@@ -12,6 +12,7 @@ tokio = { workspace = true, features = ["time", "rt", "rt-multi-thread", "macros
 async-trait = { workspace = true }
 log = { workspace = true }
 rusqlite = { workspace = true }
+custom-utils = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

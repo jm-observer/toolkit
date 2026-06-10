@@ -18,6 +18,7 @@ async fn echo_succeeds() {
         "echo",
         json!({"message": "hello", "delay_ms": 100}),
         None,
+        None,
     )
     .unwrap();
 
@@ -43,6 +44,15 @@ async fn unknown_kind_fails_submit() {
     let pool = open_pool(&dir.path().join("t.db")).unwrap();
     migrate(&pool).unwrap();
     let reg = Registry::new();
-    let err = submit(&reg, &pool, dir.path(), "nope", serde_json::json!({}), None).unwrap_err();
+    let err = submit(
+        &reg,
+        &pool,
+        dir.path(),
+        "nope",
+        serde_json::json!({}),
+        None,
+        None,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("unknown kind"));
 }

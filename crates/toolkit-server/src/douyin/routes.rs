@@ -6,7 +6,7 @@
 use crate::douyin_mod::paths::DouyinPaths;
 use crate::state::AppState;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::routing::{get, post};
 use axum::Router;
@@ -133,17 +133,30 @@ async fn track_creator(
         .map_err(internal)?;
     if v.get("error").is_some() {
         return Err(bad_request(
-            v.get("error").and_then(|x| x.as_str()).unwrap_or("resolve failed"),
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("resolve failed"),
         ));
     }
-    let sec_uid = v.get("sec_uid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let sec_uid = v
+        .get("sec_uid")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let unique_id = v
         .get("unique_id")
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    let nickname = v.get("nickname").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let signature = v.get("signature").and_then(|x| x.as_str()).map(String::from);
+    let nickname = v
+        .get("nickname")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let signature = v
+        .get("signature")
+        .and_then(|x| x.as_str())
+        .map(String::from);
     let aweme_count = v.get("aweme_count").and_then(|x| x.as_i64());
     let follower_count = v.get("follower_count").and_then(|x| x.as_i64());
     if sec_uid.is_empty() || unique_id.is_empty() {
@@ -215,7 +228,9 @@ async fn list_creators(
         })
         .map_err(internal)?;
     let creators: Vec<Value> = rows.filter_map(|r| r.ok()).collect();
-    Ok(Json(json!({ "count": creators.len(), "creators": creators })))
+    Ok(Json(
+        json!({ "count": creators.len(), "creators": creators }),
+    ))
 }
 
 async fn cookie_status(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -231,28 +246,51 @@ async fn cookie_status(State(s): State<AppState>) -> Result<Json<Value>, ApiErro
 
 async fn sync_works(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    submit_kind(&s, "douyin_list_works", body)
+    submit_kind(&s, &headers, "douyin_list_works", body)
 }
 
 async fn download(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    submit_kind(&s, "douyin_download", body)
+    submit_kind(&s, &headers, "douyin_download", body)
 }
 
 async fn transcribe(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    submit_kind(&s, "douyin_transcribe", body)
+    submit_kind(&s, &headers, "douyin_transcribe", body)
 }
 
-fn submit_kind(s: &AppState, kind: &str, input: Value) -> Result<Json<Value>, ApiError> {
-    let task_id = toolkit_tasks::submit(&s.registry, &s.pool, &s.workspace, kind, input, None)
-        .map_err(bad_request)?;
+fn submit_kind(
+    s: &AppState,
+    headers: &HeaderMap,
+    kind: &str,
+    input: Value,
+) -> Result<Json<Value>, ApiError> {
+    // 透传入站 W3C traceparent，让抖音长任务接入上游同一条 trace。
+    let trace_parent = custom_utils::trace::extract_traceparent(|name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|str| str.to_string())
+    });
+    let task_id = toolkit_tasks::submit(
+        &s.registry,
+        &s.pool,
+        &s.workspace,
+        kind,
+        input,
+        None,
+        trace_parent,
+    )
+    .map_err(bad_request)?;
     Ok(Json(json!({ "task_id": task_id, "kind": kind })))
 }
 
