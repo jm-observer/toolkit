@@ -116,12 +116,38 @@ pwsh ./deploy-g10.ps1 -SkipBuild # 仅复制已有产物
   prompt 变了哈希就变，可识别旧产物、删 `refined/` 后重跑对比。
 - **端到端验收**：见 [docs/runbook-pipeline-e2e.md](docs/runbook-pipeline-e2e.md)。
 
+## 英语音频生产线（流 B，Phase 3）
+
+补齐 plan 流 B 的「文本 → TTS 逐句音频 → 学习包草稿 → english 导入消费」供给侧：
+
+- **AudioForge**（`audio_forge` kind / `POST /api/web/audio/forge`）：输入句子清单
+  （每句 `text` + 可选 `translation`/`note`/逐句 `voice_id`）+ 包级 `voice_id` + 可选
+  `tts_params`（语速/instruct，平铺进上游 body）+ 包元信息（`package_name`/`topic`/`language`）。
+  逐句调上游 TTS（直接 `TTS_BASE_URL/tts`，复用 Phase 1 配置；单句失败重试 3 次指数退避，
+  最终失败进 output 的 `failures[]`，不拖垮整批）→ 音频落
+  `<workspace>/audioforge/<package_id>/NNN.wav` → 生成 `manifest.json`（包元信息 + 句子数组：
+  序号/文本/译文/注释/音频文件名/时长(解析 WAV 头)/voice/tts_params/生成时间）。产物即「学习包草稿」。
+  **未配置 TTS_BASE_URL 时任务提交后立即 failed**。trace：`audio_forge_batch` 顶层 span +
+  逐句 `tts_one` 子 span。
+- **下载途径**（供 english 拉取，零人工传文件）：`GET /api/web/audio/forge/{package_id}/manifest.json`
+  与 `GET /api/web/audio/forge/{package_id}/{NNN.wav}`。路径段白名单校验（无分隔符/`..`/盘符）
+  + canonicalize 后必须仍在 `audioforge/` 内，**防路径穿越**。
+- **抖音整理稿抽句**（可选来源快捷方式）：输入 `from_refined: {unique_id?, aweme_ids}` →
+  读 `douyin/refined/<id>.json` 整理稿，**按句切分全文**（标点切分，剥离 markdown 标题/列表
+  前缀）。**简化实现，待迭代**为「英语片段精选」（见 runbook 说明）。来源标记 source =
+  `manual`/`from_refined`/`mixed`。
+- **manifest 契约**：`manifest_version=1`；english `package.import` 据此消费。详见
+  [docs/runbook-audioforge-e2e.md](docs/runbook-audioforge-e2e.md)。
+- **配置**：复用 Phase 1 的 `TTS_BASE_URL`（如 `http://127.0.0.1:8095`）。
+- **端到端验收**：见 [docs/runbook-audioforge-e2e.md](docs/runbook-audioforge-e2e.md)。
+
 ## 文档目录（动手前按主题查）
 
 - [docs/toolkit-design.md](docs/toolkit-design.md) — 中台整体设计。
 - [docs/douyin-design.md](docs/douyin-design.md) / [docs/douyin-cli.md](docs/douyin-cli.md) — 抖音工具设计与 CLI/HTTP API 参考。
 - [docs/rag-service-design.md](docs/rag-service-design.md) — RAG 检索服务设计。
 - [docs/runbook-pipeline-e2e.md](docs/runbook-pipeline-e2e.md) — 抖音知识管线端到端验收 runbook（Phase 2）。
+- [docs/runbook-audioforge-e2e.md](docs/runbook-audioforge-e2e.md) — 英语音频生产线端到端验收 runbook（Phase 3）。
 - [docs/toolkit-rfc/2026-06-04-initial-skeleton/data-model.md](docs/toolkit-rfc/2026-06-04-initial-skeleton/data-model.md) — SQLite 数据模型。
 - [docs/toolkit-rfc/2026-06-10-toolkit-elevation/plan.md](docs/toolkit-rfc/2026-06-10-toolkit-elevation/plan.md) — 提级为统一工具中台的分阶段规划。
 - [docs/retrospective.md](docs/retrospective.md) — 复盘记录。
