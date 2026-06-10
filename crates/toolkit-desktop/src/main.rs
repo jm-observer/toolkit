@@ -21,7 +21,7 @@ use std::sync::Arc;
 use uploader::UploaderState;
 
 const REPO_OWNER: &str = "jm-observer";
-const REPO_NAME: &str = "github-commit-info";
+const REPO_NAME: &str = "toolkit";
 const APP: &str = "toolkit-desktop";
 
 #[derive(Parser, Debug, Clone)]

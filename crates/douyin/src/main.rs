@@ -5,9 +5,9 @@ use log::LevelFilter::Info;
 use std::path::PathBuf;
 
 // LinuxService 部署描述：systemd 用户级单元 + ~/.local/bin + ~/.config/douyin。
-// 自更新指向承载本工具集的同一 GitHub 仓库（与 github-commit-info 同仓）。
+// 自更新指向承载本工具集的同一 GitHub 仓库（toolkit，与其他工具同仓）。
 const REPO_OWNER: &str = "jm-observer";
-const REPO_NAME: &str = "github-commit-info";
+const REPO_NAME: &str = "toolkit";
 const APP: &str = "douyin";
 /// G10 部署：daemon 长跑作业（process 含 ASR 可达数分钟）。watchdog 心跳间隔留 60s
 /// 给 maintenance tick + axum 喘息，systemd 仍能在 daemon 真正死锁/卡死时拉起。

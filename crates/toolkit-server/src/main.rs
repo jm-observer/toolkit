@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use toolkit_server::{run, workspace_dir, Config};
 
 const REPO_OWNER: &str = "jm-observer";
-const REPO_NAME: &str = "github-commit-info";
+const REPO_NAME: &str = "toolkit";
 const APP: &str = "toolkit-server";
 /// systemd watchdog 心跳间隔（秒）。axum + 后台 task 调度都很快，60s 给足喘息。
 const WATCHDOG_SEC: u32 = 60;

@@ -1,6 +1,6 @@
 //! toolkit-core：领域类型 + SQLite schema + URL 模式识别。
 //!
-//! 见 `github-commit-info/docs/toolkit-design.md` 与 `docs/toolkit-rfc/2026-06-04-initial-skeleton/`。
+//! 见 `toolkit/docs/toolkit-design.md` 与 `docs/toolkit-rfc/2026-06-04-initial-skeleton/`。
 
 pub mod db;
 pub mod ids;

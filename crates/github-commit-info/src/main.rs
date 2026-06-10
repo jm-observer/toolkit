@@ -5,7 +5,7 @@ use github_commit_info::run;
 use log::LevelFilter::Info;
 
 const REPO_OWNER: &str = "jm-observer";
-const REPO_NAME: &str = "github-commit-info";
+const REPO_NAME: &str = "toolkit";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
 
     if let Some(Command::Update { force }) = args.command {
         let outcome = UpdateConfig::new(REPO_OWNER, REPO_NAME, env!("CARGO_PKG_VERSION"))
-            .bin_name(REPO_NAME)
+            .bin_name("github-commit-info")
             .force(force)
             .execute()
             .await

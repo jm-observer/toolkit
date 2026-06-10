@@ -5,9 +5,9 @@ use hf_watcher::{run_model_card, run_trending};
 use log::LevelFilter::Info;
 use std::path::PathBuf;
 
-// 自更新指向承载本工具集的同一 GitHub 仓库（与 github-commit-info 同仓）。
+// 自更新指向承载本工具集的同一 GitHub 仓库（toolkit，与其他工具同仓）。
 const REPO_OWNER: &str = "jm-observer";
-const REPO_NAME: &str = "github-commit-info";
+const REPO_NAME: &str = "toolkit";
 const BIN_NAME: &str = "hf-watcher";
 
 #[derive(Parser, Debug)]
