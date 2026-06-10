@@ -15,9 +15,20 @@ pub async fn dashboard() -> Html<&'static str> {
 }
 
 pub async fn app_js() -> Response {
-    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], APP_JS).into_response()
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        APP_JS,
+    )
+        .into_response()
 }
 
 pub async fn style_css() -> Response {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE_CSS).into_response()
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        STYLE_CSS,
+    )
+        .into_response()
 }
