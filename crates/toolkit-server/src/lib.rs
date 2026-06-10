@@ -95,6 +95,7 @@ pub fn build_router(state: AppState, web_dir: &std::path::Path) -> axum::Router 
 
     let mut router = axum::Router::new()
         .nest("/api/web", routes::web::router())
+        .nest("/api/web/audio", routes::audio::router())
         .nest("/api/web/douyin", douyin_mod::routes::router())
         .nest("/api/agent", routes::agent::router())
         .nest("/api/browser", routes::browser::router());
