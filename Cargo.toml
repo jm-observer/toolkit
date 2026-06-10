@@ -2,6 +2,7 @@
 members = [
     "crates/github-commit-info",
     "crates/hf-watcher",
+    "crates/asr-server",
     "crates/douyin",
     "crates/rag",
     "crates/toolkit-core",

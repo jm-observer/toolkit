@@ -35,10 +35,17 @@ $Target = "aarch64-unknown-linux-gnu"
 $Image = "huangjiemin/rust_aarch64-gcc_openssl:1.94.0_9.4.0_1.1.0l_llvm12.0.1"
 
 # (crate package 名, 产物二进制名) —— 新增工具时在此追加一行即可。
+#
+# 注意 asr-server:依赖 sherpa-onnx 的 native shared libs(libsherpa-onnx-c-api.so /
+# libonnxruntime.so / libsherpa-onnx-cxx-api.so)+ 运行期 ffmpeg。本脚本只 scp 裸
+# 二进制,这些 .so 不会一并带过去——asr-server 的推荐部署形态是容器(crates/asr-server/
+# Dockerfile + deploy/asr-tts/ 编排),裸二进制部署须自行把 sherpa .so 放进 G10 的
+# LD_LIBRARY_PATH。保留此行是为了「与其它 bin 一起交叉编译验证产物可生成」。
 $Bins = @(
     @{ Crate = "github_commit_info"; Bin = "github-commit-info" },
     @{ Crate = "hf_watcher";         Bin = "hf-watcher" },
-    @{ Crate = "douyin";             Bin = "douyin" }
+    @{ Crate = "douyin";             Bin = "douyin" },
+    @{ Crate = "asr_server";         Bin = "asr-server" }
 )
 
 if (-not $SkipBuild) {
