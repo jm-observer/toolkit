@@ -21,6 +21,8 @@ pub fn register_all(reg: &mut Registry) {
     reg.register::<DouyinDownload>();
     reg.register::<DouyinTranscribe>();
     reg.register::<DouyinListWorks>();
+    reg.register::<super::refine::DouyinTextRefine>();
+    reg.register::<super::pipeline::DouyinPipeline>();
 }
 
 // ---------- DouyinDownload ----------
@@ -165,13 +167,13 @@ impl TaskKind for DouyinListWorks {
 // ---------- 共用工具 ----------
 
 #[derive(Copy, Clone)]
-enum DouyinKind {
+pub(crate) enum DouyinKind {
     Download,
     Process,
     ListWorks,
 }
 
-fn extract_task_id(submit_result: &Value, label: &str) -> Result<String> {
+pub(crate) fn extract_task_id(submit_result: &Value, label: &str) -> Result<String> {
     if let Some(err) = submit_result.get("error").and_then(|v| v.as_str()) {
         bail!("douyin {label} submit failed: {err}");
     }
@@ -226,7 +228,11 @@ async fn poll_until_terminal(
     }
 }
 
-async fn read_status(paths: &DouyinPaths, dy_task_id: &str, kind: DouyinKind) -> Result<Value> {
+pub(crate) async fn read_status(
+    paths: &DouyinPaths,
+    dy_task_id: &str,
+    kind: DouyinKind,
+) -> Result<Value> {
     match kind {
         DouyinKind::Download => douyin::run_download_status(&paths.task_dir, dy_task_id).await,
         DouyinKind::Process => Ok(douyin::run_process_status(&paths.task_dir, dy_task_id)?),

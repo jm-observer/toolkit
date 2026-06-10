@@ -26,6 +26,8 @@ pub fn router() -> Router<AppState> {
         .route("/sync_works", post(sync_works))
         .route("/download", post(download))
         .route("/transcribe", post(transcribe))
+        .route("/refine", post(refine))
+        .route("/pipeline", post(pipeline))
         .route("/kb_publish", post(kb_publish))
 }
 
@@ -268,6 +270,22 @@ async fn transcribe(
     submit_kind(&s, &headers, "douyin_transcribe", body)
 }
 
+async fn refine(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    submit_kind(&s, &headers, "douyin_text_refine", body)
+}
+
+async fn pipeline(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    submit_kind(&s, &headers, "douyin_pipeline", body)
+}
+
 fn submit_kind(
     s: &AppState,
     headers: &HeaderMap,
@@ -313,6 +331,7 @@ async fn kb_publish(
         &paths.works_dir,
         &paths.knowledge_dir,
         &paths.transcript_dir,
+        &paths.refined_dir,
         &body.unique_id,
         &body.only_ids,
     )

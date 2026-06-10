@@ -11,6 +11,7 @@ pub struct DouyinPaths {
     pub task_dir: PathBuf,
     pub out_dir: PathBuf,
     pub transcript_dir: PathBuf,
+    pub refined_dir: PathBuf,
     pub works_dir: PathBuf,
     pub knowledge_dir: PathBuf,
 }
@@ -23,6 +24,7 @@ impl DouyinPaths {
             task_dir: douyin.join("tasks"),
             out_dir: workspace.join("downloads").join("douyin"),
             transcript_dir: douyin.join("transcripts"),
+            refined_dir: douyin.join("refined"),
             works_dir: douyin.join("works"),
             knowledge_dir: workspace.join("knowledge").join("douyin"),
         }
@@ -34,6 +36,7 @@ impl DouyinPaths {
             &self.task_dir,
             &self.out_dir,
             &self.transcript_dir,
+            &self.refined_dir,
             &self.works_dir,
             &self.knowledge_dir,
         ] {
