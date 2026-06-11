@@ -39,8 +39,15 @@ struct Args {
     #[arg(long, default_value = "")]
     language: String,
 
-    #[arg(long, default_value_t = 2)]
+    /// 单个 recognizer 的 onnxruntime 线程数。默认按核数自适应
+    /// (cores/2,夹在 [2,8]),老默认 2 在 GB10 20 核上浪费严重。
+    #[arg(long, default_value_t = default_num_threads())]
     num_threads: i32,
+
+    /// recognizer 池大小:>1 时并发请求不再整体串行(每个副本独占
+    /// 一份模型内存,SenseVoice int8 约 ~250MB/份)。
+    #[arg(long, default_value_t = 2)]
+    pool_size: usize,
 
     #[arg(long, default_value_t = 50 * 1024 * 1024)]
     max_body_bytes: usize,
@@ -69,9 +76,46 @@ struct Args {
 struct AppState {
     args: Args,
     is_whisper: bool,
-    recognizer: Mutex<OfflineRecognizer>,
+    recognizers: RecognizerPool,
     /// canonical 化后的白名单前缀（Plan C）。空 = from-source 禁用。
     allowlist: Vec<PathBuf>,
+}
+
+fn default_num_threads() -> i32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    ((cores / 2).clamp(2, 8)) as i32
+}
+
+/// 固定大小的 recognizer 池。`acquire` 先 try_lock 轮询找空闲副本,
+/// 全忙则阻塞在轮转到的槽位上(调用方都在 spawn_blocking 线程,可阻塞)。
+struct RecognizerPool {
+    items: Vec<Mutex<OfflineRecognizer>>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl RecognizerPool {
+    fn new(items: Vec<Mutex<OfflineRecognizer>>) -> Self {
+        assert!(!items.is_empty());
+        Self {
+            items,
+            next: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn acquire(&self) -> std::sync::MutexGuard<'_, OfflineRecognizer> {
+        let n = self.items.len();
+        let start = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for i in 0..n {
+            if let Ok(g) = self.items[(start + i) % n].try_lock() {
+                return g;
+            }
+        }
+        self.items[start % n]
+            .lock()
+            .expect("recognizer mutex poisoned")
+    }
 }
 
 fn build_config(args: &Args) -> anyhow::Result<OfflineRecognizerConfig> {
@@ -126,11 +170,21 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     let is_whisper = args.model == "whisper-turbo";
-    tracing::info!(model = %args.model, dir = ?args.model_dir, "loading recognizer");
+    let pool_size = args.pool_size.max(1);
+    tracing::info!(
+        model = %args.model, dir = ?args.model_dir,
+        pool_size, num_threads = args.num_threads,
+        "loading recognizer pool"
+    );
     let config = build_config(&args)?;
-    let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
-        anyhow::anyhow!("failed to create recognizer; check --model-dir and model files")
-    })?;
+    let mut pool = Vec::with_capacity(pool_size);
+    for i in 0..pool_size {
+        let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+            anyhow::anyhow!("failed to create recognizer; check --model-dir and model files")
+        })?;
+        tracing::info!("recognizer {}/{} ready", i + 1, pool_size);
+        pool.push(Mutex::new(recognizer));
+    }
 
     // 白名单 canonical 化（Plan C）：避免 symlink / `..` 逃逸。无法 canonical 化的
     // 条目（如目录不存在）丢弃并 warn。
@@ -167,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         args,
         is_whisper,
-        recognizer: Mutex::new(recognizer),
+        recognizers: RecognizerPool::new(pool),
         allowlist,
     });
 
@@ -856,7 +910,7 @@ fn transcribe_blocking(
     vad_flag: bool,
     ctx: &TraceContext,
 ) -> anyhow::Result<TranscriptionResponse> {
-    let recognizer = state.recognizer.lock().expect("recognizer mutex poisoned");
+    let recognizer = state.recognizers.acquire();
     let total_dur = samples.len() as f64 / vad::SAMPLE_RATE as f64;
 
     if !vad_flag {

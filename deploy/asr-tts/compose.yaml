@@ -60,7 +60,10 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - COSYVOICE_MODEL=/models/CosyVoice2-0.5B
-      - COSYVOICE_FP16=0
+      # FP16 推理：~30-40% 提速。如发现音质劣化，改回 0 并重启即可。
+      # 注意：FP16 与启动预热（TTS_WARMUP，默认开）依赖 streaming-speech 6ee22fe 之后的
+      # cosy_server.py——G10 上的 cosyvoice2:bakeoff 镜像需用其最新代码重建后才生效。
+      - COSYVOICE_FP16=1
       - TTS_PORT=8095
       - VOICES_DIR=/voices
     volumes:
