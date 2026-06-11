@@ -36,8 +36,8 @@ pub struct Session {
 }
 
 struct Inner {
-    /// 持有 Browser 保证子进程不退出；drop 就 kill。
-    _browser: Browser,
+    /// 持有 Browser 保证子进程不退出；drop 就 kill。也用来枚举全部标签页（见 current_url）。
+    browser: Browser,
     tab: Arc<Tab>,
 }
 
@@ -110,10 +110,7 @@ impl Session {
         }
         tab.navigate_to(initial_url).context("navigate_to")?;
         // 不 wait_for_element body，因为抖音首页 SPA 加载有时极慢；让用户自然等。
-        *guard = Some(Inner {
-            _browser: browser,
-            tab,
-        });
+        *guard = Some(Inner { browser, tab });
         Ok(())
     }
 
@@ -152,13 +149,24 @@ impl Session {
         self.inner.lock().unwrap().as_ref().map(|i| i.tab.clone())
     }
 
-    /// 当前 URL；用 evaluate location.href 拿，比 last_navigation_response 稳。
+    /// 「当前」URL。**关键**：在登录窗里点博主，douyin 会 `target=_blank` **新开标签页**，
+    /// 原 tab 仍停在 /follow，只读原 tab 永远拿不到博主页。所以这里扫描全部标签页：
+    /// 优先返回博主主页（`/user/`）那个，其次最新的真实 http(s) 页面，再退回原 tab。
+    /// 用 `get_url()` 读缓存的 target_info（discover 模式下未 attach 的弹出页也有 URL），
+    /// 不走 evaluate（evaluate 需 attach，弹出页会失败）。
     pub fn current_url(&self) -> Option<String> {
-        let tab = self.tab()?;
-        tab.evaluate("location.href", false)
-            .ok()
-            .and_then(|r| r.value)
-            .and_then(|v| v.as_str().map(String::from))
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref()?;
+        let urls: Vec<String> = {
+            let tabs = inner.browser.get_tabs().lock().unwrap();
+            tabs.iter().map(|t| t.get_url()).collect()
+        };
+        urls.iter()
+            .rev()
+            .find(|u| u.contains("douyin.com/user/"))
+            .or_else(|| urls.iter().rev().find(|u| u.starts_with("http")))
+            .cloned()
+            .or_else(|| Some(inner.tab.get_url()))
     }
 }
 

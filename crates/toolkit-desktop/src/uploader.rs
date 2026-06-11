@@ -21,6 +21,22 @@ const POLL_SECS: u64 = 5;
 // msToken 非必需（实测 2026-06-10：空 msToken 下 profile/list/detail/self_info 返回数据
 // 一致、不触发风控；抖音新登录 profile 本就常不写 msToken cookie）。只认登录态字段。
 const REQUIRED: &[&str] = &["ttwid", "sessionid_ss"];
+// 登录身份 cookie：唯一决定「是不是同一个登录」的稳定字段，用于去重判定是否需要重传。
+// 不含 msToken/__ac_nonce 等随请求抖动的字段（详见 tick 里 hash 计算处注释）。
+const IDENTITY: &[&str] = &[
+    "sessionid",
+    "sessionid_ss",
+    "sid_guard",
+    "sid_tt",
+    "uid_tt",
+    "uid_tt_ss",
+    "sid_ucp_v1",
+    "ssid_ucp_v1",
+    "ttwid",
+    "odin_tt",
+    "UIFID",
+    "passport_csrf_token",
+];
 
 #[derive(Default)]
 pub struct UploaderState {
@@ -45,6 +61,9 @@ pub fn spawn(app: AppHandle, ctx: AppCtx) {
             .build()
             .expect("reqwest client");
         let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECS));
+        // tick() 偶尔会因 CDP 调用阻塞 >5s；默认 Burst 行为会把积压的 tick 一次性补发
+        // （实测 1.3s 内挤 7 拍）。改 Skip：错过就跳过，永远每 ~5s 一拍，不补发。
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await;
         loop {
             ticker.tick().await;
@@ -98,7 +117,18 @@ async fn tick(app: &AppHandle, ctx: &AppCtx, client: &reqwest::Client) -> Result
     }
 
     let raw_header = build_header(&pairs);
-    let hash = sha256_hex(&raw_header);
+    // 去重 hash **只认登录身份 cookie**：抖音页面活跃时会不停增删/刷新一大票易变 cookie
+    // （msToken / __ac_nonce / biz_trace_id / 各种 security 与推荐流 cookie，实测每拍
+    // 都变、cookie 数在 59~64 间跳）。若按全量算 hash，会每拍都判「变化」→ 每 5s 重传 +
+    // 前端「已同步」刷屏。身份 cookie（登录态）稳定，只有真正登录/换号才变，正是该重传
+    // 的时机。上传仍发最新、全量的 raw_header。
+    let mut ident: Vec<(String, String)> = pairs
+        .iter()
+        .filter(|(n, _)| IDENTITY.contains(&n.as_str()))
+        .cloned()
+        .collect();
+    ident.sort();
+    let hash = sha256_hex(&build_header(&ident));
     {
         let mut last = ctx.uploader.last_hash.lock().await;
         if last.as_deref() == Some(&hash) {
