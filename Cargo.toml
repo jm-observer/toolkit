@@ -9,6 +9,7 @@ members = [
     "crates/toolkit-tasks",
     "crates/toolkit-server",
     "crates/toolkit-desktop",
+    "crates/zero-desktop",
 ]
 resolver = "2"
 
