@@ -9,7 +9,7 @@ mod ths;
 mod ths_watcher;
 mod uploader;
 
-use crate::shared::{settings, workspace as ws};
+use crate::shared::{settings, trace as tr, workspace as ws};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -83,11 +83,15 @@ pub fn cookie_save_app_settings(
 pub async fn cookie_open_douyin_login(
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), String> {
+    let mut span = tr::CommandSpan::start(
+        "cookie_open_douyin_login",
+        serde_json::json!({"action": "open_login_window", "platform": "douyin"}),
+    );
     let session = state.cookie.douyin_browser.clone();
     tokio::task::spawn_blocking(move || session.open("https://www.douyin.com"))
         .await
         .map_err(|e| format!("spawn_blocking: {e}"))?
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| span.fail(format!("{e:#}")))?;
     Ok(())
 }
 
@@ -108,11 +112,15 @@ pub async fn cookie_close_douyin_login(
 pub async fn cookie_open_ths_login(
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), String> {
+    let mut span = tr::CommandSpan::start(
+        "cookie_open_ths_login",
+        serde_json::json!({"action": "open_login_window", "platform": "ths"}),
+    );
     let session = state.cookie.ths_browser.clone();
     tokio::task::spawn_blocking(move || session.open(ths::LOGIN_URL))
         .await
         .map_err(|e| format!("spawn_blocking: {e}"))?
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| span.fail(format!("{e:#}")))?;
     Ok(())
 }
 
@@ -138,15 +146,19 @@ pub fn cookie_ths_status(state: tauri::State<'_, crate::app_state::AppState>) ->
 pub async fn cookie_track_current_creator(
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<serde_json::Value, String> {
+    let mut span = tr::CommandSpan::start(
+        "cookie_track_current_creator",
+        serde_json::json!({"action": "track_creator"}),
+    );
     let session = state.cookie.douyin_browser.clone();
     let url = tokio::task::spawn_blocking(move || session.current_url())
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "没有打开抖音登录窗口或读 URL 失败".to_string())?;
+        .map_err(|e| span.fail(e.to_string()))?
+        .ok_or_else(|| span.fail("没有打开抖音登录窗口或读 URL 失败".to_string()))?;
 
     let app_settings = settings::load_app_settings(&state.workspace);
     if !app_settings.is_configured() {
-        return Err("G10 base 未配置".to_string());
+        return Err(span.fail("G10 base 未配置".to_string()));
     }
     let base = app_settings.g10_base.trim_end_matches('/');
     let endpoint = format!("{base}/api/web/douyin/creators");
@@ -154,18 +166,18 @@ pub async fn cookie_track_current_creator(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| span.fail(e.to_string()))?;
     let mut req = client
         .post(&endpoint)
         .json(&serde_json::json!({ "handle": url }));
     if let Some(tok) = app_settings.g10_token.as_deref().filter(|s| !s.is_empty()) {
         req = req.bearer_auth(tok);
     }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|e| span.fail(e.to_string()))?;
     let status = resp.status();
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| span.fail(e.to_string()))?;
     if !status.is_success() {
-        return Err(format!("server {status}: {body}"));
+        return Err(span.fail(format!("server {status}: {body}")));
     }
     Ok(body)
 }

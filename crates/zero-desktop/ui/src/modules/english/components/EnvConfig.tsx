@@ -45,14 +45,25 @@ export default function EnvConfig() {
     const id = customerIdInput ? parseInt(customerIdInput, 10) : NaN
     if (!id || id <= 0) { showFeedback('err', '请输入有效的 Customer ID（正整数）'); return }
     const ok = await EnvConfigService.getInstance().setCustomerId(id)
-    if (ok) { setCustomerId(id); showFeedback('ok', 'Customer ID 已保存') }
-    else showFeedback('err', '保存失败，请重试')
+    if (ok) {
+      setCustomerId(id)
+      showFeedback('ok', 'Customer ID 已保存')
+      window.dispatchEvent(new CustomEvent('customer-id-changed'))
+    } else {
+      showFeedback('err', '保存失败，请重试')
+    }
   }
 
   const handleClearCustomerId = async () => {
     const ok = await EnvConfigService.getInstance().clearCustomerId()
-    if (ok) { setCustomerId(undefined); setCustomerIdInput(''); showFeedback('ok', 'Customer ID 已清除') }
-    else showFeedback('err', '清除失败，请重试')
+    if (ok) {
+      setCustomerId(undefined)
+      setCustomerIdInput('')
+      showFeedback('ok', 'Customer ID 已清除')
+      window.dispatchEvent(new CustomEvent('customer-id-changed'))
+    } else {
+      showFeedback('err', '清除失败，请重试')
+    }
   }
 
   return (

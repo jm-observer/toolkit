@@ -2,6 +2,7 @@
 
 use super::ths;
 use super::CookieState;
+use custom_utils::trace::{self, SpanScope, SpanStatus, TraceContext};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -16,6 +17,16 @@ pub struct ThsState {
 
 pub fn spawn(app: AppHandle, state: Arc<CookieState>) {
     tauri::async_runtime::spawn(async move {
+        // 顶层 anchor span：仅 emit_start，长循环不 emit_end（进程退出时 trace-hub
+        // 按 in-flight 处理，设计约定：后台循环不 emit_end）。
+        let _loop_scope = trace::enabled().then(|| {
+            let ctx = TraceContext::root();
+            let scope = SpanScope::new(ctx, "ths_watcher_loop").with_summary(
+                serde_json::json!({"service": "ths_watcher", "poll_secs": POLL_SECS}),
+            );
+            scope.emit_start();
+            scope
+        });
         let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECS));
         ticker.tick().await;
         loop {
@@ -79,6 +90,17 @@ async fn tick(app: &AppHandle, state: &Arc<CookieState>) {
         Ok(path) => {
             tracing::info!(target: "cookie", "ths cookies saved -> {}", path.display());
             let report = ths::status_report(&state.workspace);
+            // 有实际变化时 emit 子 span，记录落盘事件。
+            if trace::enabled() {
+                let ctx = TraceContext::root();
+                let scope =
+                    SpanScope::new(ctx, "ths_cookie_saved").with_summary(serde_json::json!({
+                        "count": records.len(),
+                        "path": path.display().to_string(),
+                    }));
+                scope.emit_start();
+                scope.emit_end(None, SpanStatus::Ok, None);
+            }
             let _ = app.emit(
                 "ths:status",
                 serde_json::json!({
@@ -91,6 +113,14 @@ async fn tick(app: &AppHandle, state: &Arc<CookieState>) {
         }
         Err(e) => {
             log::warn!("ths save failed: {e:#}");
+            // 上传失败时 emit 子 span 记录错误。
+            if trace::enabled() {
+                let ctx = TraceContext::root();
+                let scope = SpanScope::new(ctx, "ths_cookie_saved")
+                    .with_summary(serde_json::json!({"error": format!("{e:#}")}));
+                scope.emit_start();
+                scope.emit_end(None, SpanStatus::Error(format!("{e:#}")), None);
+            }
             let _ = app.emit(
                 "ths:status",
                 serde_json::json!({ "state": "error", "error": format!("{e:#}") }),

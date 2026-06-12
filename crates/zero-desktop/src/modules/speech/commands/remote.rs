@@ -142,17 +142,32 @@ pub async fn speech_fetch_remote_history(
     limit: u32,
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    use crate::shared::trace as tr;
+    use custom_utils::trace::{self, TraceContext};
+
+    let mut span = tr::CommandSpan::start(
+        "speech_fetch_remote_history",
+        serde_json::json!({"limit": limit}),
+    );
     let speech = state.speech.clone();
     let Some(base) = remote_http_base_from_state(&speech.remote_url) else {
-        return Err("远程识别地址未配置".to_string());
+        return Err(span.fail("远程识别地址未配置".to_string()));
     };
     let lim = limit.clamp(1, 200);
     let url = format!("{base}/api/history?limit={lim}");
-    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("history api status {}", resp.status()));
+
+    // A.4 traceparent 注入：HTTP GET 不走 WebSocket，注入 traceparent 接入 trace。
+    let fetch_ctx = trace::enabled().then(TraceContext::root);
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    if let Some(ctx) = &fetch_ctx {
+        req = req.header("traceparent", ctx.to_traceparent());
     }
-    let body: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|e| span.fail(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(span.fail(format!("history api status {}", resp.status())));
+    }
+    let body: Vec<serde_json::Value> = resp.json().await.map_err(|e| span.fail(e.to_string()))?;
     Ok(body)
 }
 

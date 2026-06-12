@@ -14,6 +14,7 @@ use tracing::info;
 
 use crate::app_state::AppState;
 use crate::modules::speech::lock_utils::write_lock;
+use crate::shared::trace as tr;
 
 #[derive(serde::Serialize, Clone)]
 pub struct RecordingState {
@@ -26,21 +27,34 @@ pub async fn speech_start_recording(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     info!(target: "speech", "[speech_start_recording]");
+    let mut span = tr::CommandSpan::start(
+        "speech_start_recording",
+        serde_json::json!({"action": "start_recording"}),
+    );
     let speech = state.speech.clone();
     if speech.recording.swap(true, Ordering::SeqCst) {
-        return Err("Already recording".to_string());
+        return Err(span.fail("Already recording".to_string()));
     }
 
     let Some(url) =
         crate::modules::speech::commands::remote::remote_url_from_state(&speech.remote_url)
     else {
         speech.recording.store(false, Ordering::SeqCst);
-        return Err("远程识别地址未配置(请在控制面板里设置)".to_string());
+        return Err(span.fail("远程识别地址未配置(请在控制面板里设置)".to_string()));
     };
     info!(target: "speech", "[speech_start_recording] remote mode -> {url}");
     speech.stop_signal.store(false, Ordering::Relaxed);
     speech.init_status.store(1, Ordering::Relaxed);
     *write_lock(&speech.init_error) = String::new();
+
+    // 通知前端录音已启动（状态栏指示灯用）。
+    {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "speech_recording_state_changed",
+            serde_json::json!({"recording": true}),
+        );
+    }
 
     let selected_device = Arc::clone(&speech.selected_device);
     let settings = Arc::clone(&speech.settings);
@@ -175,9 +189,14 @@ pub(crate) fn build_input_stream(
 }
 
 #[tauri::command]
-pub fn speech_stop_recording(state: State<'_, AppState>) {
+pub fn speech_stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) {
     info!(target: "speech", "[speech_stop_recording] signalling stop");
     state.speech.stop_signal.store(true, Ordering::Relaxed);
+    use tauri::Emitter;
+    let _ = app.emit(
+        "speech_recording_state_changed",
+        serde_json::json!({"recording": false}),
+    );
 }
 
 #[tauri::command]

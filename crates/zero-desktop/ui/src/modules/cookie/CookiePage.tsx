@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import {
   LogIn,
@@ -6,12 +7,13 @@ import {
   Activity,
   Search,
   RefreshCw,
-  Save,
   User,
   Wifi,
   WifiOff,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
+  Info,
 } from "lucide-react";
 
 // ============ 类型定义 ============
@@ -122,83 +124,45 @@ function ActionButton({
   );
 }
 
-// ============ G10 配置区 ============
+// ============ G10 配置区（只读，编辑入口在设置页） ============
 
 function G10SettingsSection() {
-  const [settings, setSettings] = useState<AppSettings>({
-    g10_base: "",
-    g10_token: "",
-  });
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const [g10Base, setG10Base] = useState<string>("");
 
   useEffect(() => {
     invoke<AppSettings>("cookie_get_app_settings")
-      .then((s) => setSettings(s))
+      .then((s) => setG10Base(s.g10_base || ""))
       .catch((e) => console.error("load app settings:", e));
   }, []);
 
-  async function handleSave() {
-    setSaving(true);
-    setSaveMsg(null);
-    try {
-      await invoke("cookie_save_app_settings", { settingsData: settings });
-      setSaveMsg("已保存");
-    } catch (e) {
-      setSaveMsg(`保存失败: ${e}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
-    <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-700">
-      <SectionTitle>G10 服务配置</SectionTitle>
-      <div className="space-y-3">
+    <div className="rounded-lg border border-blue-100 bg-blue-50 p-4 dark:border-blue-900/30 dark:bg-blue-950/20">
+      <div className="mb-3 flex items-center gap-2">
+        <Info size={14} className="text-blue-500" />
+        <span className="text-xs text-blue-700 dark:text-blue-400">
+          G10 base / token 已统一在设置页配置，此处仅展示当前值。
+        </span>
+      </div>
+      <div className="space-y-2">
         <div>
-          <label className="mb-1 block text-xs text-gray-600 dark:text-gray-400">
-            G10 Base URL
-          </label>
-          <input
-            type="text"
-            placeholder="http://192.168.1.100:8788"
-            value={settings.g10_base}
-            onChange={(e) =>
-              setSettings((s) => ({ ...s, g10_base: e.target.value }))
-            }
-            className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800"
-          />
+          <span className="text-xs text-gray-500 dark:text-gray-400">G10 Base URL：</span>
+          <span className="ml-1 text-sm font-mono text-gray-800 dark:text-gray-200">
+            {g10Base || <span className="text-yellow-600 dark:text-yellow-400">未配置</span>}
+          </span>
         </div>
         <div>
-          <label className="mb-1 block text-xs text-gray-600 dark:text-gray-400">
-            Auth Token（可选）
-          </label>
-          <input
-            type="password"
-            placeholder="Bearer token（留空则不鉴权）"
-            value={settings.g10_token ?? ""}
-            onChange={(e) =>
-              setSettings((s) => ({
-                ...s,
-                g10_token: e.target.value || undefined,
-              }))
-            }
-            className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800"
-          />
-        </div>
-        <div className="flex items-center gap-3">
-          <ActionButton onClick={handleSave} disabled={saving} icon={Save}>
-            {saving ? "保存中…" : "保存"}
-          </ActionButton>
-          {saveMsg && (
-            <span
-              className={`text-xs ${saveMsg.startsWith("保存失败") ? "text-red-500" : "text-green-600 dark:text-green-400"}`}
-            >
-              {saveMsg}
-            </span>
-          )}
+          <span className="text-xs text-gray-500 dark:text-gray-400">Auth Token：</span>
+          <span className="ml-1 text-sm text-gray-500 dark:text-gray-400">（已隐藏）</span>
         </div>
       </div>
+      <button
+        onClick={() => navigate("/settings")}
+        className="mt-3 flex items-center gap-1.5 rounded-md border border-blue-300 bg-white px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:bg-gray-800 dark:text-blue-400 dark:hover:bg-gray-700"
+      >
+        <ExternalLink size={12} />
+        去设置页修改
+      </button>
     </div>
   );
 }

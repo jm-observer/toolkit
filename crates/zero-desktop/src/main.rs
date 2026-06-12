@@ -37,8 +37,22 @@ enum Command {
     },
 }
 
+/// 启用 trace-hub 全链路追踪——仅当设置了环境变量 `TRACE_HUB_ENDPOINT` 时生效；
+/// 未设则完全无副作用（record_* 全 no-op，不起后台任务）。
+fn init_trace() {
+    if let Ok(endpoint) = std::env::var("TRACE_HUB_ENDPOINT") {
+        custom_utils::trace::init(custom_utils::trace::TraceConfig::new(
+            endpoint,
+            "zero-desktop",
+        ));
+        tracing::info!("trace enabled → trace-hub");
+    }
+}
+
 fn main() -> Result<()> {
     let _ = custom_utils::logger::logger_feature(APP, "info,reqwest=warn", Info, false).build();
+
+    init_trace();
 
     let cli = Cli::parse();
 

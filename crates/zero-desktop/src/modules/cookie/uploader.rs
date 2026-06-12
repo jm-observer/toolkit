@@ -9,6 +9,7 @@
 
 use crate::shared::settings;
 use anyhow::{anyhow, Result};
+use custom_utils::trace::{self, SpanScope, SpanStatus, TraceContext};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +57,15 @@ impl UploaderState {
 
 pub fn spawn(app: AppHandle, state: Arc<CookieState>) {
     tauri::async_runtime::spawn(async move {
+        // 顶层 anchor span：仅 emit_start，长循环不 emit_end。
+        let _loop_scope = trace::enabled().then(|| {
+            let ctx = TraceContext::root();
+            let scope = SpanScope::new(ctx, "cookie_uploader_loop").with_summary(
+                serde_json::json!({"service": "cookie_uploader", "poll_secs": POLL_SECS}),
+            );
+            scope.emit_start();
+            scope
+        });
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
@@ -143,12 +153,31 @@ async fn tick(app: &AppHandle, state: &Arc<CookieState>, client: &reqwest::Clien
     let now = chrono::Utc::now().to_rfc3339();
     let _ = state.db.upsert_session(&session_id, &now);
 
+    // A.4 traceparent 注入 + 上传子 span。
+    // ctx 单独保存，便于在 req 上注入 traceparent header。
+    let upload_ctx = trace::enabled().then(TraceContext::root);
+    let upload_scope = upload_ctx.as_ref().map(|ctx| {
+        let scope =
+            SpanScope::new(ctx.clone(), "cookie_upload_once").with_summary(serde_json::json!({
+                "fields": pairs.len(),
+                // session_id 非敏感：是内部生成的 desktop-{timestamp} 字符串
+                "session_id": session_id,
+            }));
+        scope.emit_start();
+        scope
+    });
+
     let body = serde_json::json!({ "session_id": session_id, "raw_header": raw_header });
     let mut req = client.post(&endpoint).json(&body);
     if let Some(tok) = app_settings.g10_token.as_deref().filter(|s| !s.is_empty()) {
         req = req.bearer_auth(tok);
     }
-    match req.send().await {
+    // A.4：注入 W3C traceparent，让 G10 端的 cookie 接收请求接入同一条 trace。
+    if let Some(ctx) = &upload_ctx {
+        req = req.header("traceparent", ctx.to_traceparent());
+    }
+    let send_result = req.send().await;
+    match send_result {
         Err(e) => {
             let _ = state.db.record_upload(
                 &now,
@@ -158,6 +187,9 @@ async fn tick(app: &AppHandle, state: &Arc<CookieState>, client: &reqwest::Clien
                 None,
                 Some(&e.to_string()),
             );
+            if let Some(scope) = upload_scope {
+                scope.emit_end(None, SpanStatus::Error(e.to_string()), None);
+            }
             return Err(anyhow!("POST cookie: {e}"));
         }
         Ok(resp) => {
@@ -173,12 +205,18 @@ async fn tick(app: &AppHandle, state: &Arc<CookieState>, client: &reqwest::Clien
                     Some(&text),
                     Some(&err_msg),
                 );
+                if let Some(scope) = upload_scope {
+                    scope.emit_end(None, SpanStatus::Error(err_msg.clone()), None);
+                }
                 return Err(anyhow!(err_msg));
             }
             let _ =
                 state
                     .db
                     .record_upload(&now, &hash, pairs.len() as i64, true, Some(&text), None);
+            if let Some(scope) = upload_scope {
+                scope.emit_end(Some(text.chars().take(512).collect()), SpanStatus::Ok, None);
+            }
             let _ = app.emit(
                 "uploader:status",
                 serde_json::json!({
