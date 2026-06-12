@@ -1,0 +1,92 @@
+/**
+ * HtmlAudioAdapter — HTML5 Audio 桌面端适配器（直接复用，无 AntD 依赖）。
+ */
+
+type VoidFn = () => void
+
+export default class HtmlAudioAdapter {
+  private audio: HTMLAudioElement
+  private isEndedFired: boolean = false
+
+  private playCallbacks: VoidFn[] = []
+  private pauseCallbacks: VoidFn[] = []
+  private endedCallbacks: VoidFn[] = []
+  private errorCallbacks: Array<(error: any) => void> = []
+  private waitingCallbacks: VoidFn[] = []
+  private canplayCallbacks: VoidFn[] = []
+
+  constructor() {
+    this.audio = new Audio()
+    this.audio.preload = 'auto'
+    this.audio.volume = 1.0
+
+    this.audio.addEventListener('play', () => {
+      this.isEndedFired = false
+      this.playCallbacks.forEach(cb => cb())
+    })
+
+    this.audio.addEventListener('pause', () => {
+      if (!this.isEndedFired) {
+        this.pauseCallbacks.forEach(cb => cb())
+      }
+    })
+
+    this.audio.addEventListener('ended', () => {
+      this.isEndedFired = true
+      this.endedCallbacks.forEach(cb => cb())
+    })
+
+    this.audio.addEventListener('waiting', () => {
+      this.waitingCallbacks.forEach(cb => cb())
+    })
+
+    this.audio.addEventListener('canplay', () => {
+      this.canplayCallbacks.forEach(cb => cb())
+    })
+
+    this.audio.addEventListener('error', (e) => {
+      const err: any = (this.audio as any).error || e
+      this.errorCallbacks.forEach(cb => cb(err))
+    })
+  }
+
+  play(): void {
+    void this.audio.play().catch(err => {
+      if (err instanceof DOMException && err.name === 'NotAllowedError') {
+        this.errorCallbacks.forEach(cb => cb({
+          type: 'autoplay_blocked',
+          message: '自动播放被阻止，请点击播放按钮',
+          originalError: err
+        }))
+      } else {
+        this.errorCallbacks.forEach(cb => cb(err))
+      }
+    })
+  }
+
+  pause(): void { this.audio.pause() }
+
+  stop(): void {
+    this.audio.pause()
+    try { this.audio.currentTime = 0 } catch { /* ignore */ }
+  }
+
+  setSrc(url: string): void {
+    this.isEndedFired = false
+    this.audio.src = url
+  }
+
+  setVolume(volume: number): void {
+    this.audio.volume = Math.max(0, Math.min(1, volume))
+  }
+
+  setTitle(_title: string): void {}
+  setCover(_coverUrl: string): void {}
+
+  onPlay(callback: VoidFn): void { this.playCallbacks.push(callback) }
+  onPause(callback: VoidFn): void { this.pauseCallbacks.push(callback) }
+  onEnded(callback: VoidFn): void { this.endedCallbacks.push(callback) }
+  onError(callback: (error: any) => void): void { this.errorCallbacks.push(callback) }
+  onWaiting(callback: VoidFn): void { this.waitingCallbacks.push(callback) }
+  onCanplay(callback: VoidFn): void { this.canplayCallbacks.push(callback) }
+}

@@ -1,11 +1,15 @@
-import ModulePlaceholder from "../../shared/ModulePlaceholder";
+/**
+ * /english/annotated — 标注句子播放页。
+ * 由 EnglishBootstrap 包裹，确保 g10_base + customerId 已加载。
+ */
+
+import EnglishBootstrap from './EnglishBootstrap'
+import AnnotationPlayer from './components/AnnotationPlayer'
 
 export default function EnglishAnnotated() {
   return (
-    <ModulePlaceholder
-      title="英语听力 — 标注句子"
-      stage="4"
-      command="english_ping"
-    />
-  );
+    <EnglishBootstrap>
+      <AnnotationPlayer autoStart={true} dataSource="annotated" />
+    </EnglishBootstrap>
+  )
 }

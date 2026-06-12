@@ -6,6 +6,7 @@ pub fn ensure_workspace(path: &Path) -> Result<()> {
     let subdirs = [
         "logs",
         "english",
+        "english/audio-cache",
         "speech",
         "cookie",
         "cookie/login_profile/douyin",
@@ -57,4 +58,15 @@ pub fn ths_profile_dir(workspace: &Path) -> PathBuf {
 /// 同花顺 cookies.json 路径（与 stock-trade 兼容的格式）。
 pub fn ths_cookies_path(workspace: &Path) -> PathBuf {
     workspace.join("cookie").join("ths_cookies.json")
+}
+
+/// english 模块根目录。
+#[allow(dead_code)]
+pub fn english_dir(workspace: &Path) -> PathBuf {
+    workspace.join("english")
+}
+
+/// english 音频缓存目录。
+pub fn english_audio_cache_dir(workspace: &Path) -> PathBuf {
+    workspace.join("english").join("audio-cache")
 }

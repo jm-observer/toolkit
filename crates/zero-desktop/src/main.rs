@@ -78,6 +78,8 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             // English 模块
             modules::english::english_ping,
+            modules::english::english_get_g10_base,
+            modules::english::english_get_audio_cache_dir,
             // Speech 模块
             modules::speech::commands::device::speech_list_input_devices,
             modules::speech::commands::device::speech_set_input_device,
