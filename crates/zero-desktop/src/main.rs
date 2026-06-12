@@ -79,7 +79,18 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             // English 模块
             modules::english::english_ping,
             // Speech 模块
-            modules::speech::speech_ping,
+            modules::speech::commands::device::speech_list_input_devices,
+            modules::speech::commands::device::speech_set_input_device,
+            modules::speech::commands::device::speech_get_selected_device,
+            modules::speech::commands::recording::speech_start_recording,
+            modules::speech::commands::recording::speech_stop_recording,
+            modules::speech::commands::recording::speech_clear_results,
+            modules::speech::commands::recording::speech_get_recording_state,
+            modules::speech::commands::remote::speech_fetch_remote_history,
+            modules::speech::commands::export::speech_copy_text_to_clipboard,
+            modules::speech::commands::init::speech_get_init_status,
+            modules::speech::commands::settings::speech_get_settings,
+            modules::speech::commands::settings::speech_apply_settings,
             // Cookie 模块
             modules::cookie::cookie_workspace_path,
             modules::cookie::cookie_get_app_settings,

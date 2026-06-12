@@ -7,7 +7,7 @@ edition.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-fs = "2"
 tauri-plugin-http = "2"
 tauri-plugin-store = "2"
@@ -33,6 +33,16 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 headless_chrome = "1.0"
 tracing = "0.1"
+# Speech 模块依赖
+cpal = "0.16"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Diagnostics_Debug",
+] }
 
 [features]
 default = ["custom-protocol"]

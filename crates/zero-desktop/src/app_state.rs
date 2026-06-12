@@ -1,4 +1,5 @@
 use crate::modules::{cookie::CookieState, english::EnglishState, speech::SpeechState};
+use crate::shared::workspace::speech_db_path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,10 +15,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(workspace: PathBuf) -> anyhow::Result<Self> {
         let cookie = Arc::new(CookieState::new(workspace.clone())?);
+        let speech = SpeechState::new(&speech_db_path(&workspace))?;
         Ok(Self {
             workspace,
             english: Arc::new(EnglishState::default()),
-            speech: Arc::new(SpeechState::default()),
+            speech,
             cookie,
         })
     }

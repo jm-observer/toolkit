@@ -1,11 +1,482 @@
-import ModulePlaceholder from "../../shared/ModulePlaceholder";
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { SpeechAPI, DEFAULT_REMOTE_URL } from './api/tauri-client';
+import type { AppSettings, AsrLanguage, AutoCopyMode, Segment } from './api/tauri-client';
+import { ControlPanel } from './components/ControlPanel';
+import { SegmentCard } from './components/SegmentCard';
+import { useAppStore } from './store/useAppStore';
+import { Icon } from './components/ui/Icon';
+import { RecordCard } from './components/RecordCard';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 export default function SpeechPage() {
+  const store = useAppStore();
+  const pollTimer = useRef<number | null>(null);
+  const pollInFlightRef = useRef(false);
+  const notifiedRevisionsRef = useRef<Set<string>>(new Set());
+  const notificationBaselineReadyRef = useRef(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [asrLanguage, setAsrLanguage] = useState<AsrLanguage>('zh');
+  const [autoCopyMode, setAutoCopyMode] = useState<AutoCopyMode>('english');
+  const [mergeWindowMs, setMergeWindowMs] = useState(3000);
+  const [remoteUrl, setRemoteUrl] = useState<string>(DEFAULT_REMOTE_URL);
+  const [remoteUrlPresets, setRemoteUrlPresets] = useState<string[]>([]);
+  const [wantSecondary, setWantSecondary] = useState(false);
+  const [notifySound, setNotifySound] = useState(true);
+
+  // Load persisted settings from the local DB on mount.
+  useEffect(() => {
+    SpeechAPI.getSettings()
+      .then((s) => {
+        setAsrLanguage(s.asr_language);
+        setAutoCopyMode(s.auto_copy_mode);
+        setMergeWindowMs(s.merge_window_ms);
+        setRemoteUrl(s.remote_url || DEFAULT_REMOTE_URL);
+        setRemoteUrlPresets(s.remote_url_presets || []);
+        setWantSecondary(!!s.want_secondary);
+        setNotifySound(s.notify_sound !== false);
+      })
+      .catch((err) => console.warn('Load settings failed', err));
+  }, []);
+
+  const showTranslationNotification = useCallback(async (segment: Segment) => {
+    let permissionGranted = await isPermissionGranted();
+
+    if (!permissionGranted) {
+      const permission = await requestPermission();
+      permissionGranted = permission === 'granted';
+    }
+
+    if (!permissionGranted) return;
+
+    const body = segment.text_english?.trim() || '有新的翻译结果可查看';
+    sendNotification({
+      title: '识别完成',
+      body: body.slice(0, 120),
+    });
+  }, []);
+
+  useEffect(() => {
+    isPermissionGranted().catch((err) => {
+      console.error('Check notification permission failed', err);
+    });
+  }, []);
+
+  const getSegmentKey = useCallback((seg: Segment) => {
+    if (seg.segment_id !== null && seg.segment_id !== undefined) {
+      return `seg-${seg.segment_id}`;
+    }
+    if (seg.id !== null && seg.id !== undefined) {
+      return `db-${seg.id}`;
+    }
+    return `ts-${seg.start.toFixed(3)}`;
+  }, []);
+
+  const segmentsRef = useRef(store.segments);
+  useEffect(() => {
+    segmentsRef.current = store.segments;
+  }, [store.segments]);
+
+  // Recording Logic
+  const stopPolling = useCallback(() => {
+    if (pollTimer.current) {
+      clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    if (pollTimer.current) clearInterval(pollTimer.current);
+    pollTimer.current = window.setInterval(async () => {
+      if (pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
+      try {
+        const init = await SpeechAPI.getInitStatus();
+        if (init.status === 2) {
+          store.setErrorMessage(init.error || '无法连接识别服务');
+          store.setStatus('error');
+          stopPolling();
+          return;
+        }
+
+        const state = await SpeechAPI.getRecordingState();
+        const hasPending = segmentsRef.current.some(
+          (seg) =>
+            seg.optimize_status === 'pending' ||
+            seg.optimize_status === 'running' ||
+            seg.translate_status === 'pending' ||
+            seg.translate_status === 'running'
+        );
+        if (state.recording) {
+          store.setStatus(hasPending ? 'processing' : 'recording');
+          return;
+        }
+
+        if (hasPending) {
+          store.setStatus('processing');
+          return;
+        }
+
+        stopPolling();
+        store.setStatus('finished');
+      } catch (err) {
+        console.error("Poll failed", err);
+        stopPolling();
+        store.setStatus('error');
+      } finally {
+        pollInFlightRef.current = false;
+      }
+    }, 1000);
+  }, [store, stopPolling]);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  useEffect(() => {
+    if (!notificationBaselineReadyRef.current) {
+      store.segments.forEach((seg) => {
+        if (seg.revision !== undefined) {
+          const optKey = `opt-${seg.revision}`;
+          const transKey = `trans-${seg.revision}`;
+          if (seg.optimize_status === 'success') notifiedRevisionsRef.current.add(optKey);
+          if (seg.translate_status === 'success') notifiedRevisionsRef.current.add(transKey);
+        }
+      });
+      notificationBaselineReadyRef.current = true;
+      return;
+    }
+
+    store.segments.forEach((segment) => {
+      const revision = segment.revision;
+      if (revision === undefined) return;
+
+      const optKey = `opt-${revision}`;
+      if (segment.optimize_status === 'success' && !notifiedRevisionsRef.current.has(optKey)) {
+        notifiedRevisionsRef.current.add(optKey);
+        showTranslationNotification(segment).catch(console.error);
+      }
+
+      const transKey = `trans-${revision}`;
+      if (segment.translate_status === 'success' && !notifiedRevisionsRef.current.has(transKey)) {
+        notifiedRevisionsRef.current.add(transKey);
+        showTranslationNotification(segment).catch(console.error);
+      }
+    });
+  }, [showTranslationNotification, store.segments]);
+
+  // Sync initial recording state on mount
+  useEffect(() => {
+    if (!store.isInitialized) return;
+
+    const sync = async () => {
+      try {
+        const state = await SpeechAPI.getRecordingState();
+        if (state.recording) {
+          startPolling();
+        }
+      } catch (err) {
+        console.error("Initial sync recording state failed", err);
+      }
+    };
+    sync();
+  }, [store.isInitialized, startPolling]);
+
+  const startRecording = async () => {
+    try {
+      setIsBusy(true);
+      store.setErrorMessage('');
+      await SpeechAPI.startRecording();
+      store.setStatus('recording');
+      startPolling();
+    } catch (err) {
+      console.error("Start failed", err);
+      store.setErrorMessage(typeof err === 'string' ? err : (err as Error)?.message || String(err));
+      store.setStatus('error');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const retryRecording = () => {
+    store.setErrorMessage('');
+    store.setStatus('idle');
+    startRecording();
+  };
+
+  const stopRecording = async () => {
+    try {
+      setIsBusy(true);
+      store.setStatus('processing');
+      await SpeechAPI.stopRecording();
+    } catch (err) {
+      console.error("Stop failed", err);
+      store.setStatus('error');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const waitUntilNotRecording = useCallback(async (timeoutMs = 4000): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const s = await SpeechAPI.getRecordingState();
+        if (!s.recording) return true;
+      } catch (err) {
+        console.warn('waitUntilNotRecording probe failed', err);
+      }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return false;
+  }, []);
+
+  const persistAndMaybeReconnect = useCallback(
+    async (next: AppSettings, urlChanged: boolean) => {
+      try {
+        await SpeechAPI.applySettings(next);
+      } catch (err) {
+        console.error('apply settings failed', err);
+        return;
+      }
+      if (!urlChanged) return;
+      let wasRecording = false;
+      try {
+        wasRecording = (await SpeechAPI.getRecordingState()).recording;
+      } catch (err) {
+        console.warn('probe recording state failed', err);
+      }
+      if (!wasRecording) return;
+      try {
+        await SpeechAPI.stopRecording();
+      } catch (err) {
+        console.error('stop for reconnect failed', err);
+      }
+      const settled = await waitUntilNotRecording();
+      if (!settled) {
+        console.warn('reconnect: previous session did not stop in time');
+      }
+      await startRecording();
+    },
+    [waitUntilNotRecording]
+  );
+
+  const handleRemoteUrlSelect = (url: string) => {
+    if (url === remoteUrl) return;
+    setRemoteUrl(url);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: url,
+      remote_url_presets: remoteUrlPresets,
+      want_secondary: wantSecondary,
+      notify_sound: notifySound,
+    };
+    persistAndMaybeReconnect(next, true);
+  };
+
+  const handleRemoteUrlAdd = (url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    const presetsNext = remoteUrlPresets.includes(trimmed)
+      ? remoteUrlPresets
+      : [...remoteUrlPresets, trimmed];
+    const urlChanged = trimmed !== remoteUrl;
+    setRemoteUrlPresets(presetsNext);
+    setRemoteUrl(trimmed);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: trimmed,
+      remote_url_presets: presetsNext,
+      want_secondary: wantSecondary,
+      notify_sound: notifySound,
+    };
+    persistAndMaybeReconnect(next, urlChanged);
+  };
+
+  const handleNotifySoundChange = (val: boolean) => {
+    if (val === notifySound) return;
+    setNotifySound(val);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: remoteUrl,
+      remote_url_presets: remoteUrlPresets,
+      want_secondary: wantSecondary,
+      notify_sound: val,
+    };
+    SpeechAPI.applySettings(next).catch((err) =>
+      console.error('apply notify_sound failed', err)
+    );
+  };
+
+  const handleWantSecondaryChange = (val: boolean) => {
+    if (val === wantSecondary) return;
+    setWantSecondary(val);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: remoteUrl,
+      remote_url_presets: remoteUrlPresets,
+      want_secondary: val,
+      notify_sound: notifySound,
+    };
+    persistAndMaybeReconnect(next, true);
+  };
+
+  const handleRemoteUrlRemove = (url: string) => {
+    const presetsNext = remoteUrlPresets.filter((p) => p !== url);
+    const fallback = remoteUrl === url ? DEFAULT_REMOTE_URL : remoteUrl;
+    const urlChanged = fallback !== remoteUrl;
+    setRemoteUrlPresets(presetsNext);
+    setRemoteUrl(fallback);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: fallback,
+      remote_url_presets: presetsNext,
+      want_secondary: wantSecondary,
+      notify_sound: notifySound,
+    };
+    persistAndMaybeReconnect(next, urlChanged);
+  };
+
+  const handleCopy = async (text: string) => {
+    await SpeechAPI.copyToClipboard(text);
+  };
+
+  const handleSegmentCopy = (text: string) => {
+    handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
+  };
+
+  const handleClear = async () => {
+    await SpeechAPI.clearResults();
+    store.setSegments([]);
+  };
+
+  const handleDeviceChange = async (device: string) => {
+    store.setSelectedDevice(device);
+    try {
+      await SpeechAPI.setInputDevice(device);
+    } catch (err) {
+      console.error("Set input device failed", err);
+      store.setStatus('error');
+    }
+  };
+
+  const displaySegments = store.segments.slice().reverse();
+
   return (
-    <ModulePlaceholder
-      title="语音识别"
-      stage="3"
-      command="speech_ping"
-    />
+    <div className="flex h-full overflow-hidden bg-[var(--bg-canvas)]">
+      <div className="shrink-0 h-full">
+        <ControlPanel
+          status={store.status}
+          devices={store.devices}
+          selectedDevice={store.selectedDevice}
+          onDeviceChange={handleDeviceChange}
+          showEnglish={store.showEnglish}
+          onShowEnglishChange={store.setShowEnglish}
+          onStart={startRecording}
+          onStop={stopRecording}
+          onRetry={retryRecording}
+          errorMessage={store.errorMessage}
+          onClear={handleClear}
+          asrLanguage={asrLanguage}
+          onAsrLanguageChange={(v) => {
+            setAsrLanguage(v);
+            const next: AppSettings = {
+              asr_language: v,
+              auto_copy_mode: autoCopyMode,
+              merge_window_ms: mergeWindowMs,
+              remote_url: remoteUrl,
+              remote_url_presets: remoteUrlPresets,
+              want_secondary: wantSecondary,
+              notify_sound: notifySound,
+            };
+            SpeechAPI.applySettings(next).catch((err) => console.error('apply asr_language failed', err));
+          }}
+          autoCopyMode={autoCopyMode}
+          onAutoCopyModeChange={(v) => {
+            setAutoCopyMode(v);
+            const next: AppSettings = {
+              asr_language: asrLanguage,
+              auto_copy_mode: v,
+              merge_window_ms: mergeWindowMs,
+              remote_url: remoteUrl,
+              remote_url_presets: remoteUrlPresets,
+              want_secondary: wantSecondary,
+              notify_sound: notifySound,
+            };
+            SpeechAPI.applySettings(next).catch((err) => console.error('apply auto_copy_mode failed', err));
+          }}
+          mergeWindowMs={mergeWindowMs}
+          onMergeWindowMsChange={(v) => {
+            setMergeWindowMs(v);
+            const next: AppSettings = {
+              asr_language: asrLanguage,
+              auto_copy_mode: autoCopyMode,
+              merge_window_ms: v,
+              remote_url: remoteUrl,
+              remote_url_presets: remoteUrlPresets,
+              want_secondary: wantSecondary,
+              notify_sound: notifySound,
+            };
+            SpeechAPI.applySettings(next).catch((err) => console.error('apply merge_window_ms failed', err));
+          }}
+          remoteUrl={remoteUrl}
+          remoteUrlPresets={remoteUrlPresets}
+          onRemoteUrlSelect={handleRemoteUrlSelect}
+          onRemoteUrlAdd={handleRemoteUrlAdd}
+          onRemoteUrlRemove={handleRemoteUrlRemove}
+          wantSecondary={wantSecondary}
+          onWantSecondaryChange={handleWantSecondaryChange}
+          notifySound={notifySound}
+          onNotifySoundChange={handleNotifySoundChange}
+          disabled={isBusy}
+        />
+      </div>
+
+      <main className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 overflow-y-auto p-4 px-6">
+          <div className="max-w-none mx-0 flex flex-col gap-3">
+            {store.segments.length === 0 && (store.status === 'idle' || store.status === 'finished') && (
+              <div className="flex flex-col items-center justify-center py-40 gap-4 opacity-30">
+                <Icon name="mic" size={48} stroke={1.2} />
+                <p className="text-sm font-medium">
+                  {store.status === 'idle' ? '准备就绪，点击"开始录音"开始识别' : '当前没有可展示的识别结果'}
+                </p>
+              </div>
+            )}
+
+            {displaySegments.map((seg) => (
+              <SegmentCard
+                key={getSegmentKey(seg)}
+                segment={seg}
+                showEnglish={store.showEnglish}
+                onCopyChinese={(text) => handleSegmentCopy(text)}
+                onCopyEnglish={(text) => handleSegmentCopy(text)}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Simple RecordCard bar for quick access at the bottom when needed */}
+        {(store.status === 'recording' || store.status === 'processing') && (
+          <div className="border-t border-[var(--line)] p-3 flex justify-center bg-[var(--bg-app)]">
+            <RecordCard
+              status={store.status}
+              onStart={startRecording}
+              onStop={stopRecording}
+              onRetry={retryRecording}
+              errorMessage={store.errorMessage}
+              disabled={store.devices.length === 0 || isBusy}
+            />
+          </div>
+        )}
+      </main>
+    </div>
   );
 }

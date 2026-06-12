@@ -19,6 +19,17 @@ pub fn ensure_workspace(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// speech 模块的 SQLite 数据库路径。
+pub fn speech_db_path(workspace: &Path) -> PathBuf {
+    workspace.join("speech").join("speech_history.db")
+}
+
+/// speech 模块的根目录。
+#[allow(dead_code)]
+pub fn speech_dir(workspace: &Path) -> PathBuf {
+    workspace.join("speech")
+}
+
 /// cookie 模块的 SQLite 数据库路径。
 pub fn cookie_db_path(workspace: &Path) -> PathBuf {
     workspace.join("cookie").join("state.db")

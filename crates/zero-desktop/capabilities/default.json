@@ -14,6 +14,7 @@
     "dialog:default",
     "shell:default",
     "clipboard-manager:default",
-    "notification:default"
+    "notification:default",
+    "core:tray:default"
   ]
 }
