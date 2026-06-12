@@ -64,7 +64,7 @@ fn resolve_workspace(arg: &Option<String>) -> Result<PathBuf> {
 fn run_gui(workspace: PathBuf) -> Result<()> {
     shared::workspace::ensure_workspace(&workspace)?;
 
-    let state = AppState::new(workspace);
+    let state = AppState::new(workspace).context("AppState::new")?;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
@@ -76,9 +76,26 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
         .plugin(tauri_plugin_notification::init())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
+            // English 模块
             modules::english::english_ping,
+            // Speech 模块
             modules::speech::speech_ping,
-            modules::cookie::cookie_ping,
+            // Cookie 模块
+            modules::cookie::cookie_workspace_path,
+            modules::cookie::cookie_get_app_settings,
+            modules::cookie::cookie_save_app_settings,
+            modules::cookie::cookie_open_douyin_login,
+            modules::cookie::cookie_close_douyin_login,
+            modules::cookie::cookie_open_ths_login,
+            modules::cookie::cookie_close_ths_login,
+            modules::cookie::cookie_ths_status,
+            modules::cookie::cookie_track_current_creator,
+            modules::cookie::cookie_login_expiry,
+            modules::cookie::cookie_ping_server,
+            modules::cookie::cookie_inspect_cookies,
+            modules::cookie::cookie_server_cookie_status,
+            modules::cookie::cookie_force_upload_now,
+            modules::cookie::cookie_recent_uploads,
         ])
         .setup(move |app| {
             modules::english::setup(app.handle(), state.english.clone())
