@@ -1,50 +1,13 @@
-# toolkit 语音底座编排（Phase 1）：ASR（sherpa-onnx，Rust）+ TTS（CosyVoice2，Python）
-# 与 toolkit-server 同机部署（G10）。两个服务彼此独立、各占一端口，互不影响。
+# toolkit 语音底座编排：仅 TTS（CosyVoice2）。
+# ASR 由 streaming-speech 仓的 FunASR 服务统一提供（GB10:9101 /transcribe），
+# 不在本编排范围内 —— 见 deploy/asr-tts/README.md 历史说明。
+#
+# 与 toolkit-server 同机部署（G10）。
 #
 # 运行：
-#   docker compose -f compose.yaml up -d            # 起两者
-#   docker compose -f compose.yaml up -d asr-server # 只起 ASR
-#   docker compose -f compose.yaml up -d tts        # 只起 TTS
-#
-# 详见同目录 README.md（模型/音色资产准备、与 toolkit-server 的对接）。
+#   docker compose -f compose.yaml up -d
 
 services:
-  # ---------------------------------------------------------------------------
-  # ASR：本仓库 crates/asr-server，OpenAI 兼容转写服务。
-  # douyin process 任务调它的 from-source 端点（file:// 同机路径）。
-  # ---------------------------------------------------------------------------
-  asr-server:
-    build:
-      # 构建上下文 = 本 crate 目录（Dockerfile 内就地生成 standalone Cargo.toml）。
-      context: ../../crates/asr-server
-      dockerfile: Dockerfile
-    image: toolkit-asr-server:latest
-    restart: unless-stopped
-    environment:
-      # 设了才接入 trace-hub；不设则 ASR 追踪全程 no-op。
-      - TRACE_HUB_ENDPOINT=${TRACE_HUB_ENDPOINT:-}
-    volumes:
-      # 模型（宿主 <workspace>/models/sherpa-sense-voice → 容器 /models/sherpa-sense-voice）。
-      # 从 streaming-speech 原 ~/asr-server-models/sherpa-sense-voice/ 迁移过来即可。
-      - ${ASR_MODELS_DIR:-/home/fengqi/.config/toolkit-server/models}:/models:ro
-      # from-source 端点要读的下载目录：宿主同路径挂入，且须与 --source-allowlist 一致。
-      # 抖音 mp4 落盘在 <workspace>/downloads/douyin。
-      - ${ZERO_DOWNLOADS_DIR:-/home/fengqi/.config/toolkit-server/downloads}:/home/fengqi/.config/toolkit-server/downloads:ro
-    command:
-      - "--bind"
-      - "0.0.0.0:8091"
-      - "--model"
-      - "sense-voice"
-      - "--model-dir"
-      - "/models/sherpa-sense-voice"
-      - "--vad-model"
-      - "/opt/asr-server/silero_vad.onnx"
-      - "--source-allowlist"
-      - "/home/fengqi/.config/toolkit-server/downloads"
-    ports:
-      # 仅本机可达（与 toolkit-server / douyin worker 同机）。容器内必须 bind 0.0.0.0。
-      - "127.0.0.1:8091:8091"
-
   # ---------------------------------------------------------------------------
   # TTS：CosyVoice2（保留 Python，纳入编排）。toolkit-server 的
   # /api/web/audio/tts 代理转发到这里（TTS_BASE_URL=http://127.0.0.1:8095）。

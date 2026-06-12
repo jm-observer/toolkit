@@ -2,6 +2,11 @@
 
 - 日期：2026-06-10（v2 同日修订）
 - 状态：草案（待确认）
+- **2026-06 后续修订（ASR 路线）**：本 RFC 第 §3 提出把 `streaming-speech/server/asr-server`
+  （sherpa-onnx）整 crate 迁入 toolkit。该路线已**作废**——sherpa-onnx crate 经短暂落地
+  后于 2026-06 被物理退役（crate 删除、`deploy/asr-tts` 仅保留 TTS、deploy-g10.ps1 移
+  除对应 bin），改由 **streaming-speech 仓 FunASR `/transcribe` 端点**统一提供 ASR。
+  下文 §3、§4 的 ASR 相关条目仅做历史记录，不再代表当前部署。
 - v2 变更：按用户决策重排优先级——**Agent 接入与股票全部后置，先集中功能、打通两条业务流**：抖音知识管线、英语音频生产线。
 
 ## 0. 背景与定位

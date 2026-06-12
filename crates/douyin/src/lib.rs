@@ -114,6 +114,17 @@ pub fn run_filter_works(
     knowledge::run_filter_works(works_dir, unique_id, tags, match_all)
 }
 
+/// `list_saved_works`：列某博主已存盘作品 + 每条处理状态（下载/转写/整理）。供 web 工作台。
+pub fn run_list_saved_works(
+    works_dir: &Path,
+    out_dir: &Path,
+    transcript_dir: &Path,
+    refined_dir: &Path,
+    unique_id: &str,
+) -> Result<Value> {
+    knowledge::run_list_saved_works(works_dir, out_dir, transcript_dir, refined_dir, unique_id)
+}
+
 /// `publish_knowledge`：把缓存里的作品逐条机械写入知识包目录，有转写缓存则回填。
 pub fn run_publish_knowledge(
     works_dir: &Path,
@@ -322,9 +333,11 @@ pub async fn run_submit_job(
             let out = resolve_out_dir(get_str("out_dir").map(PathBuf::from))?;
             let tr = resolve_transcript_dir(get_str("transcript_dir").map(PathBuf::from))?;
             let asr_url = get_str("asr_url").unwrap_or_else(|| {
-                "http://127.0.0.1:8091/v1/audio/transcriptions/from-source".to_string()
+                "http://127.0.0.1:9101/transcribe".to_string()
             });
-            let asr_model = get_str("asr_model").unwrap_or_else(|| "sense-voice".to_string());
+            // 注:该字段现在仅作为「服务端未回填 model 时」的兜底标签;
+            // FunASR /transcribe 正常路径会返回实际模型名(paraformer/sensevoice/...)。
+            let asr_model = get_str("asr_model").unwrap_or_else(|| "funasr".to_string());
             let vad = params.get("vad").and_then(|v| v.as_bool()).unwrap_or(true);
             run_process_submit(
                 task_dir,

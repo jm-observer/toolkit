@@ -1,6 +1,6 @@
 //! Plan 5 阶段1：「下载 + ASR 识别」合并异步任务（process）。
 //!
-//! 每个 aweme_id：下载无水印 mp4 → 调 asr-server `from-source` 端点转写 →
+//! 每个 aweme_id：下载无水印 mp4 → 把 mp4 字节 multipart 上传给 FunASR /transcribe →
 //! 把 `{text, segments[]}` 落盘为 transcript 缓存 `douyin/transcripts/<aweme_id>.json`。
 //! 与 list_works / download 同款 fire-and-forget 进程模型：submit 立返 task_id，
 //! 后台 worker 进程逐个处理 + 增量 status，完成时携 delivery_handle POST gateway 回调。
@@ -8,10 +8,9 @@
 //! 完整性 / 幂等：transcript JSON 已存在则跳过（skipped），不重复下载/转写。
 //! transcript 缓存随后由 `knowledge::run_publish_knowledge` 读取，回填进知识条目 md。
 //!
-//! asr-server 契约（streaming-speech `server/asr-server`）：
-//!   POST {asr_url}  body {"source":"file:///abs/path.mp4","vad":bool}
-//!   200 {"text":"...", "segments":[{"start":f64,"end":f64,"text":"..."}]?}
-//!   segments 仅 vad=true 时存在。
+//! ASR 调用通过 `asr-client` crate 完成；端点契约权威源是
+//! `streaming-speech/docs/asr-transcribe-api.md`。本模块不再直接拼 multipart 或
+//! 解析响应——把所有 FunASR 对接收敛在 asr-client 一处。
 
 use crate::api::DouyinClient;
 use anyhow::{Context, Result};
@@ -544,7 +543,7 @@ pub async fn run_worker(task_dir: &Path, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// 下载 mp4 + 调 asr-server 转写 + 落 transcript 缓存。返回 has_segments。
+/// 下载 mp4 + 通过 `asr-client` 调 FunASR /transcribe + 落 transcript 缓存。返回 has_segments。
 async fn process_one(
     client: &DouyinClient,
     http: &reqwest::Client,
@@ -555,35 +554,28 @@ async fn process_one(
         .await
         .context("下载 mp4")?;
 
-    // 用绝对路径拼 file:// URI（worker 在宿主跑，路径 == asr-server 容器挂载路径）。
-    let abs = std::fs::canonicalize(&mp4_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(mp4_path);
-    let source = format!("file://{abs}");
-
-    let resp = http
-        .post(&job.asr_url)
-        .json(&serde_json::json!({ "source": source, "vad": job.vad }))
-        .send()
+    // `job.asr_url` 来自上层（CLI / HTTP submit）的可覆盖参数,形如
+    // `http://127.0.0.1:9101/transcribe`。asr-client 的 base 是不带 `/transcribe`
+    // 的 host 部分,所以这里去掉尾巴的 `/transcribe`(向后兼容旧 job)。
+    let base = job
+        .asr_url
+        .strip_suffix("/transcribe")
+        .unwrap_or(&job.asr_url);
+    let asr = asr_client::AsrClient::with_client(http.clone(), base);
+    let parsed = asr
+        .transcribe_path(
+            &mp4_path,
+            asr_client::TranscribeOpts { vad: job.vad },
+        )
         .await
-        .context("调 asr-server")?;
-    let status = resp.status();
-    let body = resp.text().await.context("读 asr 响应")?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "asr-server {status}: {}",
-            body.chars().take(200).collect::<String>()
-        );
-    }
+        .context("调 FunASR /transcribe")?;
 
-    let parsed: AsrResponse = serde_json::from_str(&body).context("解析 asr 响应")?;
     let segments: Vec<Segment> = parsed
         .segments
-        .unwrap_or_default()
         .into_iter()
         .map(|s| Segment {
-            start: s.start,
-            end: s.end,
+            start: s.t_start,
+            end: s.t_end,
             text: s.text,
         })
         .collect();
@@ -594,7 +586,9 @@ async fn process_one(
         text: parsed.text,
         segments,
         has_segments,
-        asr_model: job.asr_model.clone(),
+        // 用服务端实际回填的模型名(`paraformer` / `sensevoice` / `whisper-*`),
+        // 而不是 job 里的占位标签——transcript 能准确记录到底是哪个模型出的活。
+        asr_model: parsed.model,
         transcribed_at: now(),
     };
     atomic_write(
@@ -602,20 +596,6 @@ async fn process_one(
         &serde_json::to_string(&transcript)?,
     )?;
     Ok(has_segments)
-}
-
-#[derive(Deserialize)]
-struct AsrResponse {
-    text: String,
-    #[serde(default)]
-    segments: Option<Vec<AsrSegment>>,
-}
-
-#[derive(Deserialize)]
-struct AsrSegment {
-    start: f64,
-    end: f64,
-    text: String,
 }
 
 fn write_all_failed(task_dir: &Path, job: &Job, error: String) -> Result<()> {
@@ -693,15 +673,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn asr_response_parses_with_and_without_segments() {
-        let with: AsrResponse =
-            serde_json::from_str(r#"{"text":"a","segments":[{"start":0.0,"end":1.0,"text":"a"}]}"#)
-                .unwrap();
-        assert_eq!(with.segments.unwrap().len(), 1);
-        let without: AsrResponse = serde_json::from_str(r#"{"text":"a"}"#).unwrap();
-        assert!(without.segments.is_none());
-    }
+    // /transcribe 响应解析的回归测试现在归属 asr-client crate
+    // (`cargo test -p asr-client`)——本 crate 不再持有响应类型。
 
     #[test]
     fn status_roundtrip() {
@@ -923,7 +896,7 @@ mod tests {
             &transcript_dir,
             &cookie,
             vec!["7a".to_string(), "7b".to_string()],
-            "http://127.0.0.1:8091/x".to_string(),
+            "http://127.0.0.1:9101/x".to_string(),
             "sense-voice".to_string(),
             true,
             None,
@@ -975,7 +948,7 @@ mod tests {
             &transcript_dir,
             &cookie,
             vec!["123".to_string()],
-            "http://127.0.0.1:8091/x".to_string(),
+            "http://127.0.0.1:9101/x".to_string(),
             "sense-voice".to_string(),
             true,
             None,
@@ -1009,7 +982,7 @@ mod tests {
             &transcript_dir,
             &cookie,
             vec!["123".to_string()],
-            "http://127.0.0.1:8091/v1/audio/transcriptions/from-source".to_string(),
+            "http://127.0.0.1:9101/transcribe".to_string(),
             "sense-voice".to_string(),
             true,
             Some("dh_test".to_string()),

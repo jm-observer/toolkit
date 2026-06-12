@@ -3,7 +3,7 @@
 从零跑通**一个博主**的完整流 A：`download → ASR → TextRefine → kb_publish → rag ingest`，
 最终用 RAG 检索到整理后的内容。供人工端到端验收用。
 
-> 平台：Windows 11 / PowerShell。真实环境需 **G10 vLLM + asr-server + 有效 cookie + embedding 服务**。
+> 平台：Windows 11 / PowerShell。真实环境需 **G10 vLLM + FunASR(streaming-speech) + 有效 cookie + embedding 服务**。
 > 本地纯逻辑验证见 `cargo test -p toolkit-server`（用 mock LLM，不需真实依赖）。
 
 ## 0. 前置依赖
@@ -11,7 +11,7 @@
 | 依赖 | 说明 | 健康检查 |
 |---|---|---|
 | toolkit-server | 本仓库 `cargo run -p toolkit-server -- serve` | `GET /api/web/health` |
-| asr-server | OpenAI 兼容 ASR（sherpa-onnx），同机 | `GET :8091/healthz` |
+| FunASR | streaming-speech `server/asr` 的 `/transcribe` 端点（同机 :9101） | `curl -F audio=@<short.wav> http://127.0.0.1:9101/transcribe` |
 | GB10 vLLM | OpenAI 兼容 chat completions（整理用） | `GET {LLM_BASE_URL}/models` |
 | embedding 服务 | rag ingest 用（如 bge-m3，OpenAI 兼容 embeddings） | `POST {endpoint}` |
 | 抖音 cookie | `<workspace>/douyin/cookies.json`（desktop 登录窗采集后上传） | `GET /api/web/douyin/cookie_status` |

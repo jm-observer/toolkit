@@ -1,0 +1,16 @@
+[package]
+name = "asr-client"
+version.workspace = true
+edition.workspace = true
+description = "Rust client for the streaming-speech FunASR /transcribe HTTP endpoint."
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

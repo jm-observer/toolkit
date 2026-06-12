@@ -15,6 +15,7 @@ custom-utils = { workspace = true, features = ["trace"] }
 anyhow = { workspace = true }
 sm3 = { workspace = true }
 axum = { workspace = true }
+asr-client = { path = "../asr-client" }
 
 [[bin]]
 name = "douyin"

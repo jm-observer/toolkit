@@ -6,8 +6,7 @@
 //! 2. 逐条读 ASR 原文（`douyin/transcripts/<id>.json`）→ 调 GB10 vLLM → 落
 //!    `douyin/refined/<id>.json`（带模型 / 时间戳 / prompt 版本+hash 元信息）。
 //! 3. 每条进度写 progress（done/total/failed）；单条失败不拖垮整批，失败列表进 output。
-//! 4. trace：建一个 `text_refine_batch` 顶层 span，每条 LLM 调用是其子 span（参考
-//!    asr-server `asr_decode`）。
+//! 4. trace：建一个 `text_refine_batch` 顶层 span，每条 LLM 调用是其子 span。
 //!
 //! 整理稿随后由 `kb_publish` / pipeline 读取回填进 knowledge md（被 rag 优先索引）。
 

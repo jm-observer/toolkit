@@ -99,8 +99,8 @@ douyin list-works-submit --input <主页URL|短链|sec_uid> [--max-pages 60] \
 
 ```bash
 douyin process-submit --ids 7a,7b \
-                      [--asr-url http://127.0.0.1:8091/v1/audio/transcriptions/from-source] \
-                      [--asr-model sense-voice] [--vad] \
+                      [--asr-url http://127.0.0.1:9101/transcribe] \
+                      [--asr-model funasr] [--vad] \
                       [--delivery-handle dh_xxx] [--unique-id ...] [--session-id ...]
 ```
 

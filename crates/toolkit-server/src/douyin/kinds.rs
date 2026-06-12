@@ -99,10 +99,10 @@ impl TaskKind for DouyinTranscribe {
         }
         let paths = DouyinPaths::new(&ctx.data_dir);
         paths.ensure_dirs()?;
-        let asr_url = input.asr_url.unwrap_or_else(|| {
-            "http://127.0.0.1:8091/v1/audio/transcriptions/from-source".to_string()
-        });
-        let asr_model = input.asr_model.unwrap_or_else(|| "sense-voice".to_string());
+        let asr_url = input
+            .asr_url
+            .unwrap_or_else(|| "http://127.0.0.1:9101/transcribe".to_string());
+        let asr_model = input.asr_model.unwrap_or_else(|| "funasr".to_string());
         let submit = douyin::run_process_submit(
             &paths.task_dir,
             &paths.out_dir,

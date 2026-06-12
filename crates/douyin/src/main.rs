@@ -232,14 +232,11 @@ enum Command {
         /// 逗号分隔的 aweme_id。
         #[arg(long, value_delimiter = ',')]
         ids: Vec<String>,
-        /// asr-server from-source 端点 URL。
-        #[arg(
-            long,
-            default_value = "http://127.0.0.1:8091/v1/audio/transcriptions/from-source"
-        )]
+        /// FunASR /transcribe 端点 URL（streaming-speech `server/asr`）。
+        #[arg(long, default_value = "http://127.0.0.1:9101/transcribe")]
         asr_url: String,
-        /// 写入 transcript 缓存的 asr_model 标记（仅记录用）。
-        #[arg(long, default_value = "sense-voice")]
+        /// 服务端未回填 model 字段时落 transcript 的兜底标签（正常会被服务端返回值覆盖）。
+        #[arg(long, default_value = "funasr")]
         asr_model: String,
         /// 是否启用 VAD 切段以产出字幕时间轴（默认 true）。
         #[arg(long, default_value_t = true)]

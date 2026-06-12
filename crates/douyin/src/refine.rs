@@ -148,7 +148,7 @@ pub async fn refine_one(
     refine_one_traced(http, cfg, refined_dir, aweme_id, asr_text, None).await
 }
 
-/// 带 trace 子 span 的整理（参考 asr-server `asr_decode` 子 span 做法）。
+/// 带 trace 子 span 的整理。
 pub async fn refine_one_traced(
     http: &reqwest::Client,
     cfg: &LlmConfig,
