@@ -46,36 +46,49 @@ cargo run -p toolkit-server
   `approval_policy="never"`；claude `--permission-mode acceptEdits`）。**仅对本机可信仓库跑**，
   不要开 `danger-full-access` / `bypassPermissions`。
 
-## 5. ⚠️ 待用户真机固化的 CLI 命令（Plan 3 留待实跑确认）
+## 5. ✅ CLI 命令真机固化结论（2026-06-15 实跑核实）
 
-driver 的子进程执行**本轮未实跑**（避免烧额度）。命令向量构造与输出解析已是纯函数并单测，
-但下面两条 argv / 输出 schema **需用户在本机各实跑一次确认**，发现漂移后回 `agent-session`
-的 `driver.rs`（`codex_argv` / `claude_argv` / `parse_codex_stdout` / `parse_claude_stdout`）校正：
+driver 的两条命令已在本机各实跑一次（codex-cli 0.130.0 / claude 2.1.170，Windows）确认。
+`agent-session/src/driver.rs` 的 `parse_codex_stdout` 已据此修正（见下「重要修正」）。
 
-### Codex（固化形态）
+### Codex（已验证）
 
 ```powershell
 codex exec -s workspace-write -c approval_policy="never" --cd <repo_root> resume --json <codex_session_id> "<prompt>"
 ```
 
-- 验证点：能 resume 指定会话、不卡审批、stdout 是 JSONL。
-- 解析点：取最后一个 `payload.type == "task_complete"` 的 `last_agent_message`；
-  无则退化取末个 `agent_message.message`。确认字段路径与本机 codex 版本一致
-  （部分版本可能把 `type` 平铺在顶层，解析已兼容两种形态）。
+- 结果：exit 0，能 resume、不卡审批，stdout 为事件 JSONL。
+- **实测 `--json` 事件 schema**（与 rollout 文件格式不同！）：
+  - `{"type":"thread.started","thread_id":...}`
+  - `{"type":"turn.started"}`
+  - `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"..."}}` ← **回复在此**
+  - `{"type":"turn.completed","usage":{input_tokens,output_tokens,...}}`
+- **解析（已固化）**：取末个 `item.completed` 且 `item.type=="agent_message"` 的 `item.text`；
+  退化兼容旧 `task_complete.last_agent_message` / `agent_message.message`。
+- ⚠️ **Windows stdout 编码坑（实测）**：stdout 会混入非 UTF-8（GBK）噪声行，例如 codex 收尾时的
+  `成功: 已终止 PID xxxxx 的进程`（taskkill 输出，含 `0xb3` 字节）。`run_capture` 用
+  `from_utf8_lossy` 兜底 → 噪声行变替换字符 → 作为非 JSON 行被解析器跳过。**不要**用严格 UTF-8
+  整体解码 stdout。
 
-### Claude（固化形态，必须在会话原始 cwd 下执行）
+### Claude（已验证，须在会话原始 cwd 下执行）
 
 ```powershell
 # 在该 Claude 会话的原始 cwd 下：
 claude -p "<prompt>" --resume <claude_session_id> --permission-mode acceptEdits
 ```
 
-- 验证点：在原始 cwd 下能 resume（换目录会 `No conversation found`）、`-p` 阻塞到本轮完成、
-  回复打到 stdout。
-- 解析点：MVP 取 stdout 纯文本 trim。若改用 `--output-format stream-json` 需同步改
-  `parse_claude_stdout`。
+- 结果：exit 0，原始 cwd 下能 resume，`-p` 阻塞到完成，stdout 为**干净 UTF-8 纯文本**（实测 `OK\n`）。
+- 解析（已固化）：取 stdout 纯文本 trim。若改 `--output-format stream-json` 需同步改 `parse_claude_stdout`。
+- 注意：`-p` 无管道输入时 stderr 会有「no stdin data received in 3s, proceeding」warning，不影响结果；
+  driver spawn 不接 stdin（如需可显式 `< NUL`）。
 
-### 验后回归
+### 重要修正
 
-实跑确认无误后，跑一次最小真机循环（小 target、`max_rounds=1~2`）验证：状态条轮次推进、
-VERDICT 解析、PASS / MaxRounds 终态、ASK_USER 弹窗与应答 resume。
+固化实测发现 driver 原 `parse_codex_stdout` 假设的 `task_complete.last_agent_message` **不出现在
+`--json` stdout**（那是 rollout 文件字段）。已改为优先解析 `item.completed.item`，并补真机序列回归单测
+（`parse_codex_real_json_schema` / `parse_codex_item_completed_wins_over_legacy`）。
+
+### 验后回归（建议）
+
+可再跑一次最小真机循环（小 target、`max_rounds=1~2`）验证：状态条轮次推进、VERDICT 解析、
+PASS / MaxRounds 终态、ASK_USER 弹窗与应答 resume。本次仅固化了单轮 send/解析，未跑完整循环。

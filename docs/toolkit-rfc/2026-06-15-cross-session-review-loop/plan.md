@@ -116,9 +116,12 @@ pub async fn wait_for_idle(s: &SessionRef, timeout: Duration) -> anyhow::Result<
   ```
   codex exec -s workspace-write -c approval_policy="never" --cd <repo> resume --json <id> <prompt>
   ```
-  读 stdout JSONL，取最后一个 `task_complete.last_agent_message`（或末个 `agent_message`）。
+  **（2026-06-15 真机固化）** stdout 为事件 JSONL：`thread.started`/`turn.started`/`item.completed`{item}/
+  `turn.completed`{usage}。回复 = 末个 `item.completed` 且 `item.type=="agent_message"` 的 `item.text`
+  （退化兼容旧 `task_complete.last_agent_message`）。Windows 下 stdout 可能混 GBK 噪声行 → lossy 解码后跳过。
+  详见 `docs/runbook-codeloop-e2e.md §5`。
 - **Claude**：`claude -p <prompt> --resume <id> --permission-mode acceptEdits`，`Command::current_dir(cwd)`，
-  取 stdout 文本。（可选 `--output-format stream-json` 拿结构化事件；MVP 先用纯文本。）
+  取 stdout 文本（**真机固化**：干净 UTF-8 纯文本）。（可选 `--output-format stream-json` 拿结构化事件；MVP 先用纯文本。）
 
 ## 4. CrossReviewTask 契约
 

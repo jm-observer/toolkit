@@ -6,11 +6,14 @@
 //! - 真正 spawn 的 [`send`] 只是把以上两步接到 `tokio::process::Command`，**不在单测里跑**
 //!   （会真实消耗 codex / claude 额度）。
 //!
-//! 固化命令形态（参数位置已对 `--help` 核实，真机固化留给用户，见 runbook）：
+//! 固化命令形态（已于 2026-06-15 真机实跑核实，见 runbook §5）：
 //! - Codex：`codex exec -s workspace-write -c approval_policy="never" --cd <repo> resume --json <id> <prompt>`
-//!   读 stdout JSONL，取最后 `task_complete.last_agent_message`（退化取末个 `agent_message`）。
+//!   stdout 是事件 JSONL：`thread.started` / `turn.started` / `item.completed`{item} / `turn.completed`{usage}。
+//!   回复 = 末个 `item.completed` 且 `item.type=="agent_message"` 的 `item.text`。
+//!   ⚠️ Windows 下 stdout 可能混入非 UTF-8（GBK）噪声行（如 taskkill 的「成功: 已终止 PID…」）——
+//!   `run_capture` 用 `from_utf8_lossy` 兜底，噪声行变替换字符后作为非 JSON 行跳过。
 //! - Claude：`claude -p <prompt> --resume <id> --permission-mode acceptEdits`，
-//!   `Command::current_dir(cwd)`，取 stdout 纯文本。
+//!   `Command::current_dir(cwd)`，stdout 即纯文本回复（实测干净 UTF-8）。
 
 use crate::{Provider, SessionRef, TurnResult};
 use anyhow::{anyhow, Context, Result};
@@ -53,11 +56,13 @@ pub fn claude_argv(session_id: &str, prompt: &str) -> Vec<String> {
     ]
 }
 
-/// 解析 Codex `exec --json` 的 stdout（JSONL）。
+/// 解析 Codex `exec --json` 的 stdout（事件 JSONL）。
 ///
-/// 取最后一个 `task_complete.last_agent_message`；无则退化取末个 `agent_message.message`。
-/// 两者都没有时回复为空（调用方据 raw_tail 排障）。坏行跳过。
+/// 优先按真机固化 schema：取末个 `item.completed` 且 `item.type=="agent_message"` 的 `item.text`。
+/// 退化兼容旧/rollout 形态：`task_complete.last_agent_message`、`agent_message.message`。
+/// 都没有时回复为空（调用方据 raw_tail 排障）。坏行 / 非 UTF-8 噪声行（lossy 后非 JSON）跳过。
 pub fn parse_codex_stdout(stdout: &str) -> TurnResult {
+    let mut last_item: Option<String> = None;
     let mut last_complete: Option<String> = None;
     let mut last_agent: Option<String> = None;
     for line in stdout.lines() {
@@ -68,6 +73,18 @@ pub fn parse_codex_stdout(stdout: &str) -> TurnResult {
         let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
+        // 真机固化 schema：codex exec --json 顶层事件 item.completed{item}。
+        if v.get("type").and_then(Value::as_str) == Some("item.completed") {
+            if let Some(item) = v.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+                    if let Some(t) = item.get("text").and_then(Value::as_str) {
+                        last_item = Some(t.trim().to_string());
+                    }
+                }
+            }
+            continue;
+        }
+        // 退化：rollout / 旧形态（type 可能平铺顶层或在 payload 下）。
         let payload = v.get("payload").unwrap_or(&v);
         match payload.get("type").and_then(Value::as_str) {
             Some("task_complete") => {
@@ -83,7 +100,10 @@ pub fn parse_codex_stdout(stdout: &str) -> TurnResult {
             _ => {}
         }
     }
-    let reply_text = last_complete.or(last_agent).unwrap_or_default();
+    let reply_text = last_item
+        .or(last_complete)
+        .or(last_agent)
+        .unwrap_or_default();
     TurnResult {
         reply_text,
         raw_tail: tail(stdout),
@@ -195,6 +215,36 @@ mod tests {
                 "acceptEdits",
             ]
         );
+    }
+
+    #[test]
+    fn parse_codex_real_json_schema() {
+        // 2026-06-15 真机 `codex exec --json` 实测序列（含一行 lossy 后的非 JSON 噪声）。
+        let stdout = concat!(
+            r#"{"type":"thread.started","thread_id":"019eca83"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK\nVERDICT: PASS"}}"#,
+            "\n",
+            "\u{fffd}\u{fffd}\u{fffd}: \u{fffd}\u{fffd}ֹ PID 14008\n", // GBK 噪声 lossy 后
+            r#"{"type":"turn.completed","usage":{"output_tokens":3187}}"#,
+            "\n",
+        );
+        let r = parse_codex_stdout(stdout);
+        assert_eq!(r.reply_text, "OK\nVERDICT: PASS");
+    }
+
+    #[test]
+    fn parse_codex_item_completed_wins_over_legacy() {
+        // 同时出现新旧两种形态时，以新 schema 的 item.completed 为准。
+        let stdout = concat!(
+            r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"旧形态"}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"新形态"}}"#,
+            "\n",
+        );
+        assert_eq!(parse_codex_stdout(stdout).reply_text, "新形态");
     }
 
     #[test]
