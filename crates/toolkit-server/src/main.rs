@@ -54,6 +54,31 @@ enum Command {
         #[arg(short, long, help = "即使版本未升级也强制更新")]
         force: bool,
     },
+
+    /// 内部：后台下载 worker。由 douyin 库 spawn（current_exe），勿手动调。
+    #[command(hide = true)]
+    DownloadWorker {
+        #[arg(long)]
+        task_dir: PathBuf,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 内部：后台 list-works worker。由 douyin 库 spawn，勿手动调。
+    #[command(hide = true)]
+    ListWorksWorker {
+        #[arg(long)]
+        task_dir: PathBuf,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// 内部：后台「下载+ASR」process worker。由 douyin 库 spawn，勿手动调。
+    #[command(hide = true)]
+    ProcessWorker {
+        #[arg(long)]
+        task_dir: PathBuf,
+        #[arg(long)]
+        task_id: String,
+    },
 }
 
 /// 启用 trace-hub 全链路追踪——仅当设置了环境变量 `TRACE_HUB_ENDPOINT` 时生效；
@@ -121,6 +146,18 @@ async fn main() -> Result<()> {
                 .await
                 .context("自更新失败")?;
             Ok(())
+        }
+        // 抖音长任务（list_works / download / process）由 douyin 库 spawn current_exe
+        // + 隐藏 worker 子命令跑后台进程。toolkit-server 即 current_exe，故必须在此接住
+        // 这三个子命令委托给 douyin 库 worker 入口，否则任务永远卡 queued。
+        Command::DownloadWorker { task_dir, task_id } => {
+            douyin::download::run_worker(&task_dir, &task_id).await
+        }
+        Command::ListWorksWorker { task_dir, task_id } => {
+            douyin::list_works_task::run_worker(&task_dir, &task_id).await
+        }
+        Command::ProcessWorker { task_dir, task_id } => {
+            douyin::process::run_worker(&task_dir, &task_id).await
         }
     }
 }

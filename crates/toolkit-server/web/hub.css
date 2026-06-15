@@ -1,0 +1,166 @@
+/* Hub shell — 紧凑暗色侧边栏 + iframe 主区域 */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  background: #1a1a1a;
+  color: #e0e0e0;
+}
+
+/* ── 布局 ────────────────────────────────────────────────────────────────── */
+body {
+  display: flex;
+  flex-direction: row;
+}
+
+#sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #111;
+  border-right: 1px solid #2a2a2a;
+  height: 100vh;
+}
+
+#sidebar-title {
+  padding: 14px 16px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #666;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+#nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+#main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── 顶栏 ────────────────────────────────────────────────────────────────── */
+#topbar {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: #181818;
+  border-bottom: 1px solid #2a2a2a;
+  flex-shrink: 0;
+}
+
+#topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ccc;
+}
+
+/* ── iframe ──────────────────────────────────────────────────────────────── */
+#frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* ── 模块组 ─────────────────────────────────────────────────────────────── */
+.group { display: flex; flex-direction: column; }
+
+.group-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 6px;
+  transition: background 0.1s, color 0.1s;
+}
+.group-header:hover { background: #1e1e1e; color: #fff; }
+
+.chevron {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  color: #888;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.group-children {
+  display: none;
+  padding: 2px 0 4px;
+}
+
+.nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 环境子按钮（local / g10）─────────────────────────────────────────────── */
+.env-btn {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 16px 6px 36px;
+  background: transparent;
+  border: none;
+  border-left: 3px solid transparent;
+  color: #888;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.env-btn:hover { background: #1a1a1a; color: #ccc; }
+.env-btn.active {
+  border-left-color: #4a9eff;
+  background: #1a2a3a;
+  color: #fff;
+}
+
+.env-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 健康指示点 ───────────────────────────────────────────────────────────── */
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.health-dot.green   { background: #4caf50; }
+.health-dot.red     { background: #f44336; }
+.health-dot.unknown { background: #555; }

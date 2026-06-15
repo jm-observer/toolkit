@@ -77,12 +77,23 @@ pub struct TranscribeInput {
     pub asr_url: Option<String>,
     #[serde(default)]
     pub asr_model: Option<String>,
+    /// 是否在 ASR 前先过音频清洗（去 BGM/降噪，提升带乐视频识别率）。默认关。
+    #[serde(default)]
+    pub clean_audio: bool,
+    /// 音频清洗服务 base URL（不含 `/clean`）。仅 `clean_audio=true` 时用。
+    #[serde(default)]
+    pub clean_base_url: Option<String>,
     #[serde(default)]
     pub unique_id: Option<String>,
 }
 
 fn default_vad() -> bool {
     true
+}
+
+/// 音频清洗服务默认 base（同机 audio-cleanup 容器）。
+fn default_clean_base() -> String {
+    audio_clean_client::DEFAULT_BASE.to_string()
 }
 
 pub struct DouyinTranscribe;
@@ -103,6 +114,7 @@ impl TaskKind for DouyinTranscribe {
             .asr_url
             .unwrap_or_else(|| "http://127.0.0.1:9101/transcribe".to_string());
         let asr_model = input.asr_model.unwrap_or_else(|| "funasr".to_string());
+        let clean_base_url = input.clean_base_url.unwrap_or_else(default_clean_base);
         let submit = douyin::run_process_submit(
             &paths.task_dir,
             &paths.out_dir,
@@ -112,6 +124,8 @@ impl TaskKind for DouyinTranscribe {
             asr_url,
             asr_model,
             input.vad,
+            input.clean_audio,
+            clean_base_url,
             None,
             input.unique_id,
             None,

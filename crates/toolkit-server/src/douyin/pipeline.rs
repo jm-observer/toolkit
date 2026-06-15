@@ -41,6 +41,12 @@ pub struct PipelineInput {
     pub asr_url: Option<String>,
     #[serde(default)]
     pub asr_model: Option<String>,
+    /// 是否在 ASR 前先过音频清洗（去 BGM/降噪，提升带乐视频识别率）。默认关。
+    #[serde(default)]
+    pub clean_audio: bool,
+    /// 音频清洗服务 base URL（不含 `/clean`）。仅 `clean_audio=true` 时用。
+    #[serde(default)]
+    pub clean_base_url: Option<String>,
     /// rag ingest 用的 rag 配置 JSON 绝对路径（开启 `rag_ingest` 时必填）。
     #[serde(default)]
     pub rag_config: Option<String>,
@@ -251,6 +257,10 @@ impl TaskKind for DouyinPipeline {
                 .asr_model
                 .clone()
                 .unwrap_or_else(|| "funasr".to_string());
+            let clean_base_url = input
+                .clean_base_url
+                .clone()
+                .unwrap_or_else(|| audio_clean_client::DEFAULT_BASE.to_string());
             let submit = douyin::run_process_submit(
                 &paths.task_dir,
                 &paths.out_dir,
@@ -260,6 +270,8 @@ impl TaskKind for DouyinPipeline {
                 asr_url,
                 asr_model,
                 true,
+                input.clean_audio,
+                clean_base_url,
                 None,
                 Some(unique_id.clone()),
                 None,

@@ -3,6 +3,7 @@ members = [
     "crates/github-commit-info",
     "crates/hf-watcher",
     "crates/asr-client",
+    "crates/audio-clean-client",
     "crates/douyin",
     "crates/rag",
     "crates/toolkit-core",

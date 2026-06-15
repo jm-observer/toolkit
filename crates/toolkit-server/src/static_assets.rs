@@ -9,6 +9,9 @@ use axum::response::{Html, IntoResponse, Response};
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
+const HUB_HTML: &str = include_str!("../web/hub.html");
+const HUB_JS: &str = include_str!("../web/hub.js");
+const HUB_CSS: &str = include_str!("../web/hub.css");
 
 pub async fn dashboard() -> Html<&'static str> {
     Html(INDEX_HTML)
@@ -31,4 +34,23 @@ pub async fn style_css() -> Response {
         STYLE_CSS,
     )
         .into_response()
+}
+
+pub async fn hub() -> Html<&'static str> {
+    Html(HUB_HTML)
+}
+
+pub async fn hub_js() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        HUB_JS,
+    )
+        .into_response()
+}
+
+pub async fn hub_css() -> Response {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], HUB_CSS).into_response()
 }

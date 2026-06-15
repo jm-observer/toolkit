@@ -23,6 +23,7 @@ document.querySelectorAll("nav#tabs button").forEach((b) => {
     $("tab-" + b.dataset.tab).classList.add("active");
     if (b.dataset.tab === "tasks") refreshTasks();
     if (b.dataset.tab === "douyin") refreshCreators();
+    if (b.dataset.tab === "workbench") wbRefreshCreators();
   };
 });
 
@@ -285,6 +286,158 @@ async function refreshCreators() {
   }
 }
 $("pill-desktop").onclick = refreshDesktop;
+
+// ======== 博主工作台 ========
+let wbCreator = null;          // {unique_id, sec_uid, nickname, url}
+let wbWorks = [];              // /works_saved 的 works
+const wbActiveTags = new Set();
+
+const wbEsc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function wbRefreshCreators() {
+  const tbody = $("wb-creators-table").querySelector("tbody");
+  try {
+    const r = await api("/api/web/douyin/creators?limit=200");
+    const list = r.creators || [];
+    if (!list.length) {
+      tbody.innerHTML = `<tr><td style="color:var(--muted)">空。到桌面端「解析当前博主」收录。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = list.map((c) =>
+      `<tr data-uid="${wbEsc(c.unique_id)}" data-secuid="${wbEsc(c.sec_uid || "")}" data-nick="${wbEsc(c.nickname || "")}">
+        <td><div>${wbEsc(c.nickname || c.unique_id)}</div>
+        <div style="font-size:10px;color:var(--muted)">${wbEsc(c.unique_id)} · ${c.aweme_count ?? "?"}作品</div></td>
+      </tr>`).join("");
+    tbody.querySelectorAll("tr").forEach((tr) => {
+      tr.onclick = () => {
+        tbody.querySelectorAll("tr").forEach((x) => x.classList.remove("sel"));
+        tr.classList.add("sel");
+        wbSelect({
+          unique_id: tr.dataset.uid, sec_uid: tr.dataset.secuid, nickname: tr.dataset.nick,
+          url: "https://www.douyin.com/user/" + tr.dataset.secuid,
+        });
+      };
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td>${wbEsc(e.message)}</td></tr>`;
+  }
+}
+
+function wbSelect(c) {
+  wbCreator = c;
+  wbActiveTags.clear();
+  $("wb-empty").style.display = "none";
+  $("wb-panel").style.display = "";
+  $("wb-title").textContent = c.nickname || c.unique_id;
+  $("wb-meta").textContent = c.unique_id;
+  $("wb-out").textContent = "—";
+  wbLoadTags();
+  wbLoadWorks();
+}
+
+async function wbLoadTags() {
+  const box = $("wb-tags");
+  box.innerHTML = "";
+  try {
+    const r = await api(`/api/web/douyin/tags?unique_id=${encodeURIComponent(wbCreator.unique_id)}`);
+    const tags = r.tags || [];
+    if (!tags.length) { box.innerHTML = `<span style="font-size:11px;color:var(--muted)">无标签（先同步作品）</span>`; return; }
+    box.innerHTML = tags.map((t) =>
+      `<button class="wb-chip" data-tag="${wbEsc(t.name)}">${wbEsc(t.name)} · ${t.count}</button>`).join("");
+    box.querySelectorAll(".wb-chip").forEach((ch) => {
+      ch.onclick = () => {
+        const tag = ch.dataset.tag;
+        if (wbActiveTags.has(tag)) { wbActiveTags.delete(tag); ch.classList.remove("on"); }
+        else { wbActiveTags.add(tag); ch.classList.add("on"); }
+        wbRenderWorks();
+      };
+    });
+  } catch (e) { box.innerHTML = `<span style="font-size:11px;color:var(--muted)">${wbEsc(e.message)}</span>`; }
+}
+
+async function wbLoadWorks() {
+  const tbody = $("wb-works").querySelector("tbody");
+  tbody.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">加载中…</td></tr>`;
+  try {
+    const r = await api(`/api/web/douyin/works_saved?unique_id=${encodeURIComponent(wbCreator.unique_id)}`);
+    wbWorks = r.works || [];
+    const meta = wbWorks.length
+      ? `${wbCreator.unique_id} · 已存盘 ${r.count} / 共 ${r.aweme_count ?? "?"}${r.throttled ? " ⚠️抽稀" : ""} · ${(r.cached_at || "").slice(0, 19).replace("T", " ")}`
+      : wbCreator.unique_id;
+    $("wb-meta").textContent = meta;
+    if (!wbWorks.length) {
+      tbody.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">尚未同步作品。点右上「同步/更新作品」。</td></tr>`;
+      return;
+    }
+    wbRenderWorks();
+  } catch (e) { tbody.innerHTML = `<tr><td colspan="4">${wbEsc(e.message)}</td></tr>`; }
+}
+
+function wbRenderWorks() {
+  const tbody = $("wb-works").querySelector("tbody");
+  const sel = [...wbActiveTags];
+  const rows = wbWorks.filter((w) => sel.every((t) => (w.tags || []).includes(t)));
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">无匹配作品。</td></tr>`; wbUpdateCount(); return; }
+  tbody.innerHTML = rows.map((w) => {
+    const t = w.create_ym || (w.create_time ? new Date(w.create_time * 1000).toISOString().slice(0, 10) : "—");
+    const badge = (on, cls, label) => `<span class="badge ${cls} ${on ? "on" : ""}">${label}</span>`;
+    const tagline = (w.tags || []).length ? `<div style="font-size:10px;color:var(--muted)">#${(w.tags || []).join(" #")}</div>` : "";
+    return `<tr>
+      <td><input type="checkbox" class="wb-cb" data-id="${wbEsc(w.aweme_id)}" /></td>
+      <td><div class="desc">${wbEsc(w.title || w.desc || w.aweme_id)}</div>${tagline}</td>
+      <td style="color:var(--muted)">${wbEsc(t)}</td>
+      <td>${badge(w.downloaded, "dl", "下载")}${badge(w.transcribed, "asr", "识别")}${badge(w.refined, "ref", "整理")}</td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll(".wb-cb").forEach((cb) => (cb.onchange = wbUpdateCount));
+  $("wb-selall").checked = false;
+  wbUpdateCount();
+}
+
+function wbSelectedIds() {
+  return [...document.querySelectorAll("#wb-works .wb-cb:checked")].map((c) => c.dataset.id);
+}
+function wbUpdateCount() {
+  $("wb-selcount").textContent = "已选 " + wbSelectedIds().length;
+}
+
+async function wbPost(path, body, label) {
+  const out = $("wb-out");
+  out.textContent = label + " 提交中…";
+  try {
+    const r = await api(path, { method: "POST", body: JSON.stringify(body) });
+    out.textContent = `✓ ${label} 已提交：task_id=${r.task_id || "?"}\n` + fmt(r);
+    if (typeof refreshTasks === "function") refreshTasks();
+    return r;
+  } catch (e) { out.textContent = `✗ ${label}：` + e.message; }
+}
+
+function wbOpOnSelection(path, label, withUid, idKey = "aweme_ids") {
+  const ids = wbSelectedIds();
+  if (!ids.length) { $("wb-out").textContent = "请先勾选作品。"; return; }
+  const body = { [idKey]: ids };
+  if (withUid) body.unique_id = wbCreator.unique_id;
+  wbPost(`/api/web/douyin/${path}`, body, label);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("wb-creators-refresh").onclick = wbRefreshCreators;
+  $("wb-reload").onclick = wbLoadWorks;
+  $("wb-selall").onchange = (e) => {
+    document.querySelectorAll("#wb-works .wb-cb").forEach((cb) => (cb.checked = e.target.checked));
+    wbUpdateCount();
+  };
+  $("wb-sync").onclick = () =>
+    wbPost("/api/web/douyin/sync_works", { handle: wbCreator.url, max_pages: 60 }, "同步作品")
+      .then(() => { $("wb-out").textContent += "\n（任务进行中，完成后点「刷新作品」）"; });
+  $("wb-pipeline").onclick = () =>
+    wbPost("/api/web/douyin/pipeline", { handle: wbCreator.url }, "整链 pipeline");
+  $("wb-op-download").onclick = () => wbOpOnSelection("download", "下载", false);
+  $("wb-op-transcribe").onclick = () => wbOpOnSelection("transcribe", "识别", true);
+  $("wb-op-refine").onclick = () => wbOpOnSelection("refine", "整理", true);
+  $("wb-op-kb").onclick = () => wbOpOnSelection("kb_publish", "入库", true, "only_ids");
+});
 
 // init
 refreshHealth();

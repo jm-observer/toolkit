@@ -116,8 +116,13 @@ pub fn build_router(state: AppState, web_dir: &std::path::Path) -> axum::Router 
         router = router
             .route("/", axum::routing::get(static_assets::dashboard))
             .route("/app.js", axum::routing::get(static_assets::app_js))
-            .route("/style.css", axum::routing::get(static_assets::style_css));
+            .route("/style.css", axum::routing::get(static_assets::style_css))
+            .route("/hub.js", axum::routing::get(static_assets::hub_js))
+            .route("/hub.css", axum::routing::get(static_assets::hub_css));
     }
+
+    // /hub（无扩展名）在两种模式下都需要显式路由（ServeDir 不自动映射目录省略名）
+    router = router.route("/hub", axum::routing::get(static_assets::hub));
 
     router.layer(cors).with_state(state)
 }

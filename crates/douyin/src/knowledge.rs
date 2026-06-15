@@ -185,6 +185,50 @@ pub fn run_filter_works(
     }))
 }
 
+/// `list_saved_works`：列某博主已拉取（存盘）的全部作品，每条带处理状态徽标
+/// （downloaded / transcribed / refined）——供 web「博主工作台」勾选 + 后续操作。
+/// 状态判定：下载 = `out_dir/<id>.mp4`，转写 = `transcript_dir/<id>.json`，
+/// 整理 = `refined_dir/<id>.json`。未拉取过返回 not_listed。
+pub fn run_list_saved_works(
+    works_dir: &Path,
+    out_dir: &Path,
+    transcript_dir: &Path,
+    refined_dir: &Path,
+    unique_id: &str,
+) -> Result<Value> {
+    let cache = match read_cache(works_dir, unique_id)? {
+        Some(c) => c,
+        None => return Ok(not_listed(unique_id)),
+    };
+    let works: Vec<Value> = cache
+        .works
+        .iter()
+        .map(|w| {
+            let id = w.get("aweme_id").and_then(|v| v.as_str()).unwrap_or("");
+            json!({
+                "aweme_id": id,
+                "title": title_from_desc(w.get("desc").and_then(|v| v.as_str()).unwrap_or("")),
+                "desc": w.get("desc"),
+                "create_time": w.get("create_time"),
+                "create_ym": w.get("create_ym"),
+                "tags": json!(work_tags(w)),
+                "downloaded": out_dir.join(format!("{id}.mp4")).exists(),
+                "transcribed": transcript_dir.join(format!("{id}.json")).exists(),
+                "refined": refined_dir.join(format!("{id}.json")).exists(),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "unique_id": unique_id,
+        "nickname": cache.nickname,
+        "aweme_count": cache.aweme_count,
+        "count": works.len(),
+        "throttled": cache.throttled,
+        "cached_at": cache.cached_at,
+        "works": works,
+    }))
+}
+
 /// desc → 标题：去换行、截前 30 字符；空则「（无文案）」。
 fn title_from_desc(desc: &str) -> String {
     let one_line = desc.replace(['\n', '\r'], " ");

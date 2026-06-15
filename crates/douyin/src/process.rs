@@ -78,6 +78,12 @@ pub struct Job {
     pub asr_url: String,
     pub asr_model: String,
     pub vad: bool,
+    /// 是否在 ASR 前先过音频清洗（去 BGM/降噪，提升带乐视频识别率）。默认关，旧 job 兼容。
+    #[serde(default)]
+    pub clean_audio: bool,
+    /// 音频清洗服务 base URL（不含 `/clean`）。仅 `clean_audio=true` 时用。
+    #[serde(default = "default_clean_base")]
+    pub clean_base_url: String,
     #[serde(default)]
     pub delivery_handle: Option<String>,
     #[serde(default)]
@@ -88,6 +94,11 @@ pub struct Job {
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// 音频清洗服务默认 base（同机 audio-cleanup 容器，与 audio-clean-client 的 DEFAULT_BASE 对齐）。
+fn default_clean_base() -> String {
+    audio_clean_client::DEFAULT_BASE.to_string()
 }
 
 fn status_path(task_dir: &Path, task_id: &str) -> PathBuf {
@@ -293,6 +304,8 @@ pub fn submit(
     asr_url: String,
     asr_model: String,
     vad: bool,
+    clean_audio: bool,
+    clean_base_url: String,
     delivery_handle: Option<String>,
     unique_id: Option<String>,
     session_id: Option<String>,
@@ -320,6 +333,8 @@ pub fn submit(
         asr_url,
         asr_model,
         vad,
+        clean_audio,
+        clean_base_url,
         delivery_handle,
         unique_id,
         session_id,
@@ -554,6 +569,32 @@ async fn process_one(
         .await
         .context("下载 mp4")?;
 
+    // 可选前置清洗：带 BGM 的视频先 separate=1 去乐取人声，再喂 ASR——对带乐视频识别率是
+    // 实打实增益。pause=Off：删停顿会破坏与画面/字幕的时间对齐，识别场景只去乐去噪不删段。
+    let asr_input: PathBuf = if job.clean_audio {
+        let cleaner =
+            audio_clean_client::AudioCleanClient::with_client(http.clone(), &job.clean_base_url);
+        let opts = audio_clean_client::CleanOpts {
+            separate: true,
+            denoise: true,
+            pause: audio_clean_client::PauseMode::Off,
+            level: audio_clean_client::Level::Gentle,
+            sr: 16000,
+            ..Default::default()
+        };
+        let cleaned = cleaner
+            .clean_path(&mp4_path, opts)
+            .await
+            .context("调 audio-cleanup /clean 去 BGM")?;
+        let wav = Path::new(&mp4_path).with_extension("clean.wav");
+        tokio::fs::write(&wav, &cleaned.bytes)
+            .await
+            .with_context(|| format!("落盘清洗后人声 wav {}", wav.display()))?;
+        wav
+    } else {
+        PathBuf::from(&mp4_path)
+    };
+
     // `job.asr_url` 来自上层（CLI / HTTP submit）的可覆盖参数,形如
     // `http://127.0.0.1:9101/transcribe`。asr-client 的 base 是不带 `/transcribe`
     // 的 host 部分,所以这里去掉尾巴的 `/transcribe`(向后兼容旧 job)。
@@ -563,10 +604,7 @@ async fn process_one(
         .unwrap_or(&job.asr_url);
     let asr = asr_client::AsrClient::with_client(http.clone(), base);
     let parsed = asr
-        .transcribe_path(
-            &mp4_path,
-            asr_client::TranscribeOpts { vad: job.vad },
-        )
+        .transcribe_path(&asr_input, asr_client::TranscribeOpts { vad: job.vad })
         .await
         .context("调 FunASR /transcribe")?;
 
@@ -899,6 +937,8 @@ mod tests {
             "http://127.0.0.1:9101/x".to_string(),
             "sense-voice".to_string(),
             true,
+            false,
+            audio_clean_client::DEFAULT_BASE.to_string(),
             None,
             None,
             None,
@@ -951,6 +991,8 @@ mod tests {
             "http://127.0.0.1:9101/x".to_string(),
             "sense-voice".to_string(),
             true,
+            false,
+            audio_clean_client::DEFAULT_BASE.to_string(),
             None,
             None,
             None,
@@ -985,6 +1027,8 @@ mod tests {
             "http://127.0.0.1:9101/transcribe".to_string(),
             "sense-voice".to_string(),
             true,
+            false,
+            audio_clean_client::DEFAULT_BASE.to_string(),
             Some("dh_test".to_string()),
             Some("82933463317".to_string()),
             Some("sess-123".to_string()),
