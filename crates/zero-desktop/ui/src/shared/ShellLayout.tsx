@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { BookOpen, Mic, Cookie, Settings } from 'lucide-react'
+import { BookOpen, Mic, Cookie, ShieldCheck, Settings } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import EnvConfigService from '../modules/english/services/EnvConfigService'
@@ -9,6 +9,7 @@ const navItems = [
   { to: '/english/annotated', icon: BookOpen, label: '英语听力' },
   { to: '/speech', icon: Mic, label: '语音识别' },
   { to: '/cookie', icon: Cookie, label: 'Cookie 采集' },
+  { to: '/net-policy', icon: ShieldCheck, label: '网络策略' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 

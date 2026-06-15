@@ -5,7 +5,9 @@
   "identifier": "com.jmobserver.zero-desktop",
   "build": {
     "frontendDist": "ui/dist",
-    "devUrl": "http://localhost:1420"
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -21,7 +23,16 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/**",
+          "$APPLOCALDATA/**",
+          "$LOCALDATA/zero-desktop/**",
+          "$DATA/zero-desktop/**"
+        ]
+      }
     }
   },
   "bundle": {

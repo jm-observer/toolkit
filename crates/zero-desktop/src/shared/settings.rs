@@ -6,14 +6,27 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     /// G10 server base，例如 `http://192.168.1.100:8788`（不含路径）。
-    #[serde(default)]
+    #[serde(default = "default_g10_base")]
     pub g10_base: String,
     /// 可选 Bearer token（若 G10 server 启用了鉴权）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g10_token: Option<String>,
+}
+
+fn default_g10_base() -> String {
+    "https://www.for-memory.cloud:28080".to_string()
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            g10_base: default_g10_base(),
+            g10_token: None,
+        }
+    }
 }
 
 impl AppSettings {

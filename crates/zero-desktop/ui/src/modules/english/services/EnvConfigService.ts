@@ -30,7 +30,14 @@ class EnvConfigService {
 
   private async _initStore(): Promise<void> {
     try {
-      this.store = await Store.load('english/env-config.json')
+      this.store = await Store.load('english-env-config.json')
+      // 单用户场景：首次启动时 customerId 缺失则默认填 1（迁自 english/desktop-app）。
+      const existing = await this.store.get<number>('customerId')
+      if (existing === null || existing === undefined) {
+        await this.store.set('customerId', 1)
+        await this.store.save()
+        console.log('[EnvConfigService] customerId 缺失，已写入默认值 1')
+      }
       console.log('[EnvConfigService] store 初始化成功')
     } catch (error) {
       console.error('[EnvConfigService] store 初始化失败:', error)

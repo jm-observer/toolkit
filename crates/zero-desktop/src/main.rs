@@ -35,6 +35,12 @@ enum Command {
         #[arg(short, long)]
         force: bool,
     },
+    /// 预览 net-policy 从 workspace 配置生成的产物（不执行）：mihomo 配置 / 防火墙脚本。
+    NetPolicyGen {
+        /// config | firewall
+        #[arg(long, default_value = "config")]
+        what: String,
+    },
 }
 
 /// 启用 trace-hub 全链路追踪——仅当设置了环境变量 `TRACE_HUB_ENDPOINT` 时生效；
@@ -62,6 +68,14 @@ fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run_gui(workspace),
         Command::Update { force } => shared::update::run_update(REPO_OWNER, REPO_NAME, APP, force),
+        Command::NetPolicyGen { what } => {
+            let (cfg, fw) = modules::net_policy::gen_artifacts(&workspace)?;
+            match what.as_str() {
+                "firewall" => print!("{fw}"),
+                _ => print!("{cfg}"),
+            }
+            Ok(())
+        }
     }
 }
 
@@ -103,6 +117,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::speech::commands::recording::speech_clear_results,
             modules::speech::commands::recording::speech_get_recording_state,
             modules::speech::commands::remote::speech_fetch_remote_history,
+            modules::speech::commands::clean::speech_clean_recording,
             modules::speech::commands::export::speech_copy_text_to_clipboard,
             modules::speech::commands::init::speech_get_init_status,
             modules::speech::commands::settings::speech_get_settings,
@@ -123,12 +138,25 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::cookie::cookie_server_cookie_status,
             modules::cookie::cookie_force_upload_now,
             modules::cookie::cookie_recent_uploads,
+            // net-policy 模块
+            modules::net_policy::net_policy_get_status,
+            modules::net_policy::net_policy_get_settings,
+            modules::net_policy::net_policy_save_settings,
+            modules::net_policy::net_policy_list_rules,
+            modules::net_policy::net_policy_save_rule,
+            modules::net_policy::net_policy_delete_rule,
+            modules::net_policy::net_policy_list_process_candidates,
+            modules::net_policy::net_policy_apply,
+            modules::net_policy::net_policy_emergency_stop,
+            modules::net_policy::net_policy_verify,
         ])
         .setup(move |app| {
             modules::english::setup(app.handle(), state.english.clone())
                 .context("english::setup")?;
             modules::speech::setup(app.handle(), state.speech.clone()).context("speech::setup")?;
             modules::cookie::setup(app.handle(), state.cookie.clone()).context("cookie::setup")?;
+            modules::net_policy::setup(app.handle(), state.net_policy.clone())
+                .context("net_policy::setup")?;
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -1,3 +1,4 @@
+pub mod clean;
 pub mod device;
 pub mod export;
 pub mod init;

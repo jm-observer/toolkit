@@ -7,7 +7,7 @@ edition.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-fs = "2"
 tauri-plugin-http = "2"
 tauri-plugin-store = "2"
@@ -17,7 +17,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 anyhow = { workspace = true }
 log = { workspace = true }
 clap = { workspace = true, features = ["env"] }

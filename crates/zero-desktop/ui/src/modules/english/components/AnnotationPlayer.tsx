@@ -100,7 +100,11 @@ export default function AnnotationPlayer({ autoStart = true, dataSource = 'annot
     } catch (err: any) {
       console.error('播放器初始化失败:', err)
       setLoading(false)
-      setError(err.message || '初始化失败')
+      const detail =
+        err?.message ||
+        (typeof err === 'string' ? err : null) ||
+        (() => { try { return JSON.stringify(err) } catch { return String(err) } })()
+      setError(detail || '初始化失败（无详情）')
     }
   }
 
@@ -245,8 +249,10 @@ export default function AnnotationPlayer({ autoStart = true, dataSource = 'annot
         </div>
       )}
 
-      {/* 播放器 UI */}
-      <AudioPlayer showAnnotation={true} showReport={true} showOptions={true} />
+      {/* 播放器 UI（只在 AudioPlayerService 已初始化后渲染） */}
+      {initialized && (
+        <AudioPlayer showAnnotation={true} showReport={true} showOptions={true} />
+      )}
     </div>
   )
 }

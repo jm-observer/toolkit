@@ -12,7 +12,28 @@
     "fs:default",
     "fs:allow-appdata-read-recursive",
     "fs:allow-appdata-write-recursive",
+    "fs:allow-applocaldata-read-recursive",
+    "fs:allow-applocaldata-write-recursive",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$APPLOCALDATA/**" },
+        { "path": "$APPDATA/**" },
+        { "path": "$LOCALDATA/zero-desktop/**" },
+        { "path": "$DATA/zero-desktop/**" }
+      ]
+    },
     "http:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "https://www.for-memory.cloud:28080/*" },
+        { "url": "http://www.for-memory.cloud:28080/*" },
+        { "url": "http://192.168.50.8:8080/*" },
+        { "url": "http://localhost:*" },
+        { "url": "http://127.0.0.1:*" }
+      ]
+    },
     "store:default",
     "store:allow-get",
     "store:allow-set",

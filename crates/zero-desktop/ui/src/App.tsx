@@ -4,6 +4,7 @@ import EnglishAnnotated from "./modules/english/EnglishAnnotated";
 import EnglishAll from "./modules/english/EnglishAll";
 import SpeechPage from "./modules/speech/SpeechPage";
 import CookiePage from "./modules/cookie/CookiePage";
+import NetPolicyPage from "./modules/net-policy/NetPolicyPage";
 import SettingsPage from "./modules/settings/SettingsPage";
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="english/all" element={<EnglishAll />} />
           <Route path="speech" element={<SpeechPage />} />
           <Route path="cookie" element={<CookiePage />} />
+          <Route path="net-policy" element={<NetPolicyPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/english/annotated" replace />} />
         </Route>
