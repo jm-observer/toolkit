@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/creator", get(creator))
         .route("/creators", get(list_creators).post(track_creator))
         .route("/works", get(works_list))
+        .route("/works_saved", get(works_saved))
         .route("/tags", get(tags))
         .route("/filter", get(filter))
         .route("/cookie_status", get(cookie_status))
@@ -84,6 +85,23 @@ async fn tags(
 ) -> Result<Json<Value>, ApiError> {
     let paths = DouyinPaths::new(&s.workspace);
     let v = douyin::run_list_tags(&paths.works_dir, &q.unique_id).map_err(internal)?;
+    Ok(Json(v))
+}
+
+/// 列某博主已存盘作品 + 每条处理状态（下载/转写/整理）。供 web 工作台勾选操作。
+async fn works_saved(
+    State(s): State<AppState>,
+    Query(q): Query<TagsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = DouyinPaths::new(&s.workspace);
+    let v = douyin::run_list_saved_works(
+        &paths.works_dir,
+        &paths.out_dir,
+        &paths.transcript_dir,
+        &paths.refined_dir,
+        &q.unique_id,
+    )
+    .map_err(internal)?;
     Ok(Json(v))
 }
 

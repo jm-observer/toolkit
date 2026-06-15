@@ -152,10 +152,7 @@ impl AsrClient {
             .await
             .with_context(|| format!("调 FunASR /transcribe ({url})"))?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .context("读 /transcribe 响应 body")?;
+        let body = resp.text().await.context("读 /transcribe 响应 body")?;
         if !status.is_success() {
             bail!(
                 "FunASR /transcribe {status}: {}",
@@ -173,7 +170,12 @@ impl AsrClient {
 }
 
 fn mime_from_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("mp4" | "m4a") => "video/mp4",
         Some("mp3") => "audio/mpeg",
         Some("wav") => "audio/wav",
@@ -222,7 +224,13 @@ mod tests {
     fn mime_lookup() {
         assert_eq!(mime_from_path(Path::new("a.MP4")), "video/mp4");
         assert_eq!(mime_from_path(Path::new("a.wav")), "audio/wav");
-        assert_eq!(mime_from_path(Path::new("a.unknown")), "application/octet-stream");
-        assert_eq!(mime_from_path(Path::new("noext")), "application/octet-stream");
+        assert_eq!(
+            mime_from_path(Path::new("a.unknown")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            mime_from_path(Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 }

@@ -5,6 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>toolkit-server</title>
     <link rel="stylesheet" href="/style.css" />
+    <style>
+      .wb-layout { display: grid; grid-template-columns: 300px 1fr; gap: 12px; align-items: start; }
+      .wb-creators table { width: 100%; }
+      .wb-creators tr { cursor: pointer; }
+      .wb-creators tr.sel { background: rgba(120,150,255,0.18); }
+      .wb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+      .wb-chip { font-size: 11px; padding: 2px 9px; border-radius: 11px; border: 1px solid var(--border, #444);
+                 background: transparent; cursor: pointer; color: inherit; }
+      .wb-chip.on { background: rgba(120,150,255,0.28); border-color: rgba(120,150,255,0.6); }
+      .wb-toolbar { display: flex; align-items: center; gap: 10px; margin: 8px 0; padding: 6px 0;
+                    border-top: 1px solid var(--border, #333); border-bottom: 1px solid var(--border, #333); }
+      .wb-toolbar button { margin: 0; }
+      .wb-sel { font-size: 12px; display: flex; align-items: center; gap: 4px; }
+      #wb-works td { vertical-align: top; }
+      #wb-works .desc { font-size: 12px; }
+      .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-right: 4px;
+               border: 1px solid var(--border, #444); color: var(--muted); }
+      .badge.on { color: #fff; border-color: transparent; }
+      .badge.dl.on { background: #2d7d46; }
+      .badge.asr.on { background: #2d5a7d; }
+      .badge.ref.on { background: #7d5a2d; }
+    </style>
   </head>
   <body>
     <header>
@@ -18,12 +40,64 @@
 
     <nav id="tabs">
       <button data-tab="overview" class="active">概览</button>
-      <button data-tab="douyin">抖音</button>
+      <button data-tab="workbench">博主工作台</button>
+      <button data-tab="douyin">抖音（调试）</button>
       <button data-tab="tasks">任务</button>
       <button data-tab="kb">知识库</button>
     </nav>
 
     <main>
+      <!-- ===== 博主工作台 ===== -->
+      <section id="tab-workbench">
+        <div class="wb-layout">
+          <!-- 左：博主列表 -->
+          <div class="card wb-creators">
+            <div class="row-head">
+              <h2>博主</h2>
+              <button class="secondary" id="wb-creators-refresh">刷新</button>
+            </div>
+            <table id="wb-creators-table"><tbody>
+              <tr><td style="color:var(--muted)">加载中…</td></tr>
+            </tbody></table>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px;">
+              桌面端「解析当前博主」收录 → 这里出现 → 点选查看作品。
+            </div>
+          </div>
+
+          <!-- 右：选中博主详情 -->
+          <div class="card wb-detail">
+            <div id="wb-empty" style="color:var(--muted);padding:24px 4px;">← 选择左侧一个博主</div>
+            <div id="wb-panel" style="display:none;">
+              <div class="row-head">
+                <h2 id="wb-title">—</h2>
+                <div class="row">
+                  <button class="secondary" id="wb-sync" title="拉取该博主最新作品并存盘">同步/更新作品</button>
+                  <button class="secondary" id="wb-pipeline" title="同步→下载→识别→整理→入库 全链">整链</button>
+                  <button class="secondary" id="wb-reload">刷新作品</button>
+                </div>
+              </div>
+              <div id="wb-meta" style="font-size:11px;color:var(--muted);margin-bottom:6px;"></div>
+              <div id="wb-tags" class="wb-chips"></div>
+
+              <div class="wb-toolbar">
+                <label class="wb-sel"><input type="checkbox" id="wb-selall" /> 全选</label>
+                <span id="wb-selcount" style="color:var(--muted);">已选 0</span>
+                <span style="flex:1;"></span>
+                <button id="wb-op-download">下载</button>
+                <button id="wb-op-transcribe">识别(ASR)</button>
+                <button id="wb-op-refine">整理(LLM)</button>
+                <button class="secondary" id="wb-op-kb">入库</button>
+              </div>
+
+              <table id="wb-works"><thead>
+                <tr><th style="width:24px;"></th><th>作品</th><th style="width:90px;">时间</th><th style="width:150px;">状态</th></tr>
+              </thead><tbody></tbody></table>
+              <pre id="wb-out" style="margin-top:8px;">—</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== 概览 ===== -->
       <section id="tab-overview" class="active">
         <div class="card">

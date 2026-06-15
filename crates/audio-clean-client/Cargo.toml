@@ -1,0 +1,14 @@
+[package]
+name = "audio-clean-client"
+version.workspace = true
+edition.workspace = true
+description = "Rust client for the streaming-speech audio-cleanup /clean HTTP endpoint."
+
+[dependencies]
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

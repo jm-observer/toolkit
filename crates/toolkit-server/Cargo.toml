@@ -7,6 +7,7 @@ edition.workspace = true
 toolkit-core = { path = "../toolkit-core" }
 toolkit-tasks = { path = "../toolkit-tasks" }
 douyin = { path = "../douyin" }
+audio-clean-client = { path = "../audio-clean-client" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

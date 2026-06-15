@@ -96,7 +96,28 @@ pwsh ./deploy-g10.ps1 -SkipBuild # 仅复制已有产物
   两端口返回 503** 并提示。TTS 生成可能 10s+，代理超时 180s。调用上有 `SpanScope`
   两阶段 trace（`tts_proxy` / `tts_voices` span；trace 未启用时 no-op）。本阶段只代理，
   不落盘 / 不任务化（落盘任务化是 Phase 3 AudioForge）。
+- **音频清洗**：streaming-speech 仓的 audio-cleanup 服务（同机 GB10 `127.0.0.1:8097`，
+  `POST /clean` multipart：脏音频 → 人声分离/降噪/删停顿/响度归一化 → 干净音频）。
+  - **客户端**：本仓 `crates/audio-clean-client`（照抄 asr-client 形状，multipart 上传 +
+    二进制响应 + `X-Cleanup-*` 头解析）。
+  - **消费方**：`crates/douyin`（process 任务可选 `clean_audio=true`，带 BGM 视频先去乐再
+    ASR，提升识别率）；`toolkit-server` 的 `/api/web/audio/clean`（multipart 透传代理，给
+    zero-desktop 等桌面端）。
+  - **代理配置**：环境变量 **`CLEAN_BASE_URL`**（如 `http://127.0.0.1:8097`）；**未配置时
+    `/api/web/audio/clean` 返回 503**，配置但上游不可达 → 502。代理超时 600s。
+  - **端点契约 / 服务部署**：streaming-speech `docs/audio-cleanup-api.md` +
+    `server/audio-cleanup/`（部署归 streaming-speech 仓维护）。
 - **编排**：`deploy/asr-tts/`（compose + README）——**仅 TTS**。
+
+## GB10 服务清单（同机 / 内网）
+
+| 端口 | 服务 | 维护仓 |
+|---|---|---|
+| `:9101` | FunASR `/transcribe`（离线 ASR） | streaming-speech |
+| `:8095` | CosyVoice2 TTS | streaming-speech |
+| `:8097` | audio-cleanup `/clean`（音频清洗） | streaming-speech |
+| `:8788` | toolkit-server（Web API + 代理 + 控制台） | 本仓 |
+| `:8000` | vLLM（OpenAI 兼容 LLM） | 第三方/外部 |
 
 ## 抖音知识管线（流 A，Phase 2）
 
@@ -155,6 +176,7 @@ pwsh ./deploy-g10.ps1 -SkipBuild # 仅复制已有产物
 - [docs/rag-service-design.md](docs/rag-service-design.md) — RAG 检索服务设计。
 - [docs/runbook-pipeline-e2e.md](docs/runbook-pipeline-e2e.md) — 抖音知识管线端到端验收 runbook（Phase 2）。
 - [docs/runbook-audioforge-e2e.md](docs/runbook-audioforge-e2e.md) — 英语音频生产线端到端验收 runbook（Phase 3）。
+- [docs/distributed-worker-design.md](docs/distributed-worker-design.md) — 分布式 worker 设计：多 IP 节点 + pull 调度 + 两段式自更新。
 - [docs/toolkit-rfc/2026-06-04-initial-skeleton/data-model.md](docs/toolkit-rfc/2026-06-04-initial-skeleton/data-model.md) — SQLite 数据模型。
 - [docs/toolkit-rfc/2026-06-10-toolkit-elevation/plan.md](docs/toolkit-rfc/2026-06-10-toolkit-elevation/plan.md) — 提级为统一工具中台的分阶段规划。
 - [docs/retrospective.md](docs/retrospective.md) — 复盘记录。

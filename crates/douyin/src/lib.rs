@@ -155,6 +155,8 @@ pub fn run_process_submit(
     asr_url: String,
     asr_model: String,
     vad: bool,
+    clean_audio: bool,
+    clean_base_url: String,
     delivery_handle: Option<String>,
     unique_id: Option<String>,
     session_id: Option<String>,
@@ -174,6 +176,8 @@ pub fn run_process_submit(
         asr_url,
         asr_model,
         vad,
+        clean_audio,
+        clean_base_url,
         delivery_handle,
         unique_id,
         session_id,
@@ -332,13 +336,19 @@ pub async fn run_submit_job(
         "douyin.process" | "process" => {
             let out = resolve_out_dir(get_str("out_dir").map(PathBuf::from))?;
             let tr = resolve_transcript_dir(get_str("transcript_dir").map(PathBuf::from))?;
-            let asr_url = get_str("asr_url").unwrap_or_else(|| {
-                "http://127.0.0.1:9101/transcribe".to_string()
-            });
+            let asr_url = get_str("asr_url")
+                .unwrap_or_else(|| "http://127.0.0.1:9101/transcribe".to_string());
             // 注:该字段现在仅作为「服务端未回填 model 时」的兜底标签;
             // FunASR /transcribe 正常路径会返回实际模型名(paraformer/sensevoice/...)。
             let asr_model = get_str("asr_model").unwrap_or_else(|| "funasr".to_string());
             let vad = params.get("vad").and_then(|v| v.as_bool()).unwrap_or(true);
+            // 可选音频清洗前置（去 BGM 提升带乐视频识别率）。默认关，与旧行为一致。
+            let clean_audio = params
+                .get("clean_audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let clean_base_url = get_str("clean_base_url")
+                .unwrap_or_else(|| audio_clean_client::DEFAULT_BASE.to_string());
             run_process_submit(
                 task_dir,
                 &out,
@@ -348,6 +358,8 @@ pub async fn run_submit_job(
                 asr_url,
                 asr_model,
                 vad,
+                clean_audio,
+                clean_base_url,
                 get_str("delivery_handle"),
                 get_str("unique_id"),
                 get_str("session_id"),
