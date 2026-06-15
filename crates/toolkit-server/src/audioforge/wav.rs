@@ -81,7 +81,7 @@ mod tests {
         v.extend_from_slice(&bits.to_le_bytes());
         v.extend_from_slice(b"data");
         v.extend_from_slice(&data_len.to_le_bytes());
-        v.extend(std::iter::repeat(0u8).take(data_len as usize));
+        v.extend(std::iter::repeat_n(0u8, data_len as usize));
         v
     }
 

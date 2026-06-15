@@ -84,4 +84,18 @@ CREATE TABLE IF NOT EXISTS browser_sessions (
     current_url  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_browser_sessions_last_seen ON browser_sessions(last_seen DESC);
+
+-- codeloop 跨会话复核循环的 ASK_USER 握手表（见 RFC §10.3）。
+-- 纯加表、IF NOT EXISTS 幂等：migrate() 每次启动 execute_batch(DDL_V1) 都会建出，
+-- 故不需要、也不应 bump SCHEMA_VERSION（bump 不更新已有 DB 的 meta）。
+CREATE TABLE IF NOT EXISTS codeloop_io (
+    task_id     TEXT,
+    seq         INTEGER,
+    asked_by    TEXT,
+    question_json TEXT,
+    answer_text TEXT,
+    created_at  TEXT,
+    answered_at TEXT,
+    PRIMARY KEY(task_id, seq)
+);
 "#;

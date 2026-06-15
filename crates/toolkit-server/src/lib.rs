@@ -1,6 +1,7 @@
 //! toolkit-server：axum 服务，装配 toolkit-core / toolkit-tasks + 业务模块（Plan 2+）。
 
 pub mod audioforge;
+pub mod codeloop;
 pub mod config;
 #[path = "douyin/mod.rs"]
 pub mod douyin_mod;
@@ -50,6 +51,7 @@ pub fn bootstrap(cfg: &Config) -> Result<AppState> {
     registry.register::<toolkit_tasks::EchoTask>();
     douyin_mod::kinds::register_all(&mut registry);
     audioforge::register_all(&mut registry);
+    codeloop::register_all(&mut registry);
 
     let recovered = toolkit_tasks::recover_interrupted(&pool)?;
     if recovered > 0 {
