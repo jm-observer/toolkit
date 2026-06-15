@@ -8,6 +8,7 @@ toolkit-core = { path = "../toolkit-core" }
 toolkit-tasks = { path = "../toolkit-tasks" }
 douyin = { path = "../douyin" }
 audio-clean-client = { path = "../audio-clean-client" }
+agent-session = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

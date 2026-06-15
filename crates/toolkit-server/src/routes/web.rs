@@ -23,6 +23,11 @@ pub fn router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/tasks", get(list_tasks).post(submit_task))
         .route("/tasks/{task_id}", get(get_task))
+        .route("/codeloop/sessions", get(codeloop_sessions))
+        .route(
+            "/codeloop/session/{provider}/{id}/messages",
+            get(codeloop_messages),
+        )
 }
 
 async fn health(State(s): State<AppState>) -> Json<Value> {
@@ -95,6 +100,59 @@ async fn list_tasks(State(s): State<AppState>, Query(q): Query<ListQuery>) -> im
         Ok(v) => (StatusCode::OK, Json(serde_json::to_value(v).unwrap())),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e:#}")})),
+        ),
+    }
+}
+
+// ---------------- codeloop 只读会话观测（Plan 2） ----------------
+
+#[derive(Debug, Deserialize)]
+struct SessionsQuery {
+    #[serde(default = "default_sessions_limit")]
+    limit: usize,
+}
+
+fn default_sessions_limit() -> usize {
+    30
+}
+
+/// 列出本机 Codex / Claude 会话清单（供前端挑选配对）。
+async fn codeloop_sessions(
+    State(s): State<AppState>,
+    Query(q): Query<SessionsQuery>,
+) -> impl IntoResponse {
+    match s.session_store.list(q.limit) {
+        Ok(rows) => (StatusCode::OK, Json(serde_json::to_value(rows).unwrap())),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e:#}")})),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MessagesQuery {
+    #[serde(default)]
+    after: usize,
+}
+
+/// 增量取某会话消息（cursor = 已读行数）。
+async fn codeloop_messages(
+    State(s): State<AppState>,
+    Path((provider, id)): Path<(String, String)>,
+    Query(q): Query<MessagesQuery>,
+) -> impl IntoResponse {
+    let Some(provider) = agent_session::Provider::parse(&provider) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "provider 必须是 codex 或 claude"})),
+        );
+    };
+    match s.session_store.messages(provider, &id, q.after) {
+        Ok(page) => (StatusCode::OK, Json(serde_json::to_value(page).unwrap())),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
             Json(json!({"error": format!("{e:#}")})),
         ),
     }

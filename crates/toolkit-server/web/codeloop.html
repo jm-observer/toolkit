@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codeloop 双栏观测</title>
+  <link rel="stylesheet" href="codeloop.css" />
+</head>
+<body>
+  <div id="statusbar">
+    <div class="pair-picker">
+      <label>Claude
+        <select id="claude-select"><option value="">（选择会话）</option></select>
+      </label>
+      <span class="arrow">⇄</span>
+      <label>Codex
+        <select id="codex-select"><option value="">（选择会话）</option></select>
+      </label>
+      <button id="refresh-sessions" title="刷新会话清单">↻</button>
+    </div>
+    <div class="status-right">
+      <span id="poll-state">未配对</span>
+    </div>
+  </div>
+
+  <div id="columns">
+    <section class="column" data-side="claude">
+      <header class="col-head">
+        <span class="col-title">Claude Code</span>
+        <span class="col-meta" id="claude-meta">—</span>
+      </header>
+      <div class="messages" id="claude-messages"></div>
+    </section>
+    <section class="column" data-side="codex">
+      <header class="col-head">
+        <span class="col-title">Codex</span>
+        <span class="col-meta" id="codex-meta">—</span>
+      </header>
+      <div class="messages" id="codex-messages"></div>
+    </section>
+  </div>
+
+  <script src="codeloop.js"></script>
+</body>
+</html>

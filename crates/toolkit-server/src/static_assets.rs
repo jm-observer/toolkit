@@ -12,6 +12,9 @@ const STYLE_CSS: &str = include_str!("../web/style.css");
 const HUB_HTML: &str = include_str!("../web/hub.html");
 const HUB_JS: &str = include_str!("../web/hub.js");
 const HUB_CSS: &str = include_str!("../web/hub.css");
+const CODELOOP_HTML: &str = include_str!("../web/codeloop.html");
+const CODELOOP_JS: &str = include_str!("../web/codeloop.js");
+const CODELOOP_CSS: &str = include_str!("../web/codeloop.css");
 
 pub async fn dashboard() -> Html<&'static str> {
     Html(INDEX_HTML)
@@ -53,4 +56,27 @@ pub async fn hub_js() -> Response {
 
 pub async fn hub_css() -> Response {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], HUB_CSS).into_response()
+}
+
+pub async fn codeloop() -> Html<&'static str> {
+    Html(CODELOOP_HTML)
+}
+
+pub async fn codeloop_js() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        CODELOOP_JS,
+    )
+        .into_response()
+}
+
+pub async fn codeloop_css() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        CODELOOP_CSS,
+    )
+        .into_response()
 }
