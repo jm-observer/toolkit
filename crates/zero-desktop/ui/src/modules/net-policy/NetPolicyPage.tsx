@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { ShieldCheck, RefreshCw, Plus, Trash2, Play, OctagonX, FlaskConical } from 'lucide-react'
+import { ShieldCheck, RefreshCw, Plus, Trash2, Play, OctagonX, FlaskConical, Upload } from 'lucide-react'
 
 // ── 与后端 net_policy 命令对齐的类型 ───────────────────────────────────────────
 
@@ -122,10 +122,25 @@ export default function NetPolicyPage() {
   // 新规则表单
   const [newRule, setNewRule] = useState<Rule>({ kind: 'process-name', value: '', route: 'direct' })
 
+  // 导入 WireGuard .conf 用的隐藏 file input
+  const wgFileRef = useRef<HTMLInputElement>(null)
+
   const flash = (kind: 'ok' | 'err', text: string) => {
     setMsg({ kind, text })
     setTimeout(() => setMsg(null), 5000)
   }
+
+  // 读取用户选择的 wg-quick .conf，交后端解析后合并进当前设置（不直接保存，待用户确认）。
+  const importWgConf = useCallback(async (file: File) => {
+    try {
+      const content = await file.text()
+      const wg = await invoke<WgConfig>('net_policy_parse_wg_conf', { content })
+      setSettings(prev => (prev ? { ...prev, wg } : prev))
+      flash('ok', '已导入 WireGuard 配置，请检查各字段后点「保存」')
+    } catch (e) {
+      flash('err', `导入失败: ${String(e)}`)
+    }
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -234,8 +249,26 @@ export default function NetPolicyPage() {
       {settings && (
         <Panel
           title="WireGuard 出口 + 设置"
-          right={<button className={btn('primary')} onClick={saveSettings} disabled={busy}>保存</button>}
+          right={
+            <div className="flex gap-2">
+              <button className={btn()} onClick={() => wgFileRef.current?.click()} disabled={busy} title="从 WireGuard .conf 文件导入">
+                <Upload size={14} /> 导入配置
+              </button>
+              <button className={btn('primary')} onClick={saveSettings} disabled={busy}>保存</button>
+            </div>
+          }
         >
+          <input
+            ref={wgFileRef}
+            type="file"
+            accept=".conf,text/plain"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0]
+              if (f) void importWgConf(f)
+              e.target.value = '' // 允许重复选同一文件
+            }}
+          />
           <div className="grid grid-cols-2 gap-3 text-sm">
             <label className="flex flex-col gap-1">服务端 IP
               <input className="rounded border px-2 py-1 dark:bg-gray-800 dark:border-gray-700" value={settings.wg.server}

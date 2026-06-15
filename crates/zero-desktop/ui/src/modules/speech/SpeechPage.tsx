@@ -5,14 +5,15 @@ import { ControlPanel } from './components/ControlPanel';
 import { SegmentCard } from './components/SegmentCard';
 import { useAppStore } from './store/useAppStore';
 import { Icon } from './components/ui/Icon';
-import { RecordCard } from './components/RecordCard';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
+import { playCompletionSound } from './utils/notifySound';
 
 export default function SpeechPage() {
   const store = useAppStore();
   const pollTimer = useRef<number | null>(null);
   const pollInFlightRef = useRef(false);
   const notifiedRevisionsRef = useRef<Set<string>>(new Set());
+  const soundedRevisionsRef = useRef<Set<number>>(new Set());
   const notificationBaselineReadyRef = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
   const [asrLanguage, setAsrLanguage] = useState<AsrLanguage>('zh');
@@ -138,6 +139,10 @@ export default function SpeechPage() {
           const transKey = `trans-${seg.revision}`;
           if (seg.optimize_status === 'success') notifiedRevisionsRef.current.add(optKey);
           if (seg.translate_status === 'success') notifiedRevisionsRef.current.add(transKey);
+          // 挂载时已完成的段不该补响提示音。
+          if (seg.optimize_status === 'success' && seg.translate_status === 'success') {
+            soundedRevisionsRef.current.add(seg.revision);
+          }
         }
       });
       notificationBaselineReadyRef.current = true;
@@ -159,8 +164,18 @@ export default function SpeechPage() {
         notifiedRevisionsRef.current.add(transKey);
         showTranslationNotification(segment).catch(console.error);
       }
+
+      // 转写 + 优化 + 翻译都成功后，每段响一次完成提示音（受「完成提示音」开关控制）。
+      if (
+        segment.optimize_status === 'success' &&
+        segment.translate_status === 'success' &&
+        !soundedRevisionsRef.current.has(revision)
+      ) {
+        soundedRevisionsRef.current.add(revision);
+        if (notifySound) playCompletionSound();
+      }
     });
-  }, [showTranslationNotification, store.segments]);
+  }, [showTranslationNotification, store.segments, notifySound]);
 
   // Sync initial recording state on mount
   useEffect(() => {
@@ -462,20 +477,6 @@ export default function SpeechPage() {
             ))}
           </div>
         </div>
-
-        {/* Simple RecordCard bar for quick access at the bottom when needed */}
-        {(store.status === 'recording' || store.status === 'processing') && (
-          <div className="border-t border-[var(--line)] p-3 flex justify-center bg-[var(--bg-app)]">
-            <RecordCard
-              status={store.status}
-              onStart={startRecording}
-              onStop={stopRecording}
-              onRetry={retryRecording}
-              errorMessage={store.errorMessage}
-              disabled={store.devices.length === 0 || isBusy}
-            />
-          </div>
-        )}
       </main>
     </div>
   );

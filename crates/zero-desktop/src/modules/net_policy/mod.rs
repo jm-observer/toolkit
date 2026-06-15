@@ -126,6 +126,14 @@ pub fn net_policy_save_settings(
     config::save_settings(&state.net_policy.workspace, &settings).map_err(err)
 }
 
+/// 解析用户选择的 WireGuard `.conf` 文本，返回填好的 WG 出口配置（**不落盘**）。
+/// 前端读取文件内容后调用，拿到结果合并进当前设置，由用户确认后再走
+/// `net_policy_save_settings` 校验保存（Endpoint 为域名等问题在保存时报错）。
+#[tauri::command]
+pub fn net_policy_parse_wg_conf(content: String) -> Result<config::WgConfig, String> {
+    config::WgConfig::from_wg_quick(&content).map_err(err)
+}
+
 // ============ 规则 ============
 
 #[tauri::command]

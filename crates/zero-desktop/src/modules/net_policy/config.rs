@@ -114,6 +114,109 @@ fn default_mtu() -> u32 {
 }
 
 impl WgConfig {
+    /// 从标准 wg-quick `.conf`（INI 风格）文本解析出 net-policy 需要的字段：
+    /// `[Interface]` 的 `PrivateKey`/`Address`/`MTU`，`[Peer]` 的
+    /// `PublicKey`/`PresharedKey`/`Endpoint`。其余键（AllowedIPs/DNS/…）忽略——
+    /// net-policy 自有分流与 DNS 策略。
+    ///
+    /// 只做解析与字段抽取，**不校验**：解析结果交前端合并到设置后由用户确认保存，
+    /// 保存时再走 [`WgConfig::validate`]（例如 Endpoint 为域名会在保存时被拒，
+    /// 给出可读报错而非在导入处直接失败）。
+    pub fn from_wg_quick(text: &str) -> Result<WgConfig> {
+        #[derive(PartialEq)]
+        enum Section {
+            None,
+            Interface,
+            Peer,
+        }
+        let mut section = Section::None;
+        let mut private_key = String::new();
+        let mut address = String::new();
+        let mut mtu: Option<u32> = None;
+        let mut public_key = String::new();
+        let mut pre_shared_key = String::new();
+        let mut endpoint = String::new();
+
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section = match name.trim().to_ascii_lowercase().as_str() {
+                    "interface" => Section::Interface,
+                    "peer" => Section::Peer,
+                    _ => Section::None,
+                };
+                continue;
+            }
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim().to_ascii_lowercase();
+            let val = val.trim().to_string();
+            match (&section, key.as_str()) {
+                (Section::Interface, "privatekey") => private_key = val,
+                (Section::Interface, "address") => address = val,
+                (Section::Interface, "mtu") => mtu = val.parse().ok(),
+                (Section::Peer, "publickey") => public_key = val,
+                (Section::Peer, "presharedkey") => pre_shared_key = val,
+                (Section::Peer, "endpoint") => endpoint = val,
+                _ => {}
+            }
+        }
+
+        if private_key.is_empty() {
+            anyhow::bail!("配置缺少 [Interface] 段的 PrivateKey");
+        }
+        if public_key.is_empty() {
+            anyhow::bail!("配置缺少 [Peer] 段的 PublicKey");
+        }
+        if endpoint.is_empty() {
+            anyhow::bail!("配置缺少 [Peer] 段的 Endpoint");
+        }
+
+        // Address 可能逗号分隔 v4/v6，取第一个并剥掉 CIDR 前缀（mihomo 的 ip 字段要纯地址）。
+        let ip = address
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if ip.is_empty() {
+            anyhow::bail!("配置缺少 [Interface] 段的 Address");
+        }
+
+        // Endpoint = host:port，从右切一刀（兼容 IPv6 字面量 [::1]:51820）。
+        let endpoint = endpoint.split(',').next().unwrap_or("").trim();
+        let (host, port_s) = endpoint
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("Endpoint 缺少端口：{endpoint}"))?;
+        let host = host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let port: u16 = port_s
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Endpoint 端口非法：{port_s}"))?;
+
+        Ok(WgConfig {
+            server: host,
+            port,
+            ip,
+            private_key,
+            public_key,
+            pre_shared_key,
+            mtu: mtu.unwrap_or_else(default_mtu),
+        })
+    }
+
     /// 校验 WG 配置（格式 + 防注入）。
     pub fn validate(&self) -> Result<()> {
         valid::ip(&self.server).context("WG server 必须是合法 IP（不能是域名）")?;
@@ -322,4 +425,59 @@ pub fn save_rules(workspace: &Path, r: &RuleSet) -> Result<()> {
     }
     let json = serde_json::to_string_pretty(r).context("serialize rules")?;
     std::fs::write(&p, json).with_context(|| format!("write {}", p.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_wg_quick_full() {
+        let conf = "\
+[Interface]
+PrivateKey = aGVsbG9oZWxsb2hlbGxvaGVsbG9oZWxsb2hlbGxvMTI=
+Address = 10.66.66.5/32, fd00::5/128
+MTU = 1380
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = cGVlcnB1YmtleXB1YmtleXB1YmtleXB1YmtleXB1Yj0=
+PresharedKey = cHNrcHNrcHNrcHNrcHNrcHNrcHNrcHNrcHNrcHNrMTI=
+Endpoint = 38.209.122.38:51227
+AllowedIPs = 0.0.0.0/0, ::/0
+";
+        let wg = WgConfig::from_wg_quick(conf).expect("parse");
+        assert_eq!(wg.server, "38.209.122.38");
+        assert_eq!(wg.port, 51227);
+        assert_eq!(wg.ip, "10.66.66.5"); // CIDR 前缀已剥离
+        assert_eq!(wg.mtu, 1380);
+        assert!(wg.private_key.starts_with("aGVsbG"));
+        assert!(wg.public_key.starts_with("cGVlcn"));
+        assert!(wg.pre_shared_key.starts_with("cHNr"));
+        wg.validate().expect("解析出的配置应通过校验");
+    }
+
+    #[test]
+    fn parse_wg_quick_minimal_defaults_mtu_and_optional_psk() {
+        let conf = "\
+[Interface]
+PrivateKey = aGVsbG9oZWxsb2hlbGxvaGVsbG9oZWxsb2hlbGxvMTI=
+Address = 10.0.0.2
+
+[Peer]
+PublicKey = cGVlcnB1YmtleXB1YmtleXB1YmtleXB1YmtleXB1Yj0=
+Endpoint = 1.2.3.4:51820
+";
+        let wg = WgConfig::from_wg_quick(conf).expect("parse");
+        assert_eq!(wg.ip, "10.0.0.2");
+        assert_eq!(wg.port, 51820);
+        assert_eq!(wg.mtu, default_mtu());
+        assert_eq!(wg.pre_shared_key, "");
+    }
+
+    #[test]
+    fn parse_wg_quick_missing_required_fails() {
+        let conf = "[Interface]\nAddress = 10.0.0.2\n";
+        assert!(WgConfig::from_wg_quick(conf).is_err());
+    }
 }

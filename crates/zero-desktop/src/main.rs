@@ -142,6 +142,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::net_policy::net_policy_get_status,
             modules::net_policy::net_policy_get_settings,
             modules::net_policy::net_policy_save_settings,
+            modules::net_policy::net_policy_parse_wg_conf,
             modules::net_policy::net_policy_list_rules,
             modules::net_policy::net_policy_save_rule,
             modules::net_policy::net_policy_delete_rule,
