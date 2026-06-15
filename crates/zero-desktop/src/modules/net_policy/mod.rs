@@ -7,6 +7,7 @@
 //! 所有 Tauri command 名称以 `net_policy_` 开头。
 
 mod config;
+mod connections;
 mod engine;
 mod firewall;
 mod process_watch;
@@ -143,6 +144,24 @@ pub fn net_policy_get_status(state: State<'_, AppState>) -> Result<NetPolicyStat
     })
 }
 
+/// 活跃连接快照（P0-1，设计 §3.1/§5）：代理运行中 mihomo 的 external-controller `/connections`，
+/// 复用 runtime 里的 controller secret 做 Bearer 鉴权。驱动全景图双分支聚合与「当前活跃连接」活数据。
+/// mihomo 未跑 / secret 缺失 / 控制器不可达 → 返回**空快照**（非错误），供 3s 快轮询平滑降级。
+#[tauri::command]
+pub async fn net_policy_connections(
+    state: State<'_, AppState>,
+) -> Result<connections::ConnectionsSnapshot, String> {
+    if !win::is_windows() {
+        // 非 Windows：net-policy 不可用，返回空快照而非错误（与失败语义一致，便于前端统一处理）。
+        return Ok(connections::ConnectionsSnapshot::empty_snapshot());
+    }
+    let secret = {
+        let rt = state.net_policy.rt.lock().unwrap();
+        rt.secret.clone().unwrap_or_default()
+    };
+    Ok(connections::fetch(&secret).await)
+}
+
 // ============ 设置（含 WG 配置） ============
 
 #[tauri::command]
@@ -213,6 +232,48 @@ pub async fn net_policy_list_process_candidates(
         .map_err(err)
 }
 
+// ============ 应用进度事件（Phase 2，设计 §3.3） ============
+
+/// `net_policy_apply` 逐阶段进度事件的频道名。前端 `listen('net-policy://apply-progress')` 订阅。
+pub const APPLY_PROGRESS_EVENT: &str = "net-policy://apply-progress";
+
+/// apply 的 6 个阶段（与设计 §3.3 stepper 对齐，索引从 0 起）。
+const APPLY_STEPS: [&str; 6] = [
+    "校验配置",
+    "装防火墙基线",
+    "启动引擎",
+    "等待 TUN 起栈",
+    "补 TUN 白名单",
+    "验证连通",
+];
+
+/// 单步进度。`status` ∈ {running, ok, fail}；`detail` 为可选补充（如 TUN 轮询 N/14、错误原文）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyProgress {
+    /// 步索引（0..6），对应 `APPLY_STEPS`。
+    pub step: usize,
+    /// 步名（冗余给前端，省得对索引表）。
+    pub name: String,
+    /// running / ok / fail。
+    pub status: String,
+    /// 可选补充信息（进度、错误原文等）。
+    pub detail: Option<String>,
+}
+
+/// 发一条进度事件（emit 失败不影响主流程——进度仅为可观测性）。
+fn emit_progress(app: &tauri::AppHandle, step: usize, status: &str, detail: Option<String>) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        APPLY_PROGRESS_EVENT,
+        ApplyProgress {
+            step,
+            name: APPLY_STEPS.get(step).copied().unwrap_or("").to_string(),
+            status: status.to_string(),
+            detail,
+        },
+    );
+}
+
 // ============ 应用 / 急停 ============
 
 /// 应用策略：校验 → 生成配置 → 启动 mihomo → 应用 kill-switch（默认开启）。
@@ -222,7 +283,10 @@ pub async fn net_policy_list_process_candidates(
 /// 起不来、防火墙却被撤掉"。kill-switch 关闭时为"不受保护预览"，status.protected=false（P0-1）。
 /// `rt` 在每个中间/失败点都被更新为与机器实际状态一致（避免重启/急停拿到陈旧 pid/secret）。
 #[tauri::command]
-pub async fn net_policy_apply(state: State<'_, AppState>) -> Result<NetPolicyStatus, String> {
+pub async fn net_policy_apply(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<NetPolicyStatus, String> {
     if !win::is_windows() {
         return Err("net-policy 仅支持 Windows".into());
     }
@@ -231,14 +295,21 @@ pub async fn net_policy_apply(state: State<'_, AppState>) -> Result<NetPolicySta
     let settings = config::load_settings(&ws);
     let rules = config::load_rules(&ws);
 
-    // 进副作用前先校验全部输入（P1-3）。
-    settings.validate().map_err(err)?;
-    rules.validate().map_err(err)?;
+    // 步 0：校验配置（进副作用前先校验全部输入，P1-3）。
+    emit_progress(&app, 0, "running", None);
+    if let Err(e) = settings.validate().and_then(|_| rules.validate()) {
+        emit_progress(&app, 0, "fail", Some(err(&e)));
+        return Err(err(e));
+    }
+    emit_progress(&app, 0, "ok", None);
+
     let killswitch = settings.killswitch_enabled;
     let mihomo_bin = engine::mihomo_bin(&ws);
     let secret = engine::gen_secret(); // P0-1：每次 apply 随机 controller secret
+    let app_bg = app.clone();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
+        let app = app_bg;
         // 当前已应用状态快照——受控 reapply 的依据（P0-1）。
         let (was_applied, old_pid, old_secret) = {
             let rt = np.rt.lock().unwrap();
@@ -284,21 +355,38 @@ pub async fn net_policy_apply(state: State<'_, AppState>) -> Result<NetPolicySta
             Ok(())
         };
 
-        // 阶段 A（P1-2）：先建 fail-closed（不依赖 Meta 的白名单 + 默认 Block），再起 mihomo。
+        // 步 1（阶段 A，P1-2）：先建 fail-closed（不依赖 Meta 的白名单 + 默认 Block），再起 mihomo。
+        emit_progress(&app, 1, "running", None);
         if killswitch {
             if let Err(e) = firewall::apply_base(&ws, &settings, &mihomo_bin) {
                 rollback(None)?; // 无新引擎在跑，仅撤可能残留的 kill-switch 回基线。
+                emit_progress(&app, 1, "fail", Some(err(&e)));
                 return Err(e.context("apply kill-switch（阶段A）"));
             }
         }
         if let Err(e) = engine::write_config(&ws, &settings, &rules, &secret) {
             rollback(None)?;
+            emit_progress(&app, 1, "fail", Some(err(&e)));
             return Err(e.context("write mihomo config"));
         }
+        emit_progress(
+            &app,
+            1,
+            "ok",
+            Some(if killswitch {
+                "kill-switch 基线已就位".into()
+            } else {
+                "不受保护预览（未装 kill-switch）".into()
+            }),
+        );
+
+        // 步 2：启动 mihomo 引擎。
+        emit_progress(&app, 2, "running", None);
         let pid = match engine::start(&ws) {
             Ok(p) => p,
             Err(e) => {
                 rollback(None)?;
+                emit_progress(&app, 2, "fail", Some(err(&e)));
                 return Err(e.context("start mihomo"));
             }
         };
@@ -308,22 +396,54 @@ pub async fn net_policy_apply(state: State<'_, AppState>) -> Result<NetPolicySta
             rt.mihomo_pid = Some(pid);
             rt.secret = Some(secret.clone());
         }
-        std::thread::sleep(std::time::Duration::from_secs(6));
-        if !engine::running(&secret) {
-            rollback(Some(pid))?;
-            bail!("mihomo 启动后外部控制器不可达，已回滚（检查 WG 配置 / 管理员权限）");
+        emit_progress(&app, 2, "ok", Some(format!("pid {pid}")));
+
+        // 步 3：等待 TUN(Meta) 起栈（真·轮询，复用 graceful_stop 的 14×500ms 范式；诚实分步，
+        // 替代旧的固定 sleep(6s)+单次控制器探测）。控制器可达且 Meta Up 才算就绪。
+        emit_progress(&app, 3, "running", Some("0/14".into()));
+        let mut tun_ready = false;
+        for i in 0..14 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if engine::running(&secret) && engine::tun_up() {
+                tun_ready = true;
+                emit_progress(&app, 3, "running", Some(format!("{}/14 已起栈", i + 1)));
+                break;
+            }
+            emit_progress(&app, 3, "running", Some(format!("{}/14", i + 1)));
         }
-        // 阶段 B：Meta 已出现，补 KS-TUN 放行应用流量进隧道。
+        if !tun_ready {
+            // 控制器可达但 TUN 没起栈，或控制器都不可达——区分提示。
+            let detail = if engine::running(&secret) {
+                "控制器可达但 TUN(Meta) 未在超时内起栈"
+            } else {
+                "mihomo 外部控制器不可达"
+            };
+            rollback(Some(pid))?;
+            emit_progress(&app, 3, "fail", Some(detail.into()));
+            bail!("等待 TUN 起栈超时（{detail}），已回滚（检查 WG 配置 / 管理员权限）");
+        }
+        emit_progress(&app, 3, "ok", None);
+
+        // 步 4（阶段 B）：Meta 已出现，补 KS-TUN 放行应用流量进隧道。
+        emit_progress(&app, 4, "running", None);
         if killswitch {
             if let Err(e) = firewall::apply_tun(&ws) {
                 rollback(Some(pid))?;
+                emit_progress(&app, 4, "fail", Some(err(&e)));
                 return Err(e.context("apply kill-switch（阶段B KS-TUN）"));
             }
         }
-        let mut rt = np.rt.lock().unwrap();
-        rt.applied = true;
-        rt.mihomo_pid = Some(pid);
-        rt.secret = Some(secret.clone());
+        emit_progress(&app, 4, "ok", None);
+
+        // 步 5：验证连通（控制器可达 + TUN 起栈，已在步 3 确认；此处终确认并标终态）。
+        emit_progress(&app, 5, "running", None);
+        {
+            let mut rt = np.rt.lock().unwrap();
+            rt.applied = true;
+            rt.mihomo_pid = Some(pid);
+            rt.secret = Some(secret.clone());
+        }
+        emit_progress(&app, 5, "ok", Some("引擎在线 · TUN 已起栈".into()));
         Ok(())
     })
     .await

@@ -140,6 +140,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::cookie::cookie_recent_uploads,
             // net-policy 模块
             modules::net_policy::net_policy_get_status,
+            modules::net_policy::net_policy_connections,
             modules::net_policy::net_policy_get_settings,
             modules::net_policy::net_policy_save_settings,
             modules::net_policy::net_policy_parse_wg_conf,
