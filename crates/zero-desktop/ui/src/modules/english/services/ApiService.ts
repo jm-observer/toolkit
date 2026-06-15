@@ -8,6 +8,7 @@
  */
 
 import { fetch } from '@tauri-apps/plugin-http'
+import { invoke } from '@tauri-apps/api/core'
 import type { ApiRequest, ApiResponse } from '../types'
 import EnvConfigService from './EnvConfigService'
 import FileCacheManager from './FileCacheManager'
@@ -98,6 +99,32 @@ class ApiService {
     const response = await fetch(`${envConfig.apiBaseUrl}/audio/${audioId}`, { method: 'GET' })
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
     return response.arrayBuffer()
+  }
+
+  /** 查询音色库（经 Tauri 后端代理 → toolkit-server /voices）。回传上游原始 JSON。 */
+  async getVoices(): Promise<any> {
+    return invoke<any>('english_tts_voices')
+  }
+
+  /**
+   * 生成 TTS 预览：后端调 TTS 把 WAV 落盘到缓存目录，返回绝对路径。
+   * 不写任何业务数据，仅供试听。
+   */
+  async previewTts(text: string, voiceId: string, speed?: number): Promise<string> {
+    return invoke<string>('english_tts_preview', { text, voiceId, speed })
+  }
+
+  /**
+   * 确认替换：把上一步预览的 WAV 上传到 english 后端，原子地改句子文本 + 换当前音频。
+   * previewPath 必须是 previewTts 返回的路径。
+   */
+  async replaceSentenceAudio(
+    sentenceId: number,
+    audioId: number,
+    text: string,
+    previewPath: string
+  ): Promise<void> {
+    await invoke('english_replace_sentence_audio', { sentenceId, audioId, text, previewPath })
   }
 
   async clearSentencesCache(): Promise<void> {

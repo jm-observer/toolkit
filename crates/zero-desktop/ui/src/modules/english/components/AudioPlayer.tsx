@@ -3,15 +3,17 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { ChevronLeft, ChevronRight, Play, Pause, BookmarkPlus, BookmarkCheck, AlertTriangle } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Play, Pause, BookmarkPlus, BookmarkCheck, AlertTriangle, Replace } from 'lucide-react'
 import { AudioPlayerService } from '../services/AudioPlayerService'
 import ApiService from '../services/ApiService'
 import type { Sentence } from '../types'
 import { Button } from '../../speech/components/ui/Button'
+import ReplaceAudioModal from './ReplaceAudioModal'
 
 interface AudioPlayerProps {
   showAnnotation?: boolean
   showReport?: boolean
+  showReplace?: boolean
   showOptions?: boolean
   onPlayComplete?: () => void
 }
@@ -19,6 +21,7 @@ interface AudioPlayerProps {
 export default function AudioPlayer({
   showAnnotation = true,
   showReport = true,
+  showReplace = true,
   showOptions = true,
   onPlayComplete
 }: AudioPlayerProps) {
@@ -32,6 +35,7 @@ export default function AudioPlayer({
   const [sentences, setSentences] = useState<Sentence[]>([])
   const [currentSentence, setCurrentSentence] = useState<Sentence | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [replaceOpen, setReplaceOpen] = useState(false)
 
   const audioService = AudioPlayerService.getInstance()
 
@@ -162,8 +166,8 @@ export default function AudioPlayer({
         </Button>
       </div>
 
-      {/* 标注 / 报错 */}
-      {(showAnnotation || showReport) && (
+      {/* 标注 / 报错 / 替换 */}
+      {(showAnnotation || showReport || showReplace) && (
         <div className="flex items-center gap-2">
           {showAnnotation && (
             <Button
@@ -183,6 +187,18 @@ export default function AudioPlayer({
             >
               <AlertTriangle size={14} />
               {currentSentence?.has_error ? '已报错' : '报错'}
+            </Button>
+          )}
+          {showReplace && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { audioService.stopAudio(); setActionError(null); setReplaceOpen(true) }}
+              disabled={!currentSentence?.id}
+              title="编辑文本并用 TTS 重新生成、替换当前音频"
+            >
+              <Replace size={14} />
+              替换
             </Button>
           )}
         </div>
@@ -232,6 +248,20 @@ export default function AudioPlayer({
         <span>句子 {currentSentenceIndex + 1} / {sentences.length}</span>
         <span>播放次数 {playCount + 1} / {maxPlayCount}</span>
       </div>
+
+      {/* 替换弹窗 */}
+      {replaceOpen && currentSentence?.id != null && (
+        <ReplaceAudioModal
+          open={replaceOpen}
+          sentenceId={currentSentence.id}
+          audioId={audioService.getState().currentAudio?.id ?? null}
+          initialText={currentSentence.text ?? ''}
+          onClose={() => setReplaceOpen(false)}
+          onReplaced={(newText) => {
+            void audioService.applyReplacedCurrentSentence(newText).then(updateCurrentSentence)
+          }}
+        />
+      )}
     </div>
   )
 }

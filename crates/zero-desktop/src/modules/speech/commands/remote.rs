@@ -123,7 +123,7 @@ pub(crate) fn remote_url_from_state(remote_url: &RwLock<String>) -> Option<Strin
     }
 }
 
-fn remote_http_base_from_state(remote_url: &RwLock<String>) -> Option<String> {
+pub(crate) fn remote_http_base_from_state(remote_url: &RwLock<String>) -> Option<String> {
     let ws = remote_url_from_state(remote_url)?;
     let (scheme, rest) = if let Some(r) = ws.strip_prefix("wss://") {
         ("https://", r)

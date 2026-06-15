@@ -1,8 +1,32 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { cn, stripYear } from '../utils';
-import type { Segment } from '../api/tauri-client';
+import type { Sample, SampleLabel, Segment } from '../api/tauri-client';
+import { SpeechAPI } from '../api/tauri-client';
 import { Button } from './ui/Button';
 import { Icon } from './ui/Icon';
+import { Dropdown } from './ui/Dropdown';
+import { Switch } from './ui/Switch';
+
+const LABEL_OPTIONS: { label: string; value: SampleLabel }[] = [
+  { label: '识别错误', value: 'asr_wrong' },
+  { label: '热词纠错', value: 'hotword' },
+  { label: '优化不当', value: 'bad_optimize' },
+  { label: '正常无需过滤', value: 'ok' },
+  { label: '其它', value: 'other' },
+];
+
+const AUDIO_STATUS_TEXT: Record<string, string> = {
+  saved: '音频已存档',
+  expired: '音频已过期',
+  fetch_failed: '音频拉取失败',
+  skipped: '未存档音频',
+};
+
+const HOTWORD_SYNC_TEXT: Record<string, string> = {
+  added: '已加入热词表',
+  exists: '热词已存在',
+  failed: '热词同步失败',
+};
 
 interface SegmentCardProps {
   segment: Segment;
@@ -26,6 +50,16 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   const [copiedZh, setCopiedZh] = useState(false);
   const [copiedEn, setCopiedEn] = useState(false);
   const [copiedSec, setCopiedSec] = useState(false);
+  // 标注面板本会话内状态。
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [label, setLabel] = useState<SampleLabel>('asr_wrong');
+  const [correction, setCorrection] = useState('');
+  const [note, setNote] = useState('');
+  const [syncHotword, setSyncHotword] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [markError, setMarkError] = useState('');
+  const [marked, setMarked] = useState(false);
+  const [markResult, setMarkResult] = useState<Sample | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const maxHeightRef = useRef(0);
   const [minHeight, setMinHeight] = useState<number | undefined>(undefined);
@@ -47,6 +81,56 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
     onCopyChinese(segment.text_secondary);
     setCopiedSec(true);
     setTimeout(() => setCopiedSec(false), 2000);
+  };
+
+  // 打开标注面板：按当前标签预填内容。
+  const openPanel = () => {
+    if (label === 'asr_wrong') {
+      setCorrection(segment.text_raw || '');
+    } else if (label === 'bad_optimize') {
+      setCorrection(segment.text_optimized || '');
+    }
+    setMarkError('');
+    setPanelOpen(true);
+  };
+
+  // 切换标签时按新标签重置预填内容。
+  const handleLabelChange = (value: string) => {
+    const next = value as SampleLabel;
+    setLabel(next);
+    if (next === 'asr_wrong') {
+      setCorrection(segment.text_raw || '');
+    } else if (next === 'bad_optimize') {
+      setCorrection(segment.text_optimized || '');
+    } else if (next === 'hotword') {
+      setCorrection('');
+    }
+  };
+
+  const handleSaveMark = async () => {
+    setSaving(true);
+    setMarkError('');
+    try {
+      const segId = (segment.segment_id ?? segment.id) ?? 0;
+      const result = await SpeechAPI.markSample({
+        segmentId: segId,
+        textRaw: segment.text_raw || '',
+        textOptimized: segment.text_optimized ?? null,
+        textEnglish: segment.text_english ?? null,
+        textSecondary: segment.text_secondary ?? null,
+        label,
+        correction: label === 'ok' ? null : label === 'other' ? null : (correction || null),
+        note: label === 'other' ? (note || null) : null,
+        syncHotword: label === 'hotword' ? syncHotword : false,
+      });
+      setMarkResult(result);
+      setMarked(true);
+      setPanelOpen(false);
+    } catch (err) {
+      setMarkError(typeof err === 'string' ? err : (err as Error)?.message || String(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const showSecondaryRow = showSecondary && !!segment.text_secondary;
@@ -131,6 +215,16 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
               <Icon name={copiedEn ? 'check' : 'languages'} size={12} />
               {copiedEn ? '已复制' : '复制英文'}
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn('h-7 px-2 text-[11px] gap-1.5 transition-colors', marked && 'text-[var(--primary-deep)]')}
+              onClick={() => (panelOpen ? setPanelOpen(false) : openPanel())}
+              title="标注样本"
+            >
+              <Icon name={marked ? 'check' : 'tag'} size={12} />
+              {marked ? '已标注' : '标注'}
+            </Button>
           </div>
         </div>
 
@@ -172,6 +266,90 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
             </p>
           )}
         </div>
+
+        {/* 标注结果小字（保存成功后展示）。 */}
+        {marked && markResult && !panelOpen && (
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--ink-4)]">
+            <span className="px-1.5 py-0.5 rounded bg-[var(--primary-soft)] text-[var(--primary-deep)]">
+              已标注 · {LABEL_OPTIONS.find((o) => o.value === markResult.label)?.label || markResult.label}
+            </span>
+            <span>{AUDIO_STATUS_TEXT[markResult.audio_status] || markResult.audio_status}</span>
+            {markResult.hotword_sync && (
+              <span>{HOTWORD_SYNC_TEXT[markResult.hotword_sync] || markResult.hotword_sync}</span>
+            )}
+          </div>
+        )}
+
+        {/* 行内标注面板（轻量，非模态）。 */}
+        {panelOpen && (
+          <div className="flex flex-col gap-2.5 mt-1 p-3 rounded-[12px] bg-[var(--bg-soft)] border border-[var(--line)]">
+            <Dropdown
+              label="标注类型"
+              options={LABEL_OPTIONS}
+              value={label}
+              onChange={handleLabelChange}
+              className="max-w-[220px]"
+            />
+
+            {label === 'asr_wrong' && (
+              <textarea
+                value={correction}
+                onChange={(e) => setCorrection(e.target.value)}
+                placeholder="音频真实文本（整段 ground-truth）"
+                rows={2}
+                className="w-full px-3 py-2 text-[13px] rounded-lg bg-[var(--bg-card)] border border-[var(--line)] text-[var(--ink-2)] resize-y focus:outline-none focus:border-[var(--primary)]"
+              />
+            )}
+
+            {label === 'bad_optimize' && (
+              <textarea
+                value={correction}
+                onChange={(e) => setCorrection(e.target.value)}
+                placeholder="期望的优化文本"
+                rows={2}
+                className="w-full px-3 py-2 text-[13px] rounded-lg bg-[var(--bg-card)] border border-[var(--line)] text-[var(--ink-2)] resize-y focus:outline-none focus:border-[var(--primary)]"
+              />
+            )}
+
+            {label === 'hotword' && (
+              <div className="flex flex-col gap-2">
+                <input
+                  value={correction}
+                  onChange={(e) => setCorrection(e.target.value)}
+                  placeholder="正确术语，或「错词 → 正确词」"
+                  className="w-full h-9 px-3 text-[13px] rounded-lg bg-[var(--bg-card)] border border-[var(--line)] text-[var(--ink-2)] focus:outline-none focus:border-[var(--primary)]"
+                />
+                <label className="flex items-center gap-2 text-[12px] text-[var(--ink-3)] cursor-pointer">
+                  <Switch checked={syncHotword} onCheckedChange={setSyncHotword} />
+                  同步进热词表
+                </label>
+              </div>
+            )}
+
+            {label === 'other' && (
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="备注（自由文本）"
+                rows={2}
+                className="w-full px-3 py-2 text-[13px] rounded-lg bg-[var(--bg-card)] border border-[var(--line)] text-[var(--ink-2)] resize-y focus:outline-none focus:border-[var(--primary)]"
+              />
+            )}
+
+            {markError && (
+              <p className="text-[11px] text-[var(--danger)]">标注失败: {markError}</p>
+            )}
+
+            <div className="flex items-center gap-2">
+              <Button variant="primary" size="sm" disabled={saving} onClick={handleSaveMark}>
+                {saving ? '保存中...' : '保存标注'}
+              </Button>
+              <Button variant="ghost" size="sm" disabled={saving} onClick={() => setPanelOpen(false)}>
+                取消
+              </Button>
+            </div>
+          </div>
+        )}
 
         {isProcessing && (
           <div className="absolute top-4 right-4">

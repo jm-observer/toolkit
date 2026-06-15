@@ -341,6 +341,27 @@ export class AudioPlayerService {
     this._triggerEvent('onToggleReportError', { sentenceId: s.id, hasError: newStatus, sentence: s })
   }
 
+  /**
+   * 替换成功后刷新当前句子：更新文本 + 让当前音频重新拉取（清本地缓存 + 给音频对象挂带
+   * 时间戳的网络 URL，击穿 webview/HTTP 缓存，保证下次播放到新音频）。正在播放则先停。
+   */
+  async applyReplacedCurrentSentence(text: string): Promise<void> {
+    const s = this._getCurrentSentence()
+    const a = this._getCurrentAudio()
+    if (!s) return
+    if (this.isPlaying) this.stopAudio()
+    this.sentences[this.currentSentenceIndex].text = text
+    if (a) {
+      try { await this.fileCacheManager.removeCache(`${s.id}_${a.id}`) } catch { /* ignore */ }
+      // 带时间戳网络 URL：_buildAudioUrl 命中 http 分支 → 绕过文件缓存、击穿 HTTP 缓存。
+      a.url = `${this.envConfig.apiBaseUrl}/audio/${a.id}?v=${Date.now()}`
+    }
+    this._triggerEvent('onSentenceChange', {
+      sentences: this.sentences,
+      currentSentenceIndex: this.currentSentenceIndex
+    })
+  }
+
   setStopMode(stopMode: 'halfHour' | 'roundEnd' | null): void {
     this.stopMode = stopMode
     if (stopMode === 'halfHour') {

@@ -42,8 +42,11 @@ fn clean_base_url() -> Option<String> {
 }
 
 fn clean_unavailable() -> Response {
+    // `X-Clean-Proxy: unconfigured` 让桌面端区分「代理未配置 503」与「上游 busy 503」
+    // （上游 audio-cleanup 队列满也回 503，但不带此头）。见设计 §3.3/§6。
     (
         StatusCode::SERVICE_UNAVAILABLE,
+        [("X-Clean-Proxy", "unconfigured")],
         Json(json!({
             "error": "audio-cleanup upstream not configured",
             "hint": "set CLEAN_BASE_URL env (e.g. http://127.0.0.1:8097)",
