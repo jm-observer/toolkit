@@ -2,6 +2,7 @@
 members = [
     "crates/github-commit-info",
     "crates/hf-watcher",
+    "crates/agent-session",
     "crates/asr-client",
     "crates/audio-clean-client",
     "crates/douyin",
