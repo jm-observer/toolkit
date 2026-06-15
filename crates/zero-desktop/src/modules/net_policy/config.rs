@@ -393,6 +393,25 @@ pub fn killswitch_state_path(workspace: &Path) -> PathBuf {
     net_policy_dir(workspace).join("killswitch-state.json")
 }
 
+/// 从已生成的 mihomo `config.yaml` 解析 external-controller secret（P1：应用重启后恢复鉴权口令，
+/// 以便管理/急停仍在运行的旧 mihomo 实例）。secret 本就随配置写盘（`secret: "..."`），解析它
+/// **不增加新的磁盘暴露面**——这也是 review 建议的"从生成的 config 解析恢复"路径。
+/// 返回 `None` 表示无配置 / 未含非空 secret。
+pub fn read_generated_secret(workspace: &Path) -> Option<String> {
+    let cfg = std::fs::read_to_string(mihomo_config_path(workspace)).ok()?;
+    for line in cfg.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("secret:") {
+            let v = rest.trim().trim_matches('"').trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+            return None;
+        }
+    }
+    None
+}
+
 pub fn load_settings(workspace: &Path) -> NetPolicySettings {
     let p = settings_path(workspace);
     std::fs::read_to_string(&p)

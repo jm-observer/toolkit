@@ -48,7 +48,9 @@ interface Status {
   killswitch_enabled: boolean
   applied: boolean
   mihomo_running: boolean
+  tun_ready: boolean
   protected: boolean
+  protection_validated: boolean
   firewall: FirewallStatus | null
 }
 
@@ -232,13 +234,30 @@ export default function NetPolicyPage() {
           <div className="space-y-2">
             <div className="flex flex-wrap gap-4">
               <Light on={status.wg_configured} label="WG 已配置" />
-              <Light on={status.mihomo_running} label="mihomo 运行" />
-              <Light on={status.protected ? true : status.applied ? 'warn' : false} label={status.protected ? '受保护 (fail-closed)' : status.applied ? '不受保护预览' : '未应用'} />
+              <Light
+                on={status.mihomo_running ? (status.tun_ready ? true : 'warn') : false}
+                label={status.mihomo_running ? (status.tun_ready ? 'mihomo 运行 (TUN 起栈)' : 'mihomo 运行·TUN 未起栈') : 'mihomo 运行'}
+              />
+              <Light
+                on={status.protected ? (status.protection_validated ? true : 'warn') : status.applied ? 'warn' : false}
+                label={status.protected ? (status.protection_validated ? '受保护 (fail-closed)' : '实验保护 (待真机验证)') : status.applied ? (status.firewall?.active ? '已阻断·隧道未连通' : '不受保护预览') : '未应用'}
+              />
               <Light on={status.killswitch_enabled ? (status.firewall?.active ? true : 'warn') : false} label={`kill-switch${status.firewall ? ` (${status.firewall.default_outbound}/${status.firewall.rule_count}条)` : ''}`} />
             </div>
             {status.applied && !status.protected && (
+              status.firewall?.active ? (
+                <div className="rounded-md bg-amber-100 px-3 py-1.5 text-xs text-amber-800">
+                  ⚠ <b>已阻断但隧道未连通</b>：kill-switch 生效（fail-closed 成立，未知流量不会泄漏），但 mihomo 控制器 / TUN(Meta) 未就绪，当前<b>无法联网</b>。请检查 WG 配置 / mihomo 引擎，或重新「应用」。出口/DNS 是否真正打通用「一键验证」确认。
+                </div>
+              ) : (
+                <div className="rounded-md bg-amber-100 px-3 py-1.5 text-xs text-amber-800">
+                  ⚠ 当前为<b>不受保护预览</b>模式：mihomo 在跑但防火墙 kill-switch 未生效。mihomo/TUN/WG 任一异常时未知流量可能泄漏到本地出口。生产请开启 kill-switch。
+                </div>
+              )
+            )}
+            {status.protected && !status.protection_validated && (
               <div className="rounded-md bg-amber-100 px-3 py-1.5 text-xs text-amber-800">
-                ⚠ 当前为<b>不受保护预览</b>模式：mihomo 在跑但防火墙 kill-switch 未生效。mihomo/TUN/WG 任一异常时未知流量可能泄漏到本地出口。生产请开启 kill-switch。
+                ⚠ <b>实验保护</b>：kill-switch 已生效，但当前防火墙白名单模型（Program=mihomo.exe）尚未在新模型下真机验证 fail-closed。进生产前需通过 VP-08/09/10 复测。
               </div>
             )}
           </div>

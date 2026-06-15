@@ -33,7 +33,13 @@ struct Runtime {
     /// 是否已 apply（mihomo + 可选 kill-switch）。
     applied: bool,
     mihomo_pid: Option<u32>,
+    /// 本次 apply 生成的 external-controller secret（鉴权 mihomo API，P0-1）。
+    secret: Option<String>,
 }
+
+/// 新防火墙白名单模型（`Program=mihomo.exe`，§0.10.1）是否已在新模型下重跑 VP-08/09/10 通过。
+/// 在重新真机验证通过前为 `false`——`protected` 仅算"实验保护"，前端须如实标注（P0-2）。
+const FIREWALL_MODEL_VALIDATED: bool = false;
 
 impl NetPolicyState {
     pub fn new(workspace: PathBuf) -> Self {
@@ -45,9 +51,26 @@ impl NetPolicyState {
 }
 
 /// 初始化：确保 workspace 子目录存在。首版**不自动 apply**（安全：避免开机即改全局防火墙）。
+///
+/// **P1（secret 恢复）**：上次 apply 的 mihomo + kill-switch 可能在应用重启后仍存活（防火墙规则
+/// 跨重启持久、mihomo 若注册为服务/计划任务也可能仍在）。此时从生成的 `config.yaml` 解析出
+/// controller secret，并在确认 mihomo 仍可鉴权访问时恢复运行态——否则重启后 `secret` 丢失会导致
+/// `get_status`/`emergency_stop` 用空 secret 鉴权失败、无法管理或停掉旧实例（防火墙被卡死）。
 pub fn setup(_app: &tauri::AppHandle, state: Arc<NetPolicyState>) -> Result<()> {
     let dir = config::net_policy_dir(&state.workspace);
     std::fs::create_dir_all(dir.join("generated")).ok();
+    if win::is_windows() {
+        if let Some(secret) = config::read_generated_secret(&state.workspace) {
+            // 仅在旧实例确实仍在（且 secret 有效可鉴权）时恢复，避免把陈旧配置误判为已应用。
+            if engine::running(&secret) {
+                let mut rt = state.rt.lock().unwrap();
+                rt.applied = true;
+                rt.secret = Some(secret);
+                // pid 跨进程重启不可知；graceful_stop 在 pid=None 时回退按二进制名停。
+                rt.mihomo_pid = None;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -60,7 +83,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 pub fn gen_artifacts(workspace: &std::path::Path) -> Result<(String, String)> {
     let settings = config::load_settings(workspace);
     let rules = config::load_rules(workspace);
-    let cfg = engine::generate_config(&settings, &rules);
+    let cfg = engine::generate_config(&settings, &rules, "<runtime-secret>");
     let fw =
         firewall::build_apply_script(workspace, &settings, &rules, &engine::mihomo_bin(workspace))?;
     Ok((cfg, fw))
@@ -75,9 +98,15 @@ pub struct NetPolicyStatus {
     pub killswitch_enabled: bool,
     pub applied: bool,
     pub mihomo_running: bool,
-    /// 是否处于"受保护"状态：kill-switch 启用且防火墙默认出站已 Block。
-    /// 若 false 且 applied=true，则为**不受保护预览**模式（P0-1，前端须明确标注）。
+    /// mihomo TUN（Meta 适配器）是否已起栈并 Up（P2）。controller 可达但 TUN 未起栈时为 false——
+    /// 用于区分"kill-switch 已阻断但隧道未连通"（fail-closed 仍成立，但应用无法联网）与真正连通。
+    /// 真实出口可达性 / DNS 劫持等更重的探测放在按需的 `net_policy_verify`（避免每次轮询打网络）。
+    pub tun_ready: bool,
+    /// 是否处于"受保护"状态：kill-switch 启用 + 防火墙默认出站已 Block + mihomo 在跑 **且 TUN 已起栈**。
+    /// 若 false 且 applied=true，前端据 firewall.active 区分"不受保护预览"与"已阻断但未连通"（P0-1/P2）。
     pub protected: bool,
+    /// 当前防火墙白名单模型是否已真机验证（P0-2）。false=实验保护，不能宣称 fail-closed。
+    pub protection_validated: bool,
     pub firewall: Option<firewall::FirewallStatus>,
 }
 
@@ -85,26 +114,31 @@ pub struct NetPolicyStatus {
 pub fn net_policy_get_status(state: State<'_, AppState>) -> Result<NetPolicyStatus, String> {
     let np = &state.net_policy;
     let settings = config::load_settings(&np.workspace);
-    let (applied, _) = {
+    let (applied, secret) = {
         let rt = np.rt.lock().unwrap();
-        (rt.applied, rt.mihomo_pid)
+        (rt.applied, rt.secret.clone())
     };
     let firewall = if win::is_windows() {
         firewall::status().ok()
     } else {
         None
     };
-    let mihomo_running = win::is_windows() && engine::running();
+    let mihomo_running = win::is_windows() && engine::running(secret.as_deref().unwrap_or(""));
+    // TUN 起栈检查只在 controller 可达时才有意义（也省掉一次无谓的 PS 调用）。
+    let tun_ready = mihomo_running && engine::tun_up();
     let protected = settings.killswitch_enabled
         && firewall.as_ref().map(|f| f.active).unwrap_or(false)
-        && mihomo_running;
+        && mihomo_running
+        && tun_ready;
     Ok(NetPolicyStatus {
         platform_supported: win::is_windows(),
         wg_configured: engine::validate(&settings).is_ok(),
         killswitch_enabled: settings.killswitch_enabled,
         applied,
         mihomo_running,
+        tun_ready,
         protected,
+        protection_validated: FIREWALL_MODEL_VALIDATED,
         firewall,
     })
 }
@@ -182,8 +216,11 @@ pub async fn net_policy_list_process_candidates(
 // ============ 应用 / 急停 ============
 
 /// 应用策略：校验 → 生成配置 → 启动 mihomo → 应用 kill-switch（默认开启）。
-/// **事务化（P0-2）**：任一步失败回滚已起的 mihomo + 已改的防火墙，不留半应用状态。
-/// kill-switch 关闭时为"不受保护预览"模式，status.protected=false（P0-1）。
+/// **事务化（P0-2）**：任一步失败按安全顺序回滚（先停引擎再撤防火墙），不留半应用状态。
+/// **受控 reapply（P0-1）**：已应用过则先用旧 secret/pid 优雅停旧引擎再起新引擎，旧 kill-switch
+/// 在交换窗口内保持生效（fail-closed 不破），杜绝"重复 apply → 旧 mihomo 仍在跑/占端口、新引擎
+/// 起不来、防火墙却被撤掉"。kill-switch 关闭时为"不受保护预览"，status.protected=false（P0-1）。
+/// `rt` 在每个中间/失败点都被更新为与机器实际状态一致（避免重启/急停拿到陈旧 pid/secret）。
 #[tauri::command]
 pub async fn net_policy_apply(state: State<'_, AppState>) -> Result<NetPolicyStatus, String> {
     if !win::is_windows() {
@@ -199,35 +236,100 @@ pub async fn net_policy_apply(state: State<'_, AppState>) -> Result<NetPolicySta
     rules.validate().map_err(err)?;
     let killswitch = settings.killswitch_enabled;
     let mihomo_bin = engine::mihomo_bin(&ws);
+    let secret = engine::gen_secret(); // P0-1：每次 apply 随机 controller secret
 
-    let pid = tokio::task::spawn_blocking(move || -> Result<u32> {
-        engine::write_config(&ws, &settings, &rules).context("write mihomo config")?;
-        let pid = engine::start(&ws).context("start mihomo")?;
-        std::thread::sleep(std::time::Duration::from_secs(6));
-        // 验证 mihomo 就绪；没起来 → 回滚。
-        if !engine::running() {
-            let _ = engine::graceful_stop(Some(pid));
-            bail!("mihomo 启动后外部控制器不可达，已回滚（检查 WG 配置 / 管理员权限）");
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        // 当前已应用状态快照——受控 reapply 的依据（P0-1）。
+        let (was_applied, old_pid, old_secret) = {
+            let rt = np.rt.lock().unwrap();
+            (
+                rt.applied,
+                rt.mihomo_pid,
+                rt.secret.clone().unwrap_or_default(),
+            )
+        };
+
+        // 受控 reapply：先用旧 secret/pid 优雅停旧引擎。旧 kill-switch 此刻仍生效 → 交换窗口
+        // fail-closed 不破。停旧失败则中止（旧实例 + 旧 kill-switch 保留，仍受保护），不动配置/不起新引擎。
+        if was_applied {
+            engine::graceful_stop(old_pid, &old_secret).context(
+                "受控 reapply：优雅停旧 mihomo 失败（保留原 kill-switch 与旧实例，未改配置）",
+            )?;
+            // 旧引擎已停；kill-switch 仍在（applied 维持 true）。清掉失效的旧 pid/secret。
+            let mut rt = np.rt.lock().unwrap();
+            rt.mihomo_pid = None;
+            rt.secret = None;
         }
-        if killswitch {
-            if let Err(e) = firewall::apply(&ws, &settings, &rules, &mihomo_bin) {
-                // 防火墙失败 → 回滚：撤防火墙快照 + 优雅停 mihomo，避免半应用 + 无保护。
+
+        // 安全回滚（P0-2，与 emergency_stop 同序）：有新 pid 时**先优雅停引擎**，确认停下后**才**
+        // 撤防火墙；停不掉则**保留防火墙**维持 fail-closed，并把 rt 记成"仍受保护"以便后续 emergency_stop。
+        let rollback = |new_pid: Option<u32>| -> Result<()> {
+            if let Some(p) = new_pid {
+                if let Err(e) = engine::graceful_stop(Some(p), &secret) {
+                    let mut rt = np.rt.lock().unwrap();
+                    rt.applied = true;
+                    rt.mihomo_pid = Some(p);
+                    rt.secret = Some(secret.clone());
+                    return Err(e)
+                        .context("回滚：停 mihomo 失败，kill-switch 保持生效以维持 fail-closed");
+                }
+            }
+            if killswitch {
                 let _ = firewall::remove(&ws);
-                let _ = engine::graceful_stop(Some(pid));
-                return Err(e.context("应用 kill-switch 失败，已回滚 mihomo + 防火墙"));
+            }
+            let mut rt = np.rt.lock().unwrap();
+            rt.applied = false;
+            rt.mihomo_pid = None;
+            rt.secret = None;
+            Ok(())
+        };
+
+        // 阶段 A（P1-2）：先建 fail-closed（不依赖 Meta 的白名单 + 默认 Block），再起 mihomo。
+        if killswitch {
+            if let Err(e) = firewall::apply_base(&ws, &settings, &mihomo_bin) {
+                rollback(None)?; // 无新引擎在跑，仅撤可能残留的 kill-switch 回基线。
+                return Err(e.context("apply kill-switch（阶段A）"));
             }
         }
-        Ok(pid)
+        if let Err(e) = engine::write_config(&ws, &settings, &rules, &secret) {
+            rollback(None)?;
+            return Err(e.context("write mihomo config"));
+        }
+        let pid = match engine::start(&ws) {
+            Ok(p) => p,
+            Err(e) => {
+                rollback(None)?;
+                return Err(e.context("start mihomo"));
+            }
+        };
+        // 新引擎已起：立刻把 pid/secret 落进 rt，确保即便后续失败，回滚/急停也能按 pid 安全停。
+        {
+            let mut rt = np.rt.lock().unwrap();
+            rt.mihomo_pid = Some(pid);
+            rt.secret = Some(secret.clone());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        if !engine::running(&secret) {
+            rollback(Some(pid))?;
+            bail!("mihomo 启动后外部控制器不可达，已回滚（检查 WG 配置 / 管理员权限）");
+        }
+        // 阶段 B：Meta 已出现，补 KS-TUN 放行应用流量进隧道。
+        if killswitch {
+            if let Err(e) = firewall::apply_tun(&ws) {
+                rollback(Some(pid))?;
+                return Err(e.context("apply kill-switch（阶段B KS-TUN）"));
+            }
+        }
+        let mut rt = np.rt.lock().unwrap();
+        rt.applied = true;
+        rt.mihomo_pid = Some(pid);
+        rt.secret = Some(secret.clone());
+        Ok(())
     })
     .await
     .map_err(err)?
     .map_err(err)?;
 
-    {
-        let mut rt = np.rt.lock().unwrap();
-        rt.applied = true;
-        rt.mihomo_pid = Some(pid);
-    }
     net_policy_get_status(state)
 }
 
@@ -243,10 +345,14 @@ pub async fn net_policy_emergency_stop(
     }
     let np = state.net_policy.clone();
     let ws = np.workspace.clone();
-    let pid = np.rt.lock().unwrap().mihomo_pid;
+    let (pid, secret) = {
+        let rt = np.rt.lock().unwrap();
+        (rt.mihomo_pid, rt.secret.clone().unwrap_or_default())
+    };
     tokio::task::spawn_blocking(move || -> Result<()> {
-        // 1) 先优雅停引擎（按 pid，P2-2）；失败则不撤防火墙，保持 fail-closed。
-        engine::graceful_stop(pid)
+        // 1) 先优雅停引擎（关 TUN + 确认 Meta 拆除后才杀，按 pid，P1-1/P2-2）；
+        //    失败则不撤防火墙，保持 fail-closed。
+        engine::graceful_stop(pid, &secret)
             .context("优雅停 mihomo 失败（防火墙保持生效以维持 fail-closed）")?;
         // 2) 引擎已停、路由已清，再撤防火墙恢复联网。
         firewall::remove(&ws).context("移除 kill-switch")?;
@@ -260,6 +366,7 @@ pub async fn net_policy_emergency_stop(
         let mut rt = np.rt.lock().unwrap();
         rt.applied = false;
         rt.mihomo_pid = None;
+        rt.secret = None;
     }
     net_policy_get_status(state)
 }
@@ -268,11 +375,18 @@ pub async fn net_policy_emergency_stop(
 
 #[tauri::command]
 pub async fn net_policy_verify(state: State<'_, AppState>) -> Result<verify::VerifyReport, String> {
-    let _ = &state; // 验证不依赖具体 state，但保持签名一致便于前端调用。
     if !win::is_windows() {
         return Err("net-policy 仅支持 Windows".into());
     }
-    tokio::task::spawn_blocking(verify::run)
+    let secret = state
+        .net_policy
+        .rt
+        .lock()
+        .unwrap()
+        .secret
+        .clone()
+        .unwrap_or_default();
+    tokio::task::spawn_blocking(move || verify::run(&secret))
         .await
         .map_err(err)?
         .map_err(err)

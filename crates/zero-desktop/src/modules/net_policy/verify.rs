@@ -33,9 +33,9 @@ fn case(id: &str, name: &str, status: &str, observed: String) -> VerifyCase {
     }
 }
 
-/// 执行轻量验证用例。
-pub fn run() -> Result<VerifyReport> {
-    let mihomo_running = super::engine::running();
+/// 执行轻量验证用例。`secret` 用于鉴权查询 mihomo 外部控制器。
+pub fn run(secret: &str) -> Result<VerifyReport> {
+    let mihomo_running = super::engine::running(secret);
     let mut cases = Vec::new();
 
     // VP-01 轻量版：当前公网出口 IP（期望为 WG 海外出口）。
