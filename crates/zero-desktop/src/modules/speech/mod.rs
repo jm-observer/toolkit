@@ -3,6 +3,7 @@ pub mod db;
 pub mod legacy;
 pub mod llm_settings;
 pub mod lock_utils;
+pub mod paste_watch;
 pub mod settings;
 
 use anyhow::{Context, Result};
@@ -69,6 +70,9 @@ impl SpeechState {
 
 /// 初始化 Speech 模块：注册托盘（仅 Show + Quit）、完成 DB/状态准备。
 pub fn setup(app: &tauri::AppHandle, _state: Arc<SpeechState>) -> Result<()> {
+    // 装全局 Ctrl+V 观察器：粘贴后重置自动复制的拼接累加器，避免「每段即时粘贴」时重复粘贴前一段。
+    paste_watch::start_paste_watcher();
+
     // Register tray icon. Per §4.2.1 the menu only has "Show window" and "Quit".
     // The "quick start recording" item is in legacy/mod.rs.
     if let Some(icon) = app.default_window_icon().cloned() {
