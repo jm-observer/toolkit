@@ -506,6 +506,10 @@ async fn run_one_connection(
                         )
                     };
                     if copy && !text.is_empty() {
+                        // 用户上次粘贴后重新开始累加，避免重复粘贴已粘走的前一段。
+                        if crate::modules::speech::paste_watch::take_paste_signal() {
+                            copy_acc = None;
+                        }
                         let merged = next_clipboard_text(
                             &mut copy_acc,
                             &text,
@@ -551,6 +555,10 @@ async fn run_one_connection(
                         )
                     };
                     if copy && !text.is_empty() {
+                        // 用户上次粘贴后重新开始累加，避免重复粘贴已粘走的前一段。
+                        if crate::modules::speech::paste_watch::take_paste_signal() {
+                            copy_acc = None;
+                        }
                         let merged = next_clipboard_text(
                             &mut copy_acc,
                             &text,
