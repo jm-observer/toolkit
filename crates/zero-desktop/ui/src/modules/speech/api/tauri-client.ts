@@ -76,6 +76,40 @@ export interface SegmentUpdatedEvent {
   created_at: string;
 }
 
+// 音频清洗 API/类型已迁至 modules/audio-clean/api/clean-client.ts（CleanAPI）。
+
+export type SampleLabel = 'asr_wrong' | 'hotword' | 'bad_optimize' | 'ok' | 'other';
+
+export interface Sample {
+  id: number;
+  segment_id: number;
+  session_id?: string | null;
+  label: SampleLabel | string;
+  text_raw: string;
+  text_optimized?: string | null;
+  text_english?: string | null;
+  text_secondary?: string | null;
+  correction?: string | null;
+  note?: string | null;
+  audio_path?: string | null;
+  audio_status: 'saved' | 'expired' | 'fetch_failed' | 'skipped' | string;
+  hotword_sync?: 'added' | 'exists' | 'failed' | null;
+  marked_at: string;
+}
+
+export interface MarkSampleArgs extends Record<string, unknown> {
+  segmentId: number;
+  sessionId?: string | null;
+  textRaw: string;
+  textOptimized?: string | null;
+  textEnglish?: string | null;
+  textSecondary?: string | null;
+  label: SampleLabel;
+  correction?: string | null;
+  note?: string | null;
+  syncHotword?: boolean;
+}
+
 // All commands prefixed with speech_ to match zero-desktop backend naming.
 export const SpeechAPI = {
   startRecording: () => invoke('speech_start_recording'),
@@ -94,4 +128,8 @@ export const SpeechAPI = {
   getSettings: () => invoke<AppSettings>('speech_get_settings'),
   applySettings: (newSettings: AppSettings) =>
     invoke('speech_apply_settings', { newSettings }),
+  markSample: (args: MarkSampleArgs) => invoke<Sample>('speech_mark_sample', args),
+  listSamples: () => invoke<Sample[]>('speech_list_samples'),
+  exportSamples: () => invoke<string>('speech_export_samples'),
+  openInFolder: (path: string) => invoke('speech_open_in_folder', { path }),
 };

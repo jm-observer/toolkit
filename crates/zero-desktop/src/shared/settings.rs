@@ -41,6 +41,44 @@ impl AppSettings {
         let base = self.g10_base.trim_end_matches('/');
         Some(format!("{base}/api/browser/cookie"))
     }
+
+    /// 音频清洗代理端点 `{g10_base}/api/web/audio/clean`（与 TTS/cookie 同源，复用全局
+    /// g10_base）。未配置 g10_base 时返回 None。
+    pub fn clean_endpoint(&self) -> Option<String> {
+        if !self.is_configured() {
+            return None;
+        }
+        let base = self.g10_base.trim_end_matches('/');
+        Some(format!("{base}/api/web/audio/clean"))
+    }
+
+    /// TTS 代理端点 `{g10_base}/api/web/audio/tts`（toolkit-server 代理 → CosyVoice2）。
+    pub fn tts_endpoint(&self) -> Option<String> {
+        if !self.is_configured() {
+            return None;
+        }
+        let base = self.g10_base.trim_end_matches('/');
+        Some(format!("{base}/api/web/audio/tts"))
+    }
+
+    /// 音色库端点 `{g10_base}/api/web/audio/voices`。
+    pub fn voices_endpoint(&self) -> Option<String> {
+        if !self.is_configured() {
+            return None;
+        }
+        let base = self.g10_base.trim_end_matches('/');
+        Some(format!("{base}/api/web/audio/voices"))
+    }
+
+    /// 句子整体替换端点 `{g10_base}/api/sentence/replace-audio`（english 后端，非 toolkit-server；
+    /// 走 `/api` 前缀以匹配反代「`/api/*`→english、`/api/web/*`→toolkit-server」的路由规则）。
+    pub fn replace_sentence_audio_endpoint(&self) -> Option<String> {
+        if !self.is_configured() {
+            return None;
+        }
+        let base = self.g10_base.trim_end_matches('/');
+        Some(format!("{base}/api/sentence/replace-audio"))
+    }
 }
 
 pub fn app_settings_path(workspace: &Path) -> PathBuf {

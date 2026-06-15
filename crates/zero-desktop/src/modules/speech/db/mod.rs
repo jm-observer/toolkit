@@ -63,6 +63,81 @@ impl SpeechDatabase {
         .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
         Ok(result)
     }
+
+    /// 插入一条标注样本，返回自增 id。
+    pub async fn insert_sample(&self, new: repository::NewSample) -> Result<i64> {
+        let conn = Arc::clone(&self.conn);
+        let id = tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+            repository::insert_sample(&guard, &new)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+        Ok(id)
+    }
+
+    /// 更新样本音频落盘结果。
+    pub async fn update_sample_audio(
+        &self,
+        id: i64,
+        audio_path: Option<String>,
+        audio_status: String,
+    ) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+            repository::update_sample_audio(&guard, id, audio_path.as_deref(), &audio_status)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+        Ok(())
+    }
+
+    /// 更新样本热词同步结果。
+    pub async fn update_sample_hotword_sync(&self, id: i64, sync: String) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+            repository::update_sample_hotword_sync(&guard, id, &sync)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+        Ok(())
+    }
+
+    /// 读取单条样本。
+    pub async fn get_sample(&self, id: i64) -> Result<Option<repository::SampleRow>> {
+        let conn = Arc::clone(&self.conn);
+        let row = tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+            repository::get_sample(&guard, id)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+        Ok(row)
+    }
+
+    /// 列出全部样本（marked_at 倒序）。
+    pub async fn list_samples(&self) -> Result<Vec<repository::SampleRow>> {
+        let conn = Arc::clone(&self.conn);
+        let rows = tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+            repository::list_samples(&guard)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+        Ok(rows)
+    }
 }
 
 fn now_str() -> String {

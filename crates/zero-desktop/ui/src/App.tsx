@@ -3,6 +3,7 @@ import ShellLayout from "./shared/ShellLayout";
 import EnglishAnnotated from "./modules/english/EnglishAnnotated";
 import EnglishAll from "./modules/english/EnglishAll";
 import SpeechPage from "./modules/speech/SpeechPage";
+import AudioCleanPage from "./modules/audio-clean/AudioCleanPage";
 import CookiePage from "./modules/cookie/CookiePage";
 import NetPolicyPage from "./modules/net-policy/NetPolicyPage";
 import SettingsPage from "./modules/settings/SettingsPage";
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="english/annotated" element={<EnglishAnnotated />} />
           <Route path="english/all" element={<EnglishAll />} />
           <Route path="speech" element={<SpeechPage />} />
+          <Route path="audio-clean" element={<AudioCleanPage />} />
           <Route path="cookie" element={<CookiePage />} />
           <Route path="net-policy" element={<NetPolicyPage />} />
           <Route path="settings" element={<SettingsPage />} />

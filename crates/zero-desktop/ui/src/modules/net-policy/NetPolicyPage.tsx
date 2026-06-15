@@ -1,76 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
-import { ShieldCheck, RefreshCw, Plus, Trash2, Play, OctagonX, FlaskConical, Upload } from 'lucide-react'
-
-// ── 与后端 net_policy 命令对齐的类型 ───────────────────────────────────────────
-
-type Route = 'direct' | 'wg'
-type RuleKind = 'process-path' | 'process-name' | 'domain-suffix' | 'ip-cidr'
-
-interface Rule {
-  kind: RuleKind
-  value: string
-  route: Route
-}
-
-interface RuleSet {
-  rules: Rule[]
-  groups: unknown[]
-}
-
-interface WgConfig {
-  server: string
-  port: number
-  ip: string
-  private_key: string
-  public_key: string
-  pre_shared_key: string
-  mtu: number
-}
-
-interface Settings {
-  wg: WgConfig
-  dns_bootstrap: string[]
-  lan_ranges: string[]
-  killswitch_enabled: boolean
-  block_ipv6: boolean
-}
-
-interface FirewallStatus {
-  default_outbound: string
-  rule_count: number
-  active: boolean
-}
-
-interface Status {
-  platform_supported: boolean
-  wg_configured: boolean
-  killswitch_enabled: boolean
-  applied: boolean
-  mihomo_running: boolean
-  tun_ready: boolean
-  protected: boolean
-  protection_validated: boolean
-  firewall: FirewallStatus | null
-}
-
-interface ProcessCandidate {
-  pid: number
-  name: string
-  path: string
-  remotes: string[]
-}
-
-interface VerifyCase {
-  id: string
-  name: string
-  status: string
-  observed: string
-}
-interface VerifyReport {
-  mihomo_running: boolean
-  cases: VerifyCase[]
-}
+import { ShieldCheck, RefreshCw, Plus, Trash2, OctagonX, Upload } from 'lucide-react'
+import {
+  NetPolicyAPI,
+  type Status,
+  type Settings,
+  type RuleSet,
+  type Rule,
+  type RuleKind,
+  type Route,
+  type ProcessCandidate,
+  type VerifyReport,
+  type ConnectionsSnapshot,
+} from './api/tauri-client'
+import { ProtectionBanner } from './components/ProtectionBanner'
+import { FlowTopology } from './components/FlowTopology'
+import { ApplyStepper } from './components/ApplyStepper'
+import { VerifyMatrix } from './components/VerifyMatrix'
 
 const KIND_LABELS: Record<RuleKind, string> = {
   'process-path': '程序路径',
@@ -79,7 +24,17 @@ const KIND_LABELS: Record<RuleKind, string> = {
   'ip-cidr': 'IP/CIDR',
 }
 
-// ── 小组件 ────────────────────────────────────────────────────────────────────
+const EMPTY_CONNS: ConnectionsSnapshot = {
+  available: false,
+  total: 0,
+  wg_count: 0,
+  direct_count: 0,
+  other_count: 0,
+  by_process: {},
+  connections: [],
+}
+
+// ── 小组件（保留原 Panel / btn） ──────────────────────────────────────────────
 
 function Panel({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
@@ -93,16 +48,6 @@ function Panel({ title, children, right }: { title: string; children: React.Reac
   )
 }
 
-function Light({ on, label }: { on: boolean | 'warn'; label: string }) {
-  const cls = on === 'warn' ? 'bg-yellow-400' : on ? 'bg-green-500' : 'bg-gray-400'
-  return (
-    <span className="flex items-center gap-1.5 text-xs">
-      <span className={`inline-block h-2 w-2 rounded-full ${cls}`} />
-      {label}
-    </span>
-  )
-}
-
 function btn(variant: 'primary' | 'danger' | 'ghost' = 'ghost') {
   const base = 'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors disabled:opacity-50'
   if (variant === 'primary') return `${base} bg-blue-600 text-white hover:bg-blue-700`
@@ -110,21 +55,21 @@ function btn(variant: 'primary' | 'danger' | 'ghost' = 'ghost') {
   return `${base} border border-gray-300 hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-800`
 }
 
-// ── 主页面 ────────────────────────────────────────────────────────────────────
+// ── 主页面（编排） ────────────────────────────────────────────────────────────
 
 export default function NetPolicyPage() {
   const [status, setStatus] = useState<Status | null>(null)
+  const [conns, setConns] = useState<ConnectionsSnapshot>(EMPTY_CONNS)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [rules, setRules] = useState<RuleSet>({ rules: [], groups: [] })
   const [candidates, setCandidates] = useState<ProcessCandidate[]>([])
   const [verify, setVerify] = useState<VerifyReport | null>(null)
+  const [exitIp, setExitIp] = useState<string | null>(null)
+  const [exitIpAt, setExitIpAt] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
 
-  // 新规则表单
   const [newRule, setNewRule] = useState<Rule>({ kind: 'process-name', value: '', route: 'direct' })
-
-  // 导入 WireGuard .conf 用的隐藏 file input
   const wgFileRef = useRef<HTMLInputElement>(null)
 
   const flash = (kind: 'ok' | 'err', text: string) => {
@@ -132,26 +77,28 @@ export default function NetPolicyPage() {
     setTimeout(() => setMsg(null), 5000)
   }
 
-  // 读取用户选择的 wg-quick .conf，交后端解析后合并进当前设置（不直接保存，待用户确认）。
-  const importWgConf = useCallback(async (file: File) => {
+  // 快轮询数据（便宜的本地查询）：status + connections。出口 IP / DNS 等重探测不在此。
+  const pollFast = useCallback(async () => {
     try {
-      const content = await file.text()
-      const wg = await invoke<WgConfig>('net_policy_parse_wg_conf', { content })
-      setSettings(prev => (prev ? { ...prev, wg } : prev))
-      flash('ok', '已导入 WireGuard 配置，请检查各字段后点「保存」')
-    } catch (e) {
-      flash('err', `导入失败: ${String(e)}`)
+      const [s, c] = await Promise.all([NetPolicyAPI.getStatus(), NetPolicyAPI.getConnections()])
+      setStatus(s)
+      setConns(c)
+    } catch {
+      // 轮询失败不弹 toast（避免刷屏）；保留上次值。
     }
   }, [])
 
+  // 完整加载（含 settings / rules，动作后用）。
   const refresh = useCallback(async () => {
     try {
-      const [s, st, r] = await Promise.all([
-        invoke<Status>('net_policy_get_status'),
-        invoke<Settings>('net_policy_get_settings'),
-        invoke<RuleSet>('net_policy_list_rules'),
+      const [s, c, st, r] = await Promise.all([
+        NetPolicyAPI.getStatus(),
+        NetPolicyAPI.getConnections(),
+        NetPolicyAPI.getSettings(),
+        NetPolicyAPI.listRules(),
       ])
       setStatus(s)
+      setConns(c)
       setSettings(st)
       setRules(r)
     } catch (e) {
@@ -160,6 +107,23 @@ export default function NetPolicyPage() {
   }, [])
 
   useEffect(() => { void refresh() }, [refresh])
+
+  // 3s 快轮询：仅 status + connections，组件卸载时清理。
+  useEffect(() => {
+    const id = window.setInterval(() => { void pollFast() }, 3000)
+    return () => window.clearInterval(id)
+  }, [pollFast])
+
+  const importWgConf = useCallback(async (file: File) => {
+    try {
+      const content = await file.text()
+      const wg = await NetPolicyAPI.parseWgConf(content)
+      setSettings(prev => (prev ? { ...prev, wg } : prev))
+      flash('ok', '已导入 WireGuard 配置，请检查各字段后点「保存」')
+    } catch (e) {
+      flash('err', `导入失败: ${String(e)}`)
+    }
+  }, [])
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -174,25 +138,36 @@ export default function NetPolicyPage() {
     }
   }
 
-  const saveSettings = () => settings && run('保存设置', () => invoke('net_policy_save_settings', { settings }))
-  const apply = () => run('应用策略', () => invoke('net_policy_apply'))
-  const emergencyStop = () => run('紧急停止', () => invoke('net_policy_emergency_stop'))
+  const saveSettings = () => settings && run('保存设置', () => NetPolicyAPI.saveSettings(settings))
+  const applyPolicy = () => run('应用策略', () => NetPolicyAPI.apply())
+  const emergencyStop = () => run('紧急停止', () => NetPolicyAPI.emergencyStop())
   const addRule = () =>
     newRule.value.trim() &&
     run('新增规则', async () => {
-      const rs = await invoke<RuleSet>('net_policy_save_rule', { rule: { ...newRule, value: newRule.value.trim() } })
+      const rs = await NetPolicyAPI.saveRule({ ...newRule, value: newRule.value.trim() })
       setRules(rs)
       setNewRule({ ...newRule, value: '' })
     })
   const deleteRule = (index: number) =>
-    run('删除规则', async () => setRules(await invoke<RuleSet>('net_policy_delete_rule', { index })))
+    run('删除规则', async () => setRules(await NetPolicyAPI.deleteRule(index)))
   const loadCandidates = () =>
-    run('扫描进程', async () => setCandidates(await invoke<ProcessCandidate[]>('net_policy_list_process_candidates')))
+    run('扫描进程', async () => setCandidates(await NetPolicyAPI.listProcessCandidates()))
   const addCandidateDirect = (c: ProcessCandidate) =>
     run('加入直连', async () =>
-      setRules(await invoke<RuleSet>('net_policy_save_rule', { rule: { kind: 'process-name', value: c.name, route: 'direct' } })),
+      setRules(await NetPolicyAPI.saveRule({ kind: 'process-name', value: c.name, route: 'direct' })),
     )
-  const runVerify = () => run('验证', async () => setVerify(await invoke<VerifyReport>('net_policy_verify')))
+
+  // 验证（含 exit-ip / dns-hijack）：手动触发，重探测不进 3s 快轮询。
+  const runVerify = () =>
+    run('验证', async () => {
+      const rep = await NetPolicyAPI.verify()
+      setVerify(rep)
+      const ip = rep.cases.find(c => c.id === 'exit-ip')
+      if (ip && ip.status === 'passed') {
+        setExitIp(ip.observed)
+        setExitIpAt(new Date().toLocaleTimeString())
+      }
+    })
 
   return (
     <div className="mx-auto max-w-4xl space-y-5">
@@ -201,6 +176,9 @@ export default function NetPolicyPage() {
         <h1 className="text-lg font-semibold">网络出口策略</h1>
         <button className={btn() + ' ml-auto'} onClick={() => void refresh()} disabled={busy}>
           <RefreshCw size={14} /> 刷新
+        </button>
+        <button className={btn('danger')} onClick={emergencyStop} disabled={busy}>
+          <OctagonX size={14} /> 紧急停止
         </button>
       </div>
 
@@ -216,53 +194,14 @@ export default function NetPolicyPage() {
         </div>
       )}
 
-      {/* 状态 + 操作 */}
-      <Panel
-        title="状态"
-        right={
-          <div className="flex gap-2">
-            <button className={btn('primary')} onClick={apply} disabled={busy || !status?.wg_configured}>
-              <Play size={14} /> 应用
-            </button>
-            <button className={btn('danger')} onClick={emergencyStop} disabled={busy}>
-              <OctagonX size={14} /> 紧急停止
-            </button>
-          </div>
-        }
-      >
-        {status && (
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-4">
-              <Light on={status.wg_configured} label="WG 已配置" />
-              <Light
-                on={status.mihomo_running ? (status.tun_ready ? true : 'warn') : false}
-                label={status.mihomo_running ? (status.tun_ready ? 'mihomo 运行 (TUN 起栈)' : 'mihomo 运行·TUN 未起栈') : 'mihomo 运行'}
-              />
-              <Light
-                on={status.protected ? (status.protection_validated ? true : 'warn') : status.applied ? 'warn' : false}
-                label={status.protected ? (status.protection_validated ? '受保护 (fail-closed)' : '实验保护 (待真机验证)') : status.applied ? (status.firewall?.active ? '已阻断·隧道未连通' : '不受保护预览') : '未应用'}
-              />
-              <Light on={status.killswitch_enabled ? (status.firewall?.active ? true : 'warn') : false} label={`kill-switch${status.firewall ? ` (${status.firewall.default_outbound}/${status.firewall.rule_count}条)` : ''}`} />
-            </div>
-            {status.applied && !status.protected && (
-              status.firewall?.active ? (
-                <div className="rounded-md bg-amber-100 px-3 py-1.5 text-xs text-amber-800">
-                  ⚠ <b>已阻断但隧道未连通</b>：kill-switch 生效（fail-closed 成立，未知流量不会泄漏），但 mihomo 控制器 / TUN(Meta) 未就绪，当前<b>无法联网</b>。请检查 WG 配置 / mihomo 引擎，或重新「应用」。出口/DNS 是否真正打通用「一键验证」确认。
-                </div>
-              ) : (
-                <div className="rounded-md bg-amber-100 px-3 py-1.5 text-xs text-amber-800">
-                  ⚠ 当前为<b>不受保护预览</b>模式：mihomo 在跑但防火墙 kill-switch 未生效。mihomo/TUN/WG 任一异常时未知流量可能泄漏到本地出口。生产请开启 kill-switch。
-                </div>
-              )
-            )}
-            {status.protected && !status.protection_validated && (
-              <div className="rounded-md bg-amber-100 px-3 py-1.5 text-xs text-amber-800">
-                ⚠ <b>实验保护</b>：kill-switch 已生效，但当前防火墙白名单模型（Program=mihomo.exe）尚未在新模型下真机验证 fail-closed。进生产前需通过 VP-08/09/10 复测。
-              </div>
-            )}
-          </div>
-        )}
-      </Panel>
+      {/* 保护状态横幅 */}
+      {status && <ProtectionBanner status={status} exitIp={exitIp} exitIpAt={exitIpAt} />}
+
+      {/* 数据通路全景图 */}
+      {status && <FlowTopology status={status} conns={conns} settings={settings} />}
+
+      {/* 应用流程分步 stepper */}
+      <ApplyStepper onApply={applyPolicy} busy={busy} canApply={!!status?.wg_configured} />
 
       {/* WG 设置 */}
       {settings && (
@@ -285,7 +224,7 @@ export default function NetPolicyPage() {
             onChange={e => {
               const f = e.target.files?.[0]
               if (f) void importWgConf(f)
-              e.target.value = '' // 允许重复选同一文件
+              e.target.value = ''
             }}
           />
           <div className="grid grid-cols-2 gap-3 text-sm">
@@ -339,8 +278,15 @@ export default function NetPolicyPage() {
         </Panel>
       )}
 
-      {/* 分流规则 */}
-      <Panel title="分流规则（命中走本地直连，未命中默认走 WG）">
+      {/* 分流规则（叠加活跃连接聚合） */}
+      <Panel
+        title="分流规则（命中走本地直连，未命中默认走 WG）"
+        right={
+          <span className="text-xs text-gray-500">
+            活跃：直连 {conns.direct_count} · WG {conns.wg_count}
+          </span>
+        }
+      >
         <div className="mb-3 flex flex-wrap items-end gap-2 text-sm">
           <select className="rounded border px-2 py-1 dark:bg-gray-800 dark:border-gray-700" value={newRule.kind}
             onChange={e => setNewRule({ ...newRule, kind: e.target.value as RuleKind })}>
@@ -386,20 +332,8 @@ export default function NetPolicyPage() {
         </ul>
       </Panel>
 
-      {/* 验证 */}
-      <Panel title="验证" right={<button className={btn()} onClick={runVerify} disabled={busy}><FlaskConical size={14} /> 一键验证</button>}>
-        {!verify && <p className="text-sm text-gray-500">应用策略后点「一键验证」检查出口 IP / DNS 劫持 / 引擎状态。</p>}
-        {verify && (
-          <ul className="space-y-1 text-sm">
-            {verify.cases.map(c => (
-              <li key={c.id} className="flex items-center gap-2">
-                <Light on={c.status === 'passed' ? true : c.status === 'failed' ? false : 'warn'} label={c.name} />
-                <span className="font-mono text-xs text-gray-500">{c.observed}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Panel>
+      {/* 验证矩阵（VP / §9，源自报告 §0.8.2）：报告历史结论 vs 当前代码模型 + 手动实时检查 */}
+      {status && <VerifyMatrix status={status} verify={verify} onVerify={runVerify} busy={busy} />}
     </div>
   )
 }

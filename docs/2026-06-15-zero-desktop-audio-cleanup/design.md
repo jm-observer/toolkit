@@ -1,6 +1,8 @@
 # zero-desktop 音频清洗功能设计
 
-> 设计文档（仅设计，未实现）。日期 2026-06-15。
+> 设计文档（**已实现**，2026-06-15）。实现见 `crates/zero-desktop/src/modules/speech/commands/clean.rs`
+> （命令）、`ui/src/modules/speech/components/AudioCleanCard.tsx`（前端卡片）、
+> `crates/toolkit-server/src/routes/audio.rs`（代理 `X-Clean-Proxy` 头）。日期 2026-06-15。
 > 权威 API 源：streaming-speech 仓 `docs/audio-cleanup-api.md`（`POST /clean` @ `:8097`）。
 > 关联：streaming-speech `docs/2026-06-14-audio-cleanup/audio-cleanup-plan-4.md`（本设计在其基础上
 > 因 zero-desktop 实际架构而调整音频来源）。

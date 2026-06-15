@@ -5,4 +5,5 @@ pub mod init;
 pub mod notify;
 pub mod recording;
 pub mod remote;
+pub mod samples;
 pub mod settings;
