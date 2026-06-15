@@ -36,61 +36,68 @@ fn ps_squote(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// 应用 kill-switch：快照原值 → 建白名单 → 设默认 Block。
-pub fn apply(
-    workspace: &Path,
-    settings: &NetPolicySettings,
-    rules: &RuleSet,
-    mihomo_bin: &Path,
-) -> Result<()> {
-    run_ps(&build_apply_script(workspace, settings, rules, mihomo_bin)?)?;
+/// 阶段 A（审查 P1-2）：**在启动 mihomo 之前** 建立 fail-closed——快照 + 不依赖 Meta 的白名单
+/// （KS-mihomo / KS-LO / KS-LAN / KS-IPv6Block）+ 设默认 Block。这样 mihomo 起栈期间已有兜底，
+/// 消除"先起 mihomo 再补防火墙"的无保护窗口。
+pub fn apply_base(workspace: &Path, settings: &NetPolicySettings, mihomo_bin: &Path) -> Result<()> {
+    run_ps(&build_base_script(workspace, settings, mihomo_bin)?)?;
     Ok(())
 }
 
-/// 构造 apply 用的 PowerShell 脚本（纯函数 + 输入校验，便于 CLI 预览/测试，不执行）。
-pub fn build_apply_script(
-    workspace: &Path,
-    settings: &NetPolicySettings,
-    _rules: &RuleSet,
-    mihomo_bin: &Path,
-) -> Result<String> {
-    // 防注入：所有进 PS 的值再校验一遍（apply 前 settings.validate 已校验，这里防御性重复）。
+/// 阶段 B：mihomo 起栈、Meta 适配器出现后，补 KS-TUN（放行应用流量进 TUN）。
+/// 此前 app→Meta 被默认 Block 拦（不泄漏，仅短暂不通），符合 fail-closed。
+pub fn apply_tun(_workspace: &Path) -> Result<()> {
+    run_ps(&format!(
+        "New-NetFirewallRule -Group '{GROUP}' -Name 'KS-TUN' -DisplayName 'KS TUN' -Direction Outbound -Action Allow -InterfaceAlias '{TUN_ALIAS}' -Enabled True | Out-Null; 'OK'"
+    ))?;
+    Ok(())
+}
+
+fn base_rules_ps(settings: &NetPolicySettings, mihomo_bin: &Path) -> String {
+    let lan = settings.lan_ranges.join(",");
+    let mihomo = ps_squote(&mihomo_bin.to_string_lossy());
+    let mut s = String::new();
+    // R-mihomo：放行 mihomo 进程出物理网卡（覆盖 WG 握手 / 上游 DNS / DIRECT 拨号）。
+    s.push_str(&format!(
+        "New-NetFirewallRule -Group $G -Name 'KS-mihomo' -DisplayName 'KS mihomo egress' -Direction Outbound -Action Allow -Program '{mihomo}' -InterfaceAlias $eth -Enabled True | Out-Null\n"
+    ));
+    s.push_str(
+        "New-NetFirewallRule -Group $G -Name 'KS-LO' -DisplayName 'KS Loopback v4' -Direction Outbound -Action Allow -RemoteAddress 127.0.0.0/8 -Enabled True | Out-Null\n",
+    );
+    s.push_str(&format!(
+        "New-NetFirewallRule -Group $G -Name 'KS-LAN' -DisplayName 'KS LAN' -Direction Outbound -Action Allow -RemoteAddress {lan} -InterfaceAlias $eth -Enabled True | Out-Null\n"
+    ));
+    if settings.block_ipv6 {
+        s.push_str(
+            "New-NetFirewallRule -Group $G -Name 'KS-IPv6Block' -DisplayName 'KS block IPv6 public' -Direction Outbound -Action Block -RemoteAddress 2000::/3 -Enabled True | Out-Null\n",
+        );
+    }
+    s
+}
+
+fn validate_fw_inputs(settings: &NetPolicySettings) -> Result<()> {
     valid::ip(&settings.wg.server)?;
     for l in &settings.lan_ranges {
         valid::ip_or_cidr(l)?;
     }
+    Ok(())
+}
 
+/// 构造阶段 A 脚本（快照 + base 白名单 + Set Block，不含 KS-TUN）。
+pub fn build_base_script(
+    workspace: &Path,
+    settings: &NetPolicySettings,
+    mihomo_bin: &Path,
+) -> Result<String> {
+    validate_fw_inputs(settings)?;
     let state = killswitch_state_path(workspace);
     let state_s = ps_squote(&state.to_string_lossy());
     let state_dir = state
         .parent()
         .map(|p| ps_squote(&p.to_string_lossy()))
         .unwrap_or_default();
-    let lan = settings.lan_ranges.join(",");
-    let mihomo = ps_squote(&mihomo_bin.to_string_lossy());
-
-    let mut rules_ps = String::new();
-    // R-mihomo：放行 mihomo 进程出物理网卡（覆盖 WG 握手 / 上游 DNS / DIRECT 拨号）。
-    rules_ps.push_str(&format!(
-        "New-NetFirewallRule -Group $G -Name 'KS-mihomo' -DisplayName 'KS mihomo egress' -Direction Outbound -Action Allow -Program '{mihomo}' -InterfaceAlias $eth -Enabled True | Out-Null\n"
-    ));
-    rules_ps.push_str(&format!(
-        "New-NetFirewallRule -Group $G -Name 'KS-TUN' -DisplayName 'KS TUN' -Direction Outbound -Action Allow -InterfaceAlias '{TUN_ALIAS}' -Enabled True | Out-Null\n"
-    ));
-    rules_ps.push_str(
-        "New-NetFirewallRule -Group $G -Name 'KS-LO' -DisplayName 'KS Loopback v4' -Direction Outbound -Action Allow -RemoteAddress 127.0.0.0/8 -Enabled True | Out-Null\n",
-    );
-    rules_ps.push_str(&format!(
-        "New-NetFirewallRule -Group $G -Name 'KS-LAN' -DisplayName 'KS LAN' -Direction Outbound -Action Allow -RemoteAddress {lan} -InterfaceAlias $eth -Enabled True | Out-Null\n"
-    ));
-    if settings.block_ipv6 {
-        // 显式阻断 IPv6 公网（真正落实"阻断 IPv6"，不止 mihomo ipv6:false）。
-        rules_ps.push_str(
-            "New-NetFirewallRule -Group $G -Name 'KS-IPv6Block' -DisplayName 'KS block IPv6 public' -Direction Outbound -Action Block -RemoteAddress 2000::/3 -Enabled True | Out-Null\n",
-        );
-    }
-
-    let script = format!(
+    let rules_ps = base_rules_ps(settings, mihomo_bin);
+    Ok(format!(
         r#"$G='{GROUP}'
 $state='{state_s}'
 if(-not (Test-Path $state)){{
@@ -105,8 +112,25 @@ Get-NetFirewallRule -Group $G -ErrorAction SilentlyContinue | Remove-NetFirewall
 {rules_ps}Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultOutboundAction Block
 'OK'
 "#
+    ))
+}
+
+/// CLI 预览用：完整脚本（base + KS-TUN，展示全部规则）。实际 apply 走 apply_base + apply_tun 两阶段。
+pub fn build_apply_script(
+    workspace: &Path,
+    settings: &NetPolicySettings,
+    _rules: &RuleSet,
+    mihomo_bin: &Path,
+) -> Result<String> {
+    let base = build_base_script(workspace, settings, mihomo_bin)?;
+    // 在 Set Block 前插入 KS-TUN（仅为预览完整性；真实流程 KS-TUN 在 mihomo 起栈后补）。
+    let tun = format!(
+        "New-NetFirewallRule -Group $G -Name 'KS-TUN' -DisplayName 'KS TUN' -Direction Outbound -Action Allow -InterfaceAlias '{TUN_ALIAS}' -Enabled True | Out-Null\n"
     );
-    Ok(script)
+    Ok(base.replace(
+        "Set-NetFirewallProfile",
+        &format!("{tun}Set-NetFirewallProfile"),
+    ))
 }
 
 /// 移除 kill-switch：删白名单 + 按状态文件还原 DefaultOutboundAction。

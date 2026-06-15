@@ -25,8 +25,25 @@ pub fn mihomo_bin(workspace: &Path) -> PathBuf {
         .join("mihomo-windows-amd64.exe")
 }
 
-/// 从规则集 + 设置生成 mihomo `config.yaml` 文本。
-pub fn generate_config(settings: &NetPolicySettings, rules: &RuleSet) -> String {
+/// 生成随机 controller secret（hex，防同用户其他进程打 mihomo API 改规则，P0-1）。
+pub fn gen_secret() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+/// 构造带 Authorization 头的 PS hashtable 片段（secret 空则无头）。
+fn auth_header(secret: &str) -> String {
+    if secret.is_empty() {
+        "@{}".to_string()
+    } else {
+        format!("@{{ Authorization = 'Bearer {secret}' }}")
+    }
+}
+
+/// 从规则集 + 设置生成 mihomo `config.yaml` 文本。`secret` 是 external-controller 鉴权口令。
+pub fn generate_config(settings: &NetPolicySettings, rules: &RuleSet, secret: &str) -> String {
     let wg = &settings.wg;
     let dns_bootstrap = settings
         .dns_bootstrap
@@ -52,7 +69,7 @@ log-level: info
 ipv6: {ipv6}
 find-process-mode: always
 external-controller: {CONTROLLER}
-secret: ""
+secret: "{secret}"
 
 dns:
   enable: true
@@ -116,12 +133,13 @@ pub fn write_config(
     workspace: &Path,
     settings: &NetPolicySettings,
     rules: &RuleSet,
+    secret: &str,
 ) -> Result<PathBuf> {
     let path = mihomo_config_path(workspace);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&path, generate_config(settings, rules))
+    std::fs::write(&path, generate_config(settings, rules, secret))
         .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
@@ -149,35 +167,37 @@ pub fn start(workspace: &Path) -> Result<u32> {
     Ok(child.id())
 }
 
-/// 优雅停 mihomo：先 API 关 TUN（清理 wintun 路由），再**按 pid** 结束进程。§0.8.2bis 铁律。
-/// 用记录的 pid 而非进程名全杀，避免误杀用户其他 mihomo（P2-2）；pid 未知时回退按本模块
-/// 二进制路径过滤。
-pub fn graceful_stop(pid: Option<u32>) -> Result<()> {
-    // 关 TUN（失败不致命：进程可能已退）。
-    let _ = run_ps(&format!(
-        "try{{ Invoke-RestMethod 'http://{CONTROLLER}/configs' -Method PATCH \
-         -Body '{{\"tun\":{{\"enable\":false}}}}' -TimeoutSec 4 }}catch{{}}; Start-Sleep -Milliseconds 1500"
-    ));
-    // TUN 已优雅拆除，此时结束进程安全。
+/// 优雅停 mihomo（§0.8.2bis + 审查 P1-1）：先 API 关 TUN，**轮询确认 Meta 适配器已拆除**
+/// 再按 pid 结束进程。若 TUN 未在超时内拆除则 **bail（不强杀）**，让调用方保持防火墙生效、
+/// 不进入"强杀残留路由"的泄漏/断网路径。pid 未知时回退按本模块二进制名。
+pub fn graceful_stop(pid: Option<u32>, secret: &str) -> Result<()> {
+    let h = auth_header(secret);
     let kill = match pid {
         Some(p) => format!(
             "Stop-Process -Id {p} -Force -ErrorAction SilentlyContinue; \
              if(Get-Process -Id {p} -ErrorAction SilentlyContinue){{ throw 'mihomo pid {p} 未能结束' }}"
         ),
-        None => {
-            // 回退：仅按本模块二进制名（保留兼容，但记日志）。
-            "Get-Process mihomo-windows-amd64 -ErrorAction SilentlyContinue | Stop-Process -Force"
-                .to_string()
-        }
+        None => "Get-Process mihomo-windows-amd64 -ErrorAction SilentlyContinue | Stop-Process -Force"
+            .to_string(),
     };
-    run_ps(&kill)?;
+    run_ps(&format!(
+        r#"$h={h}
+try{{ Invoke-RestMethod 'http://{CONTROLLER}/configs' -Method PATCH -Headers $h -Body '{{"tun":{{"enable":false}}}}' -TimeoutSec 4 | Out-Null }}catch{{}}
+$gone=$false
+for($i=0;$i -lt 14;$i++){{ if(-not (Get-NetAdapter -Name Meta -ErrorAction SilentlyContinue)){{ $gone=$true; break }}; Start-Sleep -Milliseconds 500 }}
+if(-not $gone){{ throw 'TUN(Meta) 未在超时内优雅拆除——拒绝强杀以避免 wintun 路由残留；防火墙保持生效（请重试或本地排查）' }}
+{kill}
+'OK'
+"#
+    ))?;
     Ok(())
 }
 
-/// mihomo 是否在运行（查外部控制器）。
-pub fn running() -> bool {
+/// mihomo 是否在运行（查外部控制器，带鉴权）。
+pub fn running(secret: &str) -> bool {
+    let h = auth_header(secret);
     run_ps(&format!(
-        "try{{ Invoke-RestMethod 'http://{CONTROLLER}/version' -TimeoutSec 3 | Out-Null; 'yes' }}catch{{ 'no' }}"
+        "$h={h}; try{{ Invoke-RestMethod 'http://{CONTROLLER}/version' -Headers $h -TimeoutSec 3 | Out-Null; 'yes' }}catch{{ 'no' }}"
     ))
     .map(|s| s.trim() == "yes")
     .unwrap_or(false)

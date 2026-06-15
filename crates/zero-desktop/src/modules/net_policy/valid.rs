@@ -6,12 +6,28 @@
 use anyhow::{bail, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+/// 严格集：IP/CIDR/域名/key 用。括号等一律拒绝。
 fn no_meta(s: &str) -> Result<()> {
     if s.is_empty() {
         bail!("空值");
     }
     if s.chars()
         .any(|c| c.is_control() || "\n\r,;|&`$'\"<>(){}".contains(c))
+    {
+        bail!("含非法字符：{s:?}");
+    }
+    Ok(())
+}
+
+/// 路径/进程名用的放宽集：**允许括号/方括号/空格**（常见 Windows 路径如
+/// `C:\Program Files (x86)\...`，P2 修正），只拦真正会改写 PS/YAML 的字符：
+/// 换行、逗号、引号、反引号、`;|&$<>`。
+fn no_inject_path(s: &str) -> Result<()> {
+    if s.is_empty() {
+        bail!("空值");
+    }
+    if s.chars()
+        .any(|c| c.is_control() || "\n\r,;|&`$'\"<>".contains(c))
     {
         bail!("含非法字符：{s:?}");
     }
@@ -78,9 +94,9 @@ pub fn domain(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// 校验进程名（如 `steam.exe`）。
+/// 校验进程名（如 `steam.exe`）。允许括号（少见但合法），拒注入元字符。
 pub fn process_name(s: &str) -> Result<()> {
-    no_meta(s)?;
+    no_inject_path(s)?;
     if s.contains('/') || s.contains('\\') {
         bail!("进程名不应含路径分隔符：{s}");
     }
@@ -90,9 +106,9 @@ pub fn process_name(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// 校验进程完整路径（Windows 路径，允许空格/反斜杠/盘符，但拒绝注入元字符与换行）。
+/// 校验进程完整路径（Windows 路径，允许空格/反斜杠/盘符/括号，拒绝注入元字符与换行）。
 pub fn process_path(s: &str) -> Result<()> {
-    no_meta(s)?; // no_meta 已拒绝换行/逗号/引号等
+    no_inject_path(s)?; // 允许 (){}[] 等，拒换行/逗号/引号/反引号/;|&$<>
     if s.len() > 260 {
         bail!("路径过长");
     }
