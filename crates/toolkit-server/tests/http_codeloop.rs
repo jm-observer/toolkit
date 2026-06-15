@@ -80,6 +80,60 @@ async fn codeloop_messages_rejects_bad_provider() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codeloop_submit_rejects_unknown_session() {
+    // 未知 session_id 且未带 cwd → 服务端 snapshot 解析 cwd 失败 → 400（不起任务）。
+    let (addr, _dir) = start().await;
+    let body = serde_json::json!({
+        "claude": { "session_id": "no-such-claude" },
+        "codex": { "session_id": "no-such-codex" },
+        "target_path": "docs/foo.md",
+        "mode": "design",
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/web/codeloop/submit"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("cwd"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codeloop_submit_rejects_mismatched_repos() {
+    // 显式带两个不同临时仓的 cwd（均无 .git）→ 三方校验失败 → 400。
+    let (addr, _dir) = start().await;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let body = serde_json::json!({
+        "claude": { "session_id": "x", "cwd": a.path().to_string_lossy() },
+        "codex": { "session_id": "y", "cwd": b.path().to_string_lossy() },
+        "target_path": "foo.md",
+        "mode": "design",
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/web/codeloop/submit"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codeloop_answer_unknown_task_is_404() {
+    let (addr, _dir) = start().await;
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/web/codeloop/nope/answer"))
+        .json(&serde_json::json!({ "seq": 1, "text": "方案A" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codeloop_static_page_embedded() {
     let (addr, _dir) = start().await;
     let resp = reqwest::get(format!("http://{addr}/codeloop"))

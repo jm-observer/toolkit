@@ -66,9 +66,74 @@ body {
 }
 #refresh-sessions:hover { background: #333; color: #fff; }
 
-.status-right { font-size: 12px; color: #888; }
+.status-right { font-size: 12px; color: #888; display: flex; align-items: center; gap: 12px; }
 #poll-state.running { color: #4caf50; }
 #poll-state.idle { color: #aaa; }
+
+/* ── 循环控制 ─────────────────────────────────────────── */
+.loop-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.loop-controls input[type="text"] {
+  background: #222; color: #e0e0e0; border: 1px solid #3a3a3a;
+  border-radius: 4px; padding: 4px 6px; font-size: 12px; width: 200px;
+}
+.loop-controls input[type="number"] {
+  background: #222; color: #e0e0e0; border: 1px solid #3a3a3a;
+  border-radius: 4px; padding: 4px; font-size: 12px; width: 52px;
+}
+.loop-controls select {
+  background: #222; color: #e0e0e0; border: 1px solid #3a3a3a;
+  border-radius: 4px; padding: 4px 6px; font-size: 12px;
+}
+.loop-controls .chk { color: #aaa; display: flex; align-items: center; gap: 4px; }
+#start-loop {
+  background: #2a4a2a; color: #cfe; border: 1px solid #3a5a3a;
+  border-radius: 4px; cursor: pointer; padding: 5px 10px; font-weight: 600;
+}
+#start-loop:hover { background: #356035; }
+#start-loop:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#loop-status.running { color: #4caf50; }
+#loop-status.done { color: #4a9eff; }
+#loop-status.aborted { color: #e08a3a; }
+#loop-status.failed { color: #e05a5a; }
+#loop-status.idle { color: #888; }
+#loop-rounds { color: #ccc; }
+#loop-verdict { color: #e0b84a; }
+
+/* ── 模拟弹窗 ─────────────────────────────────────────── */
+#modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+#modal-overlay.hidden { display: none; }
+#modal {
+  background: #202020; border: 1px solid #3a3a3a; border-radius: 10px;
+  padding: 20px; width: min(540px, 90vw); box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+#modal h3 { font-size: 15px; margin-bottom: 14px; color: #eee; white-space: pre-wrap; }
+#modal-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+#modal-options button {
+  text-align: left; background: #2a3a4a; color: #e8f0f8;
+  border: 1px solid #3a5a7a; border-radius: 6px; padding: 9px 12px;
+  cursor: pointer; font-size: 13px;
+}
+#modal-options button:hover { background: #35506a; }
+.modal-free { display: flex; gap: 8px; }
+.modal-free input {
+  flex: 1; background: #222; color: #e0e0e0; border: 1px solid #3a3a3a;
+  border-radius: 4px; padding: 7px 9px; font-size: 13px;
+}
+.modal-free button {
+  background: #2a4a2a; color: #cfe; border: 1px solid #3a5a3a;
+  border-radius: 4px; cursor: pointer; padding: 7px 14px;
+}
+.modal-free button:hover { background: #356035; }
 
 /* ── 双栏 ─────────────────────────────────────────────── */
 #columns {

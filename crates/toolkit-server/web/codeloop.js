@@ -1,13 +1,21 @@
-// Codeloop 双栏只读观测：选一对会话 → 各自轮询增量消息 → 双栏渲染。
-// 本轮（Plan 2）只做只读观测，不做循环 / 弹窗 / 启动按钮（Plan 5）。
+// Codeloop 双栏视图：选一对会话 → 双栏轮询增量消息（Plan 2）
+// + 启动复核循环、状态条、ASK_USER 模拟弹窗（Plan 5）。
 
 const POLL_MS = 1500;
 const API = "/api/web/codeloop";
+const TASKS_API = "/api/web/tasks";
 
 // 每一侧的运行态。
 const sides = {
   claude: makeSide("claude"),
   codex: makeSide("codex"),
+};
+
+// 复核循环运行态。
+const loop = {
+  taskId: null,
+  answeredSeq: -1, // 已应答的最大 seq，避免重复弹窗
+  pendingSeq: null, // 当前弹窗对应的 seq
 };
 
 function makeSide(provider) {
@@ -131,8 +139,147 @@ function updatePollState() {
   }
 }
 
+// ── 复核循环（Plan 5） ──────────────────────────────────
+
+async function startLoop() {
+  const claudeId = sides.claude.sessionId;
+  const codexId = sides.codex.sessionId;
+  const targetPath = document.getElementById("target-path").value.trim();
+  if (!claudeId || !codexId) {
+    alert("请先各选一个 Claude / Codex 会话");
+    return;
+  }
+  if (!targetPath) {
+    alert("请填写 target_path");
+    return;
+  }
+  const body = {
+    claude: { session_id: claudeId },
+    codex: { session_id: codexId },
+    target_path: targetPath,
+    mode: document.getElementById("mode-select").value,
+    max_rounds: parseInt(document.getElementById("max-rounds").value, 10) || 5,
+    wait_for_claude_idle: document.getElementById("wait-idle").checked,
+  };
+  const btn = document.getElementById("start-loop");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert("启动失败：" + (data.error || res.status));
+      btn.disabled = false;
+      return;
+    }
+    loop.taskId = data.task_id;
+    loop.answeredSeq = -1;
+    loop.pendingSeq = null;
+  } catch (e) {
+    alert("启动失败：" + e);
+    btn.disabled = false;
+  }
+}
+
+function setLoopStatus(text, cls) {
+  const el = document.getElementById("loop-status");
+  el.textContent = "循环：" + text;
+  el.className = cls;
+}
+
+async function pollTask() {
+  if (!loop.taskId) return;
+  let res;
+  try {
+    res = await fetch(`${TASKS_API}/${loop.taskId}`);
+  } catch {
+    return;
+  }
+  if (!res.ok) return;
+  const t = await res.json();
+  const p = t.progress || {};
+  const maxRounds = parseInt(document.getElementById("max-rounds").value, 10) || 5;
+
+  // 轮次 / verdict 显示。
+  document.getElementById("loop-rounds").textContent =
+    p.round != null ? `轮次 ${p.round}/${maxRounds}` : "";
+  document.getElementById("loop-verdict").textContent =
+    p.verdict != null && p.verdict !== "parse_failed" ? `判定 ${p.verdict}` : "";
+
+  // 任务状态 → 循环状态条。
+  if (t.state === "succeeded") {
+    const fv = (t.output && t.output.final_verdict) || p.final_verdict || "done";
+    setLoopStatus(fv, fv === "pass" ? "done" : "aborted");
+    document.getElementById("start-loop").disabled = false;
+  } else if (t.state === "failed") {
+    setLoopStatus("failed: " + (t.error || ""), "failed");
+    document.getElementById("start-loop").disabled = false;
+  } else if (t.state === "interrupted") {
+    setLoopStatus("interrupted（server 重启）", "aborted");
+    document.getElementById("start-loop").disabled = false;
+  } else {
+    setLoopStatus(p.phase || t.state || "running", "running");
+  }
+
+  // ASK_USER 挂起 → 弹窗。
+  if (p.phase === "awaiting_input" && p.seq != null) {
+    if (p.seq > loop.answeredSeq && loop.pendingSeq !== p.seq) {
+      showModal(p.seq, p.question || {});
+    }
+  } else if (loop.pendingSeq == null) {
+    hideModal();
+  }
+}
+
+function showModal(seq, question) {
+  loop.pendingSeq = seq;
+  document.getElementById("modal-question").textContent =
+    question.question || "需要你拍板";
+  const opts = document.getElementById("modal-options");
+  opts.innerHTML = "";
+  for (const o of question.options || []) {
+    const b = document.createElement("button");
+    b.textContent = o;
+    b.addEventListener("click", () => sendAnswer(seq, o));
+    opts.appendChild(b);
+  }
+  document.getElementById("modal-free-input").value = "";
+  document.getElementById("modal-overlay").classList.remove("hidden");
+}
+
+function hideModal() {
+  document.getElementById("modal-overlay").classList.add("hidden");
+  loop.pendingSeq = null;
+}
+
+async function sendAnswer(seq, text) {
+  if (!text || !text.trim()) {
+    alert("请输入答复");
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/${loop.taskId}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seq, text }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert("应答失败：" + (d.error || res.status));
+      return;
+    }
+    loop.answeredSeq = Math.max(loop.answeredSeq, seq);
+    hideModal();
+  } catch (e) {
+    alert("应答失败：" + e);
+  }
+}
+
 async function tick() {
-  await Promise.all([pollSide(sides.claude), pollSide(sides.codex)]);
+  await Promise.all([pollSide(sides.claude), pollSide(sides.codex), pollTask()]);
 }
 
 function init() {
@@ -159,6 +306,12 @@ function init() {
     updatePollState();
   });
   document.getElementById("refresh-sessions").addEventListener("click", loadSessions);
+  document.getElementById("start-loop").addEventListener("click", startLoop);
+  document.getElementById("modal-free-send").addEventListener("click", () => {
+    if (loop.pendingSeq != null) {
+      sendAnswer(loop.pendingSeq, document.getElementById("modal-free-input").value);
+    }
+  });
 
   loadSessions();
   updatePollState();

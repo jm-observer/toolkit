@@ -28,6 +28,11 @@ pub fn router() -> Router<AppState> {
             "/codeloop/session/{provider}/{id}/messages",
             get(codeloop_messages),
         )
+        .route("/codeloop/submit", axum::routing::post(codeloop_submit))
+        .route(
+            "/codeloop/{task_id}/answer",
+            axum::routing::post(codeloop_answer),
+        )
 }
 
 async fn health(State(s): State<AppState>) -> Json<Value> {
@@ -153,6 +158,118 @@ async fn codeloop_messages(
         Ok(page) => (StatusCode::OK, Json(serde_json::to_value(page).unwrap())),
         Err(e) => (
             StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{e:#}")})),
+        ),
+    }
+}
+
+// ---------------- codeloop 复核循环（Plan 5） ----------------
+
+use agent_session::Provider;
+use std::path::PathBuf;
+
+#[derive(Debug, Deserialize)]
+struct CodeloopSessionDto {
+    session_id: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeloopSubmitBody {
+    claude: CodeloopSessionDto,
+    codex: CodeloopSessionDto,
+    target_path: String,
+    #[serde(default)]
+    target_label: Option<String>,
+    mode: String,
+    #[serde(default)]
+    max_rounds: Option<u32>,
+    #[serde(default)]
+    wait_for_claude_idle: bool,
+    #[serde(default)]
+    notify_callback: Option<String>,
+}
+
+/// 解析某端会话 cwd：优先请求显式带的 cwd，否则从会话存储 snapshot 补全。
+fn resolve_cwd(
+    s: &AppState,
+    provider: Provider,
+    dto: &CodeloopSessionDto,
+) -> Result<PathBuf, String> {
+    if let Some(c) = &dto.cwd {
+        if !c.is_empty() {
+            return Ok(PathBuf::from(c));
+        }
+    }
+    s.session_store
+        .snapshot(provider, &dto.session_id)
+        .map(|snap| snap.cwd)
+        .map_err(|e| format!("解析 {} 会话 cwd 失败: {e:#}", provider.as_str()))
+}
+
+/// 提交复核循环：先做 §4.1 三方一致性校验，通过后 submit cross_review。
+async fn codeloop_submit(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeloopSubmitBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": msg })));
+
+    let claude_cwd = resolve_cwd(&s, Provider::Claude, &body.claude).map_err(&bad)?;
+    let codex_cwd = resolve_cwd(&s, Provider::Codex, &body.codex).map_err(&bad)?;
+
+    // §4.1 三方 repo root 一致性校验。
+    crate::codeloop::validate::validate_three_way(&claude_cwd, &codex_cwd, &body.target_path)
+        .map_err(|e| bad(format!("{e:#}")))?;
+
+    // 构造 cross_review 任务输入（cwd 回填解析值，供任务复用）。
+    let input = json!({
+        "claude": { "session_id": body.claude.session_id, "cwd": claude_cwd.to_string_lossy() },
+        "codex": { "session_id": body.codex.session_id, "cwd": codex_cwd.to_string_lossy() },
+        "target_path": body.target_path,
+        "target_label": body.target_label,
+        "mode": body.mode,
+        "max_rounds": body.max_rounds.unwrap_or(5),
+        "wait_for_claude_idle": body.wait_for_claude_idle,
+        "notify_callback": body.notify_callback,
+    });
+
+    let trace_parent = trace_ctx_from_headers(&headers);
+    match toolkit_tasks::submit(
+        &s.registry,
+        &s.pool,
+        &s.workspace,
+        "cross_review",
+        input,
+        None,
+        trace_parent,
+    ) {
+        Ok(id) => Ok(Json(json!({ "task_id": id }))),
+        Err(e) => Err(bad(format!("{e:#}"))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeloopAnswerBody {
+    seq: i64,
+    text: String,
+}
+
+/// 回答挂起循环：写 codeloop_io.answer_text，任务下次轮询取走。
+async fn codeloop_answer(
+    State(s): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(body): Json<CodeloopAnswerBody>,
+) -> impl IntoResponse {
+    match crate::codeloop::io::write_answer(&s.pool, &task_id, body.seq, &body.text) {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "无此待答问题（task_id / seq 不匹配）"})),
+        ),
+        Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e:#}")})),
         ),
     }
