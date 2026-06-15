@@ -1,6 +1,7 @@
 # 跨会话复核循环（Cross-Session Review Loop）设计
 
-> 状态：设计草案，待评审。
+> 状态：**已实现并合并 main**（Plan 1–5，2026-06-15）。Plan 6（zero `/api/agent` + 推微信）待办。
+> CLI 命令已真机固化（见 §3 / `docs/runbook-codeloop-e2e.md §5`）。
 > 创建：2026-06-15。
 > 定位：toolkit 中台新增一个长任务 kind——把一对**已存在**的 Codex / Claude Code 会话关联起来，
 > 自动驱动「复核 ↔ 修订」往复，替代当前人工复制粘贴。后续向 zero 开放粗粒度 `/api/agent` 子集。
