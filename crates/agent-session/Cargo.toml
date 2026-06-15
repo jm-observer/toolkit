@@ -8,7 +8,7 @@ description = "Provider-agnostic observation of external coding-agent (Codex / C
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "process", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

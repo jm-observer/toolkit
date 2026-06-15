@@ -3,10 +3,12 @@
 //! 把 zero 仓 `scripts/probe_sessions.py` 探针的会话存储解析逻辑移植为 Rust：
 //! 读取本机磁盘上 Codex / Claude Code 的明文 JSONL 会话存储，解析状态 / 消息 / cwd。
 //!
-//! 本 crate 只读，不调用任何模型、不写入、不触碰运行中的进程。驱动子进程发消息
-//! （`driver`）与轮询等待（`watch`）属于后续 Plan，本 crate 暂不实现。
+//! 读存储（`store`）只读、不调用任何模型。驱动子进程发消息（`driver`）会真实调用
+//! codex / claude CLI 消耗额度；轮询等待（`watch`）只读文件状态。
 
+pub mod driver;
 pub mod store;
+pub mod watch;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
