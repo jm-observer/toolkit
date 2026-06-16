@@ -79,6 +79,16 @@ impl AppSettings {
         Some(format!("{base}/api/web/audio/voices"))
     }
 
+    /// 公共大模型层端点 `{g10_base}/api/web/llm{path}`（`path` 以 `/` 开头，如 `/config`）。
+    /// 与 TTS/cookie 同源，复用全局 g10_base。未配置 g10_base 时返回 None。
+    pub fn llm_endpoint(&self, path: &str) -> Option<String> {
+        if !self.is_configured() {
+            return None;
+        }
+        let base = self.g10_base.trim_end_matches('/');
+        Some(format!("{base}/api/web/llm{path}"))
+    }
+
     /// 句子整体替换端点 `{g10_base}/api/sentence/replace-audio`（english 后端，非 toolkit-server；
     /// 走 `/api` 前缀以匹配反代「`/api/*`→english、`/api/web/*`→toolkit-server」的路由规则）。
     pub fn replace_sentence_audio_endpoint(&self) -> Option<String> {

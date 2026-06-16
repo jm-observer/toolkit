@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { Save, CheckCircle, XCircle } from 'lucide-react'
 import EnvConfig from '../english/components/EnvConfig'
+import LlmSection from './LlmSection'
 import { Button } from '../speech/components/ui/Button'
 
 // ── 主题 ─────────────────────────────────────────────────────────────────────
@@ -154,6 +155,9 @@ export default function SettingsPage() {
 
       {/* G10 配置 */}
       <G10ConfigSection />
+
+      {/* 大模型（公共 LLM 层：配置 + 提示词） */}
+      <LlmSection />
 
       {/* 英语模块 */}
       <section className="flex flex-col gap-3">

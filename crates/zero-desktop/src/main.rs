@@ -161,6 +161,15 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::net_policy::net_policy_apply,
             modules::net_policy::net_policy_emergency_stop,
             modules::net_policy::net_policy_verify,
+            // llm 模块（公共大模型层：配置 / 提示词 / 自测 / 对话总结）
+            modules::llm::llm_get_config,
+            modules::llm::llm_put_config,
+            modules::llm::llm_list_prompts,
+            modules::llm::llm_get_prompt,
+            modules::llm::llm_put_prompt,
+            modules::llm::llm_reset_prompt,
+            modules::llm::llm_ping,
+            modules::llm::llm_summarize,
             // codeloop 模块（Codex⇄Claude 复核循环）
             modules::codeloop::codeloop_list_sessions,
             modules::codeloop::codeloop_new_codex_session,

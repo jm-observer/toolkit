@@ -7,6 +7,7 @@ import AudioCleanPage from "./modules/audio-clean/AudioCleanPage";
 import CookiePage from "./modules/cookie/CookiePage";
 import NetPolicyPage from "./modules/net-policy/NetPolicyPage";
 import CodeloopPage from "./modules/codeloop/CodeloopPage";
+import ChatSummaryPage from "./modules/chat-summary/ChatSummaryPage";
 import SettingsPage from "./modules/settings/SettingsPage";
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="cookie" element={<CookiePage />} />
           <Route path="net-policy" element={<NetPolicyPage />} />
           <Route path="codeloop" element={<CodeloopPage />} />
+          <Route path="chat-summary" element={<ChatSummaryPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/english/annotated" replace />} />
         </Route>
