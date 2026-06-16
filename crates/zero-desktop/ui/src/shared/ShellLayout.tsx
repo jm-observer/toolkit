@@ -157,21 +157,32 @@ function RecordingIndicator() {
       unlisten = fn
     })
 
+    // 周期轮询后端真值，自愈漏接事件 / 启动竞态。
+    const poll = setInterval(() => {
+      invoke<{ recording: boolean }>('speech_get_recording_state')
+        .then(r => setRecording(r.recording))
+        .catch(() => {/* 忽略抖动 */})
+    }, 2000)
+
     return () => {
       unlisten?.()
+      clearInterval(poll)
     }
   }, [])
 
   return (
     <StatusLight
       status={recording ? 'ok' : 'unknown'}
-      label="录音"
-      title={recording ? '录音中' : '未录音'}
+      label="识别"
+      title={recording ? '识别中' : '未识别'}
     />
   )
 }
 
-// ── 全局录音开关（侧栏常驻，不必切到语音识别页即可启停） ─────────────────────
+// ── 全局识别开关（侧栏常驻，不必切到语音识别页即可启停） ─────────────────────
+
+// 程序生命周期内只自动开启一次（避免组件重挂载时重复触发）。
+let autoStarted = false
 
 function RecordingToggle() {
   const [recording, setRecording] = useState(false)
@@ -190,8 +201,22 @@ function RecordingToggle() {
       unlisten = fn
     })
 
+    // 周期轮询后端真值，自愈漏接事件 / 启动竞态（与语音识别页同一真相源）。
+    const poll = setInterval(() => {
+      invoke<{ recording: boolean }>('speech_get_recording_state')
+        .then(r => setRecording(r.recording))
+        .catch(() => {/* 忽略抖动 */})
+    }, 2000)
+
+    // 启动默认开启识别（best-effort：地址/设备未配置时静默失败，后端有重复启动保护）。
+    if (!autoStarted) {
+      autoStarted = true
+      invoke('speech_start_recording').catch(() => {/* 未配置则忽略，用户配好后下次自动开启 */})
+    }
+
     return () => {
       unlisten?.()
+      clearInterval(poll)
     }
   }, [])
 
@@ -214,7 +239,7 @@ function RecordingToggle() {
       type="button"
       onClick={() => void toggle()}
       disabled={busy}
-      title={recording ? '点击停止录音' : '点击开始录音（需先在语音识别页配置远程地址/设备）'}
+      title={recording ? '点击停止识别' : '点击开始识别（需先在语音识别页配置远程地址/设备）'}
       className={[
         'flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors disabled:opacity-60',
         recording
@@ -223,7 +248,7 @@ function RecordingToggle() {
       ].join(' ')}
     >
       <Mic size={16} />
-      {recording ? '停止录音' : '开始录音'}
+      {recording ? '停止识别' : '开始识别'}
     </button>
   )
 }

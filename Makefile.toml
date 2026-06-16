@@ -1,0 +1,23 @@
+# cargo-make 任务集（`cargo install cargo-make` 后用 `cargo make <task>`）。
+#
+# zero-desktop 是 Tauri 应用：release 走 `cargo tauri build`（在 crate 目录执行），它会
+# 自动跑 tauri.conf.json 的 beforeBuildCommand（npm run build → ui/dist）再出 release
+# 二进制 + 安装包，无需在此手动调前端构建。
+
+[config]
+# 任务在仓库根执行，不对每个 workspace 成员逐一展开。
+default_to_workspace = false
+
+# ── zero-desktop ──────────────────────────────────────────────────────────────
+
+[tasks.zero-desktop-ui-install]
+description = "安装 zero-desktop 前端依赖（依赖变更时跑一次即可；cargo tauri build 的 beforeBuildCommand 需要 node_modules）"
+cwd = "crates/zero-desktop/ui"
+command = "npm"
+args = ["install"]
+
+[tasks.zero-desktop-release]
+description = "release 编译 zero-desktop（cargo tauri build：前端构建 + Rust release + 安装包）"
+cwd = "crates/zero-desktop"
+command = "cargo"
+args = ["tauri", "build"]

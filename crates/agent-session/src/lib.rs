@@ -96,6 +96,10 @@ pub struct SessionMessage {
     pub role: String,
     /// 已渲染的正文（user/assistant 文本；纯 tool_use 标记为 `[tool_use: name]`，thinking 标记为 `[thinking]`）。
     pub text: String,
+    /// 可展开的详情：thinking 思考正文 / tool_use 入参（JSON）/ tool_result 返回体。
+    /// 仅当消息含此类 block 时为 `Some`，供前端折叠展开；纯文本消息为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     pub timestamp: String,
 }
 

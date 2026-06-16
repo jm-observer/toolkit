@@ -229,7 +229,9 @@ struct SegState {
     sec_kind: Option<String>,
     t0: f64,
     t1: f64,
-    wall: String,
+    /// 权威墙上时钟,优先用 orchestrator 下发的 wall_start/wall_end;缺省回退本地推算。
+    wall_start: String,
+    wall_end: String,
     speaker: Option<String>,
     flashed: bool,
 }
@@ -250,7 +252,6 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
         "[remote][emit] id={id} raw={:?} opt={:?} eng={:?} sec={:?} t=[{:.2},{:.2}]",
         s.raw, s.opt, s.eng, s.sec, s.t0, s.t1
     );
-    let wall_end = add_seconds_to_wall(&s.wall, s.t1 - s.t0);
     let _ = app.emit(
         "segment_updated",
         serde_json::json!({
@@ -259,8 +260,8 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
             "revision": id,
             "start_sec": s.t0,
             "end_sec": s.t1,
-            "wall_start": s.wall,
-            "wall_end": wall_end,
+            "wall_start": s.wall_start,
+            "wall_end": s.wall_end,
             "text_raw": s.raw,
             "optimize_status": optimize_status,
             "translate_status": translate_status,
@@ -269,9 +270,19 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
             "text_secondary": s.sec,
             "secondary_kind": s.sec_kind,
             "speaker": s.speaker,
-            "created_at": s.wall,
+            "created_at": s.wall_start,
         }),
     );
+}
+
+/// 确保段的墙上时钟非空:orchestrator 未下发 wall 时(旧版/兜底)用本地时刻 + 音频时长推算。
+fn ensure_wall_fallback(s: &mut SegState) {
+    if s.wall_start.is_empty() {
+        s.wall_start = now_rfc3339();
+    }
+    if s.wall_end.is_empty() {
+        s.wall_end = add_seconds_to_wall(&s.wall_start, s.t1 - s.t0);
+    }
 }
 
 fn spawn_capture(
@@ -474,9 +485,14 @@ async fn run_one_connection(
                     if let Some(sp) = v.get("speaker").and_then(|x| x.as_str()) {
                         st.speaker = Some(sp.to_string());
                     }
-                    if st.wall.is_empty() {
-                        st.wall = now_rfc3339();
+                    // 权威墙上时钟由 orchestrator 下发(会话锚点 + 音频偏移);缺省回退本地。
+                    if let Some(w) = v.get("wall_start").and_then(|x| x.as_str()) {
+                        st.wall_start = w.to_string();
                     }
+                    if let Some(w) = v.get("wall_end").and_then(|x| x.as_str()) {
+                        st.wall_end = w.to_string();
+                    }
+                    ensure_wall_fallback(st);
                     emit_state(&app_r, id, st);
                 }
                 Some("optimized") => {
@@ -488,9 +504,7 @@ async fn run_one_connection(
                         .to_string();
                     info!(target: "speech", "[remote][optimized] ref={id} text={text:?}");
                     let st = segs.entry(id).or_default();
-                    if st.wall.is_empty() {
-                        st.wall = now_rfc3339();
-                    }
+                    ensure_wall_fallback(st);
                     st.opt = Some(text.clone());
                     emit_state(&app_r, id, st);
                     if !st.flashed && st.opt.is_some() && st.eng.is_some() {
@@ -537,9 +551,7 @@ async fn run_one_connection(
                         .to_string();
                     info!(target: "speech", "[remote][translated] ref={id} text={text:?}");
                     let st = segs.entry(id).or_default();
-                    if st.wall.is_empty() {
-                        st.wall = now_rfc3339();
-                    }
+                    ensure_wall_fallback(st);
                     st.eng = Some(text.clone());
                     emit_state(&app_r, id, st);
                     if !st.flashed && st.opt.is_some() && st.eng.is_some() {
@@ -587,9 +599,7 @@ async fn run_one_connection(
                     let kind = v.get("kind").and_then(|x| x.as_str()).map(str::to_string);
                     info!(target: "speech", "[remote][secondary] ref={id} kind={:?} text={text:?}", kind);
                     let st = segs.entry(id).or_default();
-                    if st.wall.is_empty() {
-                        st.wall = now_rfc3339();
-                    }
+                    ensure_wall_fallback(st);
                     st.sec = Some(text);
                     st.sec_kind = kind;
                     emit_state(&app_r, id, st);

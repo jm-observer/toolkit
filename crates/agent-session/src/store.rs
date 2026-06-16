@@ -463,6 +463,7 @@ fn codex_message_of(e: &Value) -> Option<SessionMessage> {
     Some(SessionMessage {
         role: role.to_string(),
         text: text.to_string(),
+        detail: None,
         timestamp: ts,
     })
 }
@@ -543,15 +544,37 @@ fn claude_status(events: &[Value]) -> SessionStatus {
     }
 }
 
-/// 把 Claude 的 `message.content`（字符串或 block 列表）渲染为可读文本。
-fn claude_content_to_text(content: &Value) -> String {
+/// 把 Claude `tool_result` 的 `content`（字符串或 `[{type:text,text}]`）抽成纯文本。
+fn tool_result_text(content: Option<&Value>) -> String {
+    match content {
+        Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+        Some(v) => v
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+/// 把 Claude 的 `message.content`（字符串或 block 列表）渲染为「可读正文 + 可展开详情」。
+///
+/// 正文里 thinking/tool_use/tool_result 仍是标记（`[thinking]` 等），但各自的真实内容
+/// （思考正文 / 入参 JSON / 返回体）汇入 detail，供前端折叠展开。无可展开内容时 detail 为空串。
+fn claude_content_to_text(content: &Value) -> (String, String) {
     if let Some(s) = content.as_str() {
-        return s.to_string();
+        return (s.to_string(), String::new());
     }
     let Some(blocks) = content.as_array() else {
-        return String::new();
+        return (String::new(), String::new());
     };
     let mut parts = Vec::new();
+    let mut details = Vec::new();
     for b in blocks {
         match b.get("type").and_then(Value::as_str) {
             Some("text") => {
@@ -561,16 +584,37 @@ fn claude_content_to_text(content: &Value) -> String {
                     }
                 }
             }
-            Some("thinking") => parts.push("[thinking]".to_string()),
+            Some("thinking") => {
+                parts.push("[thinking]".to_string());
+                let think = b
+                    .get("thinking")
+                    .or_else(|| b.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !think.is_empty() {
+                    details.push(format!("[thinking]\n{think}"));
+                }
+            }
             Some("tool_use") => {
                 let name = b.get("name").and_then(Value::as_str).unwrap_or("");
                 parts.push(format!("[tool_use: {name}]"));
+                if let Some(input) = b.get("input") {
+                    let pretty = serde_json::to_string_pretty(input)
+                        .unwrap_or_else(|_| input.to_string());
+                    details.push(format!("[tool_use: {name}] 入参\n{pretty}"));
+                }
             }
-            Some("tool_result") => parts.push("[tool_result]".to_string()),
+            Some("tool_result") => {
+                parts.push("[tool_result]".to_string());
+                let body = tool_result_text(b.get("content"));
+                if !body.is_empty() {
+                    details.push(format!("[tool_result]\n{body}"));
+                }
+            }
             _ => {}
         }
     }
-    parts.join(" ")
+    (parts.join(" "), details.join("\n\n"))
 }
 
 /// 把单行 Claude 事件转成消息（user / assistant，正文非空）。
@@ -580,13 +624,14 @@ fn claude_message_of(e: &Value) -> Option<SessionMessage> {
         return None;
     }
     let content = e.get("message").and_then(|m| m.get("content"))?;
-    let text = claude_content_to_text(content);
+    let (text, detail) = claude_content_to_text(content);
     if text.trim().is_empty() {
         return None;
     }
     Some(SessionMessage {
         role: ty,
         text,
+        detail: (!detail.is_empty()).then_some(detail),
         timestamp: str_field(e, "timestamp"),
     })
 }

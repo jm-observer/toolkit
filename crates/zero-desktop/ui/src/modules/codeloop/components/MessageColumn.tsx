@@ -13,11 +13,21 @@ function isFoldable(text: string): boolean {
 }
 
 function Bubble({ msg }: { msg: SessionMessage }) {
-  if (isFoldable(msg.text)) {
+  // 有详情（thinking 正文 / tool_use 入参 / tool_result 返回体）：可展开看正文。
+  if (msg.detail) {
     return (
       <details className="my-1 text-xs text-gray-500 dark:text-gray-400">
         <summary className="cursor-pointer select-none">🔧 {msg.text}</summary>
+        <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 p-2 font-mono text-[11px] leading-relaxed text-gray-600 dark:bg-gray-800/60 dark:text-gray-300">
+          {msg.detail}
+        </pre>
       </details>
+    )
+  }
+  // 纯标记但无正文可展开：渲染成一行灰字，不画误导的展开三角。
+  if (isFoldable(msg.text)) {
+    return (
+      <div className="my-1 select-none text-xs text-gray-400 dark:text-gray-500">🔧 {msg.text}</div>
     )
   }
   const isUser = msg.role === 'user'

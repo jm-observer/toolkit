@@ -69,7 +69,7 @@ export const RecordCard: React.FC<RecordCardProps> = ({
           size={17}
           className={cn(isProcessingOnly && 'animate-spin')}
         />
-        {isError ? '重试连接' : isRecording ? (isProcessingOnly ? '识别处理中' : '停止录音') : '开始录音'}
+        {isError ? '重试连接' : isRecording ? (isProcessingOnly ? '识别处理中' : '停止识别') : '开始识别'}
       </button>
 
       {isError && errorMessage && (

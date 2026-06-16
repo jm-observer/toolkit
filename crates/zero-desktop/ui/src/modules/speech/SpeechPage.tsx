@@ -488,7 +488,7 @@ export default function SpeechPage() {
               <div className="flex flex-col items-center justify-center py-40 gap-4 opacity-30">
                 <Icon name="mic" size={48} stroke={1.2} />
                 <p className="text-sm font-medium">
-                  {store.status === 'idle' ? '准备就绪，点击"开始录音"开始识别' : '当前没有可展示的识别结果'}
+                  {store.status === 'idle' ? '准备就绪，点击"开始识别"开始识别' : '当前没有可展示的识别结果'}
                 </p>
               </div>
             )}

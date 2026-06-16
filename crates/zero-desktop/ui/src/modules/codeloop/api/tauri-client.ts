@@ -17,6 +17,8 @@ export interface SessionSummary {
 export interface SessionMessage {
   role: string
   text: string
+  /** 可展开详情：thinking 正文 / tool_use 入参 / tool_result 返回体（无则缺省）。 */
+  detail?: string
   timestamp: string
 }
 

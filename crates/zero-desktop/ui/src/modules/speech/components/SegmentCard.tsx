@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { cn, stripYear } from '../utils';
 import type { Sample, SampleLabel, Segment } from '../api/tauri-client';
 import { SpeechAPI } from '../api/tauri-client';
@@ -60,9 +60,6 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   const [markError, setMarkError] = useState('');
   const [marked, setMarked] = useState(false);
   const [markResult, setMarkResult] = useState<Sample | null>(null);
-  const cardRef = useRef<HTMLDivElement | null>(null);
-  const maxHeightRef = useRef(0);
-  const [minHeight, setMinHeight] = useState<number | undefined>(undefined);
 
   const handleCopyZh = () => {
     onCopyChinese(segment.text_optimized || segment.text_raw);
@@ -140,39 +137,9 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   const isProcessing = optimizeRunning || translateRunning;
   const duration = segment.end - segment.start;
 
-  useEffect(() => {
-    const element = cardRef.current;
-    if (!element) {
-      return;
-    }
-
-    const initialHeight = element.offsetHeight;
-    if (initialHeight > maxHeightRef.current) {
-      maxHeightRef.current = initialHeight;
-      setMinHeight(initialHeight);
-    }
-
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
-        if (height > maxHeightRef.current) {
-          maxHeightRef.current = height;
-          setMinHeight(height);
-        }
-      }
-    });
-    observer.observe(element);
-
-    return () => {
-      observer.disconnect();
-    };
-  }, []);
-
   return (
     <>
       <div
-        ref={cardRef}
-        style={minHeight !== undefined ? { minHeight: `${minHeight}px` } : undefined}
         className={cn(
           'group relative flex flex-col p-4 px-4.5 gap-2.5 bg-[var(--bg-card)] border border-[var(--line)] rounded-[16px] shadow-[var(--shadow-sm)] transition-shadow transition-colors animate-fade-up',
           'hover:shadow-[var(--shadow-md)] hover:border-[var(--line-strong)]'
