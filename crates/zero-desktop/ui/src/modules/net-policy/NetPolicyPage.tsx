@@ -34,6 +34,20 @@ const EMPTY_CONNS: ConnectionsSnapshot = {
   connections: [],
 }
 
+// 首屏占位状态：让全景图在真实探测（~1s 的 PS 调用）回来前就能立刻渲染出「全灰/未起」骨架，
+// 而不是空白等待。platform_supported 设 true 避免闪一下「不支持」横幅。真实 status 一到即覆盖。
+const LOADING_STATUS: Status = {
+  platform_supported: true,
+  wg_configured: false,
+  killswitch_enabled: false,
+  applied: false,
+  mihomo_running: false,
+  tun_ready: false,
+  protected: false,
+  protection_validated: false,
+  firewall: null,
+}
+
 // ── 小组件（保留原 Panel / btn） ──────────────────────────────────────────────
 
 function Panel({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
@@ -89,21 +103,13 @@ export default function NetPolicyPage() {
   }, [])
 
   // 完整加载（含 settings / rules，动作后用）。
-  const refresh = useCallback(async () => {
-    try {
-      const [s, c, st, r] = await Promise.all([
-        NetPolicyAPI.getStatus(),
-        NetPolicyAPI.getConnections(),
-        NetPolicyAPI.getSettings(),
-        NetPolicyAPI.listRules(),
-      ])
-      setStatus(s)
-      setConns(c)
-      setSettings(st)
-      setRules(r)
-    } catch (e) {
-      flash('err', `加载失败: ${String(e)}`)
-    }
+  // **各请求独立 setState、不再 Promise.all 整体等待**：便宜的 settings/rules（读文件）先到先显，
+  // 慢的 status（~1s 的 PS 探测）/conns 后到补齐。否则首屏全景图被最慢的 status 拖住，无法秒出。
+  const refresh = useCallback(() => {
+    void NetPolicyAPI.getStatus().then(setStatus).catch(() => {})
+    void NetPolicyAPI.getConnections().then(setConns).catch(() => {})
+    void NetPolicyAPI.getSettings().then(setSettings).catch(() => {})
+    void NetPolicyAPI.listRules().then(setRules).catch(() => {})
   }, [])
 
   useEffect(() => { void refresh() }, [refresh])
@@ -197,8 +203,8 @@ export default function NetPolicyPage() {
       {/* 保护状态横幅 */}
       {status && <ProtectionBanner status={status} exitIp={exitIp} exitIpAt={exitIpAt} />}
 
-      {/* 数据通路全景图 */}
-      {status && <FlowTopology status={status} conns={conns} settings={settings} />}
+      {/* 数据通路全景图：用占位状态立即渲染骨架，真实探测回来即覆盖（不被 ~1s 的 status 阻塞）。 */}
+      <FlowTopology status={status ?? LOADING_STATUS} conns={conns} settings={settings} />
 
       {/* 应用流程分步 stepper */}
       <ApplyStepper onApply={applyPolicy} busy={busy} canApply={!!status?.wg_configured} />

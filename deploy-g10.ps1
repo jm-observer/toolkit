@@ -38,7 +38,8 @@ $Image = "huangjiemin/rust_aarch64-gcc_openssl:1.94.0_9.4.0_1.1.0l_llvm12.0.1"
 $Bins = @(
     @{ Crate = "github_commit_info"; Bin = "github-commit-info" },
     @{ Crate = "hf_watcher";         Bin = "hf-watcher" },
-    @{ Crate = "douyin";             Bin = "douyin" }
+    @{ Crate = "douyin";             Bin = "douyin" },
+    @{ Crate = "toolkit-server";     Bin = "toolkit-server" }
 )
 
 if (-not $SkipBuild) {
@@ -52,10 +53,18 @@ if (-not $SkipBuild) {
         "cargo build --release --target $Target -p $($_.Crate) --features prod"
     }) -join " && "
 
-    # 挂载仓库；用命名卷缓存 cargo registry，加速重复构建。
+    # workspace Cargo.toml 当前用本地 path 依赖 `custom-utils = { path = "../custom-utils" }`，
+    # 容器内仓库挂在 /work，故 ../custom-utils 解析为 /custom-utils —— 必须把同级目录也挂进去。
+    $CustomUtils = Join-Path (Split-Path $RepoRoot -Parent) "custom-utils"
+    if (-not (Test-Path (Join-Path $CustomUtils "Cargo.toml"))) {
+        throw "未找到本地 custom-utils（$CustomUtils）；workspace 依赖 path = ../custom-utils，无它无法交叉编译。"
+    }
+
+    # 挂载仓库 + 同级 custom-utils；用命名卷缓存 cargo registry，加速重复构建。
     # AR_ 显式补上（镜像只预置了 CC_/CXX_/LINKER）。
     docker run --rm `
         -v "${RepoRoot}:/work" `
+        -v "${CustomUtils}:/custom-utils" `
         -v "zero-tools-cargo-registry:/usr/local/cargo/registry" `
         -w /work `
         -e AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar `
@@ -77,14 +86,17 @@ if ($LASTEXITCODE -ne 0) { throw "无法在 G10 创建目录 $DestDir（检查 s
 
 foreach ($b in $Bins) {
     $local = Join-Path $ReleaseDir $b.Bin
+    $dest = "$DestDir/$($b.Bin)"
     Write-Host "    scp $($b.Bin)"
-    scp $local "${G10Host}:$DestDir/$($b.Bin)"
+    # 先传到 .new 临时名，再 mv 覆盖：rename 即使旧二进制正在运行也能替换
+    # （直接 scp 覆盖运行中的二进制会 ETXTBSY / dest open Failure）。
+    scp $local "${G10Host}:${dest}.new"
     if ($LASTEXITCODE -ne 0) { throw "scp $($b.Bin) 失败" }
+    ssh $G10Host "chmod +x ${dest}.new && mv -f ${dest}.new ${dest}"
+    if ($LASTEXITCODE -ne 0) { throw "替换 $($b.Bin) 失败（mv）" }
 }
 
-# 保证可执行 + 打印版本确认。
-$binNames = ($Bins | ForEach-Object { "$DestDir/$($_.Bin)" }) -join " "
-ssh $G10Host "chmod +x $binNames"
+# 打印版本确认。
 Write-Host "==> 远端版本确认" -ForegroundColor Cyan
 foreach ($b in $Bins) {
     ssh $G10Host "$DestDir/$($b.Bin) --version"

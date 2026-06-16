@@ -16,7 +16,7 @@ fn linux_service() -> LinuxService {
     LinuxService::new(APP, REPO_OWNER, REPO_NAME, env!("CARGO_PKG_VERSION"))
         .bin_name(APP)
         .description("toolkit-server: axum + toolkit-core/tasks daemon")
-        .exec_args("serve --workspace {workspace} --bind 127.0.0.1:8788")
+        .exec_args("serve --workspace {workspace} --bind 0.0.0.0:8788")
         .watchdog_sec(WATCHDOG_SEC)
         .restart_sec(5)
 }

@@ -104,6 +104,8 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
         .plugin(tauri_plugin_notification::init())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
+            // 通用
+            shared::console::open_toolkit_console,
             // English 模块
             modules::english::english_ping,
             modules::english::english_get_g10_base,
@@ -159,6 +161,14 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::net_policy::net_policy_apply,
             modules::net_policy::net_policy_emergency_stop,
             modules::net_policy::net_policy_verify,
+            // codeloop 模块（Codex⇄Claude 复核循环）
+            modules::codeloop::codeloop_list_sessions,
+            modules::codeloop::codeloop_new_codex_session,
+            modules::codeloop::codeloop_session_messages,
+            modules::codeloop::codeloop_start,
+            modules::codeloop::codeloop_status,
+            modules::codeloop::codeloop_answer,
+            modules::codeloop::codeloop_stop,
         ])
         .setup(move |app| {
             modules::english::setup(app.handle(), state.english.clone())

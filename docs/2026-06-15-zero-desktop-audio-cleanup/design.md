@@ -327,3 +327,37 @@ cargo test --workspace
 3. 选一段带 BGM 的 mp4 → separate=1 / denoise=1 → 清洗 → 校验生成 `<stem>.cleaned.wav`、
    原文件仍在、`stages` 含 `separate,denoise,…`、in/out LUFS 合理（out≈-16）。
 4. toolkit-server 不设 `CLEAN_BASE_URL` → 桌面端提示「清洗服务未配置」，不崩溃。
+
+---
+
+## 9. 实现状态（2026-06-16 收口）
+
+**已实现，自动化验证全绿**（`cargo fmt` / `cargo clippy -p zero-desktop -- -D warnings` /
+`cargo check -p toolkit-server` / clean.rs 6 项单测 / UI `tsc --noEmit` 均通过）。
+
+| 设计条目 | 状态 | 落点 |
+|---|---|---|
+| §3.-1 后端自取 `g10_base`/`g10_token` + Bearer、去掉前端 `toolkit_base` | ✅ | `clean.rs` `speech_clean_recording` 签名 `State<AppState>` |
+| §3.0 multipart 字段 `audio` + 按扩展名映射 MIME（回退 octet-stream） | ✅ | `clean.rs::mime_for_ext` |
+| §3.1 入参对齐完整选项集（separate/denoise/pause/level/loudness/sr/format，缺省不发字段） | ✅ | `speech_clean_recording` 条件 `form.text(...)` |
+| §3.1 选项白名单校验（pause/level/format/sr 非法早返回） | ✅ | `clean.rs::validate_choice` + sr `matches!` |
+| §3.2 输出后缀跟随 `format` + 不覆盖原文件安全闸 | ✅ | `clean.rs::cleaned_variant_path(input, format)` |
+| §3.3/§6 错误映射 + `X-Clean-Proxy` 区分「未配置 503」vs「上游 busy 503」 | ✅ | `clean.rs` status match + 代理 `clean_unavailable()` 加头 |
+| §5.1 复用全局 `g10_base`，不新增 speech 设置项 | ✅ | `settings.rs::clean_endpoint()` helper |
+| §5.2 独立「音频清洗」卡片，与 segment 流解耦 | ✅ | `ui/.../components/AudioCleanCard.tsx` 挂进 `SpeechPage.tsx` |
+| §5.3 文件选择 / §5.4「打开所在文件夹」走**后端命令**（零新增前端依赖，首选方案） | ✅ | `speech_pick_audio_file`（dialog Rust API）/ `speech_open_in_folder`（shell Rust API，`#[allow(deprecated)]` 刻意复用 shell 插件） |
+| §5.4 API 封装 `cleanRecording`/`pickAudioFile`/`openInFolder` + 类型 | ✅ | `ui/.../api/tauri-client.ts` |
+| §8 后端单测：format 跟随后缀 / MIME 映射 / 白名单校验 | ✅ | `clean.rs::tests`（6 项） |
+
+**与设计的取舍/偏差**：
+
+- §8 列的「mock 代理 200/503/502 网络往返单测」**未做**：现有 `clean.rs` 测试风格为纯函数单测（无
+  HTTP mock 依赖），新增 mock server 会引入 `wiremock` 等测试依赖，按「未经同意不加依赖」规约从简，
+  改以纯函数单测覆盖派生路径 / MIME / 白名单等可单测逻辑；网络分支（503 区分等）靠 §8 端到端手测覆盖。
+- §4 录音库关联记录：按 MVP 决策**不入库**，未建 `cleaned_audio` 表。
+- §8 端到端手测（步骤 1-4）**需实机环境**（起 `:8097` audio-cleanup + toolkit-server + Tauri 桌面端），
+  尚未执行，留待部署阶段。
+
+**备注**：`speech_open_in_folder` 用 `tauri-plugin-shell` 的 `Shell::open`（已被官方标记 deprecated，
+建议迁 `tauri-plugin-opener`）。本实现刻意保留并 `#[allow(deprecated)]`，理由是设计 §5.3 明确「不新增
+依赖」；若后续允许引入 `tauri-plugin-opener` 可平滑替换。

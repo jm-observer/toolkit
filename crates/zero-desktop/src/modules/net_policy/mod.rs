@@ -111,27 +111,40 @@ pub struct NetPolicyStatus {
     pub firewall: Option<firewall::FirewallStatus>,
 }
 
-#[tauri::command]
-pub fn net_policy_get_status(state: State<'_, AppState>) -> Result<NetPolicyStatus, String> {
-    let np = &state.net_policy;
+/// 计算当前状态快照。**含多次 PowerShell 冷启动**（firewall::status / engine::running /
+/// engine::tun_up），是阻塞操作——**绝不能在主线程直接跑**，否则 webview 卡死（见
+/// `net_policy_get_status` 注释）。调用方必须在 `spawn_blocking` 或已有的阻塞任务里调它。
+fn compute_status(np: &NetPolicyState) -> NetPolicyStatus {
     let settings = config::load_settings(&np.workspace);
     let (applied, secret) = {
         let rt = np.rt.lock().unwrap();
         (rt.applied, rt.secret.clone())
     };
-    let firewall = if win::is_windows() {
-        firewall::status().ok()
+    // 三个 Windows 探测各自冷启动一个 powershell（firewall::status 的 Get-NetFirewallRule、
+    // engine::running 的 controller /version、engine::tun_up 的 Get-NetAdapter），单个就 ~0.3–1s。
+    // 串行叠加是「全景图不秒出」的根因——改为**并发**跑，墙钟降到最慢的那一个。
+    // （原先 tun_up 在 !running 时跳过省一次 spawn，并发后无此必要；语义仍是 running && tun_up。）
+    let (firewall, mihomo_running, tun_up) = if win::is_windows() {
+        let secret = secret.clone().unwrap_or_default();
+        std::thread::scope(|s| {
+            let fw = s.spawn(firewall::status);
+            let run = s.spawn(|| engine::running(&secret));
+            let tun = s.spawn(engine::tun_up);
+            (
+                fw.join().ok().and_then(|r| r.ok()),
+                run.join().unwrap_or(false),
+                tun.join().unwrap_or(false),
+            )
+        })
     } else {
-        None
+        (None, false, false)
     };
-    let mihomo_running = win::is_windows() && engine::running(secret.as_deref().unwrap_or(""));
-    // TUN 起栈检查只在 controller 可达时才有意义（也省掉一次无谓的 PS 调用）。
-    let tun_ready = mihomo_running && engine::tun_up();
+    let tun_ready = mihomo_running && tun_up;
     let protected = settings.killswitch_enabled
         && firewall.as_ref().map(|f| f.active).unwrap_or(false)
         && mihomo_running
         && tun_ready;
-    Ok(NetPolicyStatus {
+    NetPolicyStatus {
         platform_supported: win::is_windows(),
         wg_configured: engine::validate(&settings).is_ok(),
         killswitch_enabled: settings.killswitch_enabled,
@@ -141,7 +154,21 @@ pub fn net_policy_get_status(state: State<'_, AppState>) -> Result<NetPolicyStat
         protected,
         protection_validated: FIREWALL_MODEL_VALIDATED,
         firewall,
-    })
+    }
+}
+
+/// 状态快照（驱动全景图 + 保护横幅）。**异步 command**：内部 `compute_status` 会串行冷启动
+/// 多个 `powershell.exe`（firewall/controller/TUN 探测，~1–2s），若作为同步 command 会在
+/// **主线程**执行并卡死 webview（全景图渲染延迟、界面周期性"未响应"——该页 3s 快轮询会反复触发）。
+/// 故改为 async + `spawn_blocking`，把阻塞探测挪出 UI 线程。
+#[tauri::command]
+pub async fn net_policy_get_status(
+    state: State<'_, AppState>,
+) -> Result<NetPolicyStatus, String> {
+    let np = state.net_policy.clone();
+    tokio::task::spawn_blocking(move || compute_status(&np))
+        .await
+        .map_err(err)
 }
 
 /// 活跃连接快照（P0-1，设计 §3.1/§5）：代理运行中 mihomo 的 external-controller `/connections`，
@@ -450,7 +477,10 @@ pub async fn net_policy_apply(
     .map_err(err)?
     .map_err(err)?;
 
-    net_policy_get_status(state)
+    let np = state.net_policy.clone();
+    tokio::task::spawn_blocking(move || compute_status(&np))
+        .await
+        .map_err(err)
 }
 
 /// 紧急停止 / 撤销。**顺序（P1-2）**：先在 kill-switch 仍生效时优雅停引擎（API 关 TUN
@@ -488,7 +518,9 @@ pub async fn net_policy_emergency_stop(
         rt.mihomo_pid = None;
         rt.secret = None;
     }
-    net_policy_get_status(state)
+    tokio::task::spawn_blocking(move || compute_status(&np))
+        .await
+        .map_err(err)
 }
 
 // ============ 验证 ============

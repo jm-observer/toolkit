@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, Settings } from 'lucide-react'
+import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, Settings, ExternalLink } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import EnvConfigService from '../modules/english/services/EnvConfigService'
@@ -11,6 +11,7 @@ const navItems = [
   { to: '/audio-clean', icon: Wand2, label: '音频清洗' },
   { to: '/cookie', icon: Cookie, label: 'Cookie 采集' },
   { to: '/net-policy', icon: ShieldCheck, label: '网络策略' },
+  { to: '/codeloop', icon: GitCompareArrows, label: '复核循环' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 
@@ -169,6 +170,63 @@ function RecordingIndicator() {
   )
 }
 
+// ── 全局录音开关（侧栏常驻，不必切到语音识别页即可启停） ─────────────────────
+
+function RecordingToggle() {
+  const [recording, setRecording] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+
+    invoke<{ recording: boolean }>('speech_get_recording_state')
+      .then(r => setRecording(r.recording))
+      .catch(() => {/* 忽略初始拉取失败 */})
+
+    listen<{ recording: boolean }>('speech_recording_state_changed', event => {
+      setRecording(event.payload.recording)
+    }).then(fn => {
+      unlisten = fn
+    })
+
+    return () => {
+      unlisten?.()
+    }
+  }, [])
+
+  const toggle = async () => {
+    setBusy(true)
+    try {
+      // 启停命令无参，配置（远程地址/输入设备）由后端从已保存状态读取。
+      if (recording) await invoke('speech_stop_recording')
+      else await invoke('speech_start_recording')
+    } catch (e) {
+      // 例如远程识别地址未配置：到语音识别页设置后再试。
+      window.alert(`录音操作失败：${String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void toggle()}
+      disabled={busy}
+      title={recording ? '点击停止录音' : '点击开始录音（需先在语音识别页配置远程地址/设备）'}
+      className={[
+        'flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors disabled:opacity-60',
+        recording
+          ? 'bg-red-500 text-white hover:bg-red-600'
+          : 'bg-blue-500 text-white hover:bg-blue-600',
+      ].join(' ')}
+    >
+      <Mic size={16} />
+      {recording ? '停止录音' : '开始录音'}
+    </button>
+  )
+}
+
 // ── customer_id 指示灯（mount-once + 监听设置保存事件） ─────────────────────
 
 function CustomerIdIndicator() {
@@ -236,7 +294,27 @@ export default function ShellLayout() {
               {label}
             </NavLink>
           ))}
+
+          {/* toolkit-server 控制台：外部链接，用系统浏览器打开（非路由跳转） */}
+          <button
+            type="button"
+            onClick={() => {
+              void invoke('open_toolkit_console').catch(e =>
+                console.error('[ShellLayout] 打开控制台失败:', e),
+              )
+            }}
+            title="在浏览器打开 toolkit-server 控制台（地址见设置页）"
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-200 dark:text-gray-300 dark:hover:bg-gray-800"
+          >
+            <ExternalLink size={16} />
+            控制台
+          </button>
         </nav>
+
+        {/* 侧栏底部：全局录音开关，任何页面都能启停 */}
+        <div className="border-t border-gray-200 p-2 dark:border-gray-800">
+          <RecordingToggle />
+        </div>
       </aside>
 
       {/* 右侧主区域 */}

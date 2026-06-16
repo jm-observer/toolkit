@@ -49,6 +49,45 @@ pub fn codex_argv(repo_root: &Path, session_id: &str, prompt: &str) -> Vec<Strin
     ]
 }
 
+/// 构造 Codex `exec`（**新建会话**，不带 `resume`）的 argv（不含 `codex` 程序名本身）。
+///
+/// 与 [`codex_argv`] 同形但省去 `resume <id>`：codex 会创建一个新会话，其 id 由首个
+/// `thread.started` 事件的 `thread_id` 给出（见 [`parse_codex_thread_id`]）。
+pub fn codex_create_argv(repo_root: &Path, prompt: &str) -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        "-s".to_string(),
+        "workspace-write".to_string(),
+        "-c".to_string(),
+        "approval_policy=\"never\"".to_string(),
+        "--cd".to_string(),
+        repo_root.to_string_lossy().to_string(),
+        "--json".to_string(),
+        prompt.to_string(),
+    ]
+}
+
+/// 从 codex `exec --json` stdout 解析新建会话 id：首个 `thread.started` 事件的 `thread_id`。
+pub fn parse_codex_thread_id(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) == Some("thread.started") {
+            if let Some(id) = v.get("thread_id").and_then(Value::as_str) {
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 构造 Claude `-p --resume` 的 argv（不含 `claude` 程序名本身）。
 ///
 /// 注意：Claude 必须在会话原始 cwd 下 spawn（由调用方 `current_dir` 设置），argv 不含目录。
@@ -156,6 +195,16 @@ pub async fn send(s: &SessionRef, prompt: &str) -> Result<TurnResult> {
     }
 }
 
+/// 新建一个 Codex 会话：在 `cwd` 下跑一轮 `codex exec`（无 resume），返回新会话 id。
+///
+/// **会真实调用 codex CLI 并消耗额度**——不要在单测中调用。`prompt` 是建立会话的种子提示词。
+pub async fn create_codex_session(cwd: &Path, prompt: &str) -> Result<String> {
+    let argv = codex_create_argv(cwd, prompt);
+    let stdout = run_capture("codex", &argv, Some(cwd)).await?;
+    parse_codex_thread_id(&stdout)
+        .ok_or_else(|| anyhow!("codex 新建会话未返回 thread_id；stdout 末段：{}", tail(&stdout)))
+}
+
 /// 起子进程并捕获 stdout；非零退出码视为基础设施错误（`Err`）。
 ///
 /// 带 [`TURN_TIMEOUT`] 硬超时：`stdin` 接 null（CLI 误等交互时立即 EOF），`kill_on_drop`
@@ -237,6 +286,46 @@ mod tests {
                 "acceptEdits",
             ]
         );
+    }
+
+    #[test]
+    fn codex_create_argv_has_no_resume() {
+        let argv = codex_create_argv(&PathBuf::from("D:/git/repo"), "建立会话");
+        assert_eq!(
+            argv,
+            vec![
+                "exec",
+                "-s",
+                "workspace-write",
+                "-c",
+                "approval_policy=\"never\"",
+                "--cd",
+                "D:/git/repo",
+                "--json",
+                "建立会话",
+            ]
+        );
+        assert!(!argv.iter().any(|a| a == "resume"));
+    }
+
+    #[test]
+    fn parse_codex_thread_id_from_started_event() {
+        let stdout = concat!(
+            r#"{"type":"thread.started","thread_id":"019eca83-aaaa"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
+        );
+        assert_eq!(
+            parse_codex_thread_id(stdout),
+            Some("019eca83-aaaa".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_codex_thread_id_none_when_absent() {
+        let stdout = r#"{"type":"turn.started"}"#;
+        assert_eq!(parse_codex_thread_id(stdout), None);
     }
 
     #[test]

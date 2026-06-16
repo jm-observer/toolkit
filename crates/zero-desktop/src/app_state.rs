@@ -1,5 +1,6 @@
 use crate::modules::{
-    cookie::CookieState, english::EnglishState, net_policy::NetPolicyState, speech::SpeechState,
+    codeloop::CodeloopState, cookie::CookieState, english::EnglishState,
+    net_policy::NetPolicyState, speech::SpeechState,
 };
 use crate::shared::workspace::speech_db_path;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ pub struct AppState {
     pub speech: Arc<SpeechState>,
     pub cookie: Arc<CookieState>,
     pub net_policy: Arc<NetPolicyState>,
+    pub codeloop: Arc<CodeloopState>,
 }
 
 impl AppState {
@@ -26,6 +28,7 @@ impl AppState {
             speech,
             cookie,
             net_policy,
+            codeloop: Arc::new(CodeloopState::default()),
         })
     }
 }
