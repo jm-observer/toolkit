@@ -229,7 +229,8 @@ async function pollTask() {
     if (p.seq > loop.answeredSeq && loop.pendingSeq !== p.seq) {
       showModal(p.seq, p.question || {});
     }
-  } else if (loop.pendingSeq == null) {
+  } else {
+    // 已离开 awaiting（含被其他客户端应答）→ 无条件关闭，避免遗留陈旧弹窗。
     hideModal();
   }
 }

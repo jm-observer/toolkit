@@ -6,7 +6,8 @@
 
 use super::io;
 use super::parse::{self, AskUser, Verdict};
-use super::prompt::{self, ReviewMode};
+use super::prompt::{self, ReviewMode, TargetSpec};
+use super::validate;
 use agent_session::driver;
 use agent_session::store::Store;
 use agent_session::{Provider, SessionRef};
@@ -96,13 +97,13 @@ impl TaskKind for CrossReviewTask {
     }
 }
 
-/// 运行期上下文：解析好的两端 SessionRef + label + 配置。
+/// 运行期上下文：解析好的两端 SessionRef + target 定位 + 配置。
 struct LoopCtx {
     ctx: TaskCtx,
     store: Store,
     claude: SessionRef,
     codex: SessionRef,
-    target_label: String,
+    target: TargetSpec,
     mode: ReviewMode,
     max_rounds: u32,
     wait_for_claude_idle: bool,
@@ -112,16 +113,45 @@ struct LoopCtx {
 impl LoopCtx {
     fn new(input: CrossReviewInput, ctx: TaskCtx, store: Store) -> Result<Self> {
         let claude = resolve_ref(&store, Provider::Claude, &input.claude)?;
-        let codex = resolve_ref(&store, Provider::Codex, &input.codex)?;
-        let target_label = input
+        let mut codex = resolve_ref(&store, Provider::Codex, &input.codex)?;
+
+        // §4.1 三方一致性校验在任务内**权威执行**：HTTP /codeloop/submit 只是提前返回 400
+        // 的友好层；经通用 /tasks 入口直接提交 cross_review 也必须过此校验，避免跑错仓 / 越界。
+        let validated = validate::validate_three_way(&claude.cwd, &codex.cwd, &input.target_path)
+            .context("三方仓库一致性校验失败")?;
+
+        // 去掉 Windows `\\?\` 扩展前缀，用于子进程 `--cd` 与 prompt 展示。
+        let repo_root = validate::display_path(&validated.repo_root);
+        let target_abs = validate::display_path(&validated.target_abs);
+        let repo_rel = validated
+            .target_abs
+            .strip_prefix(&validated.repo_root)
+            .unwrap_or(&validated.target_abs)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // Codex `exec resume` 的 `--cd` 用工作树根（比子目录 cwd 更稳），消除相对路径歧义。
+        // Claude `--resume` 必须在会话原始 cwd 下执行，保持不动。
+        codex.cwd = repo_root.clone();
+
+        let repo_root_s = repo_root.to_string_lossy().to_string();
+        let target_abs_s = target_abs.to_string_lossy().to_string();
+        let label = input
             .target_label
-            .unwrap_or_else(|| prompt::default_label(&input.target_path));
+            .unwrap_or_else(|| prompt::default_label(&repo_rel));
+        let target = TargetSpec {
+            label,
+            repo_root: repo_root_s,
+            repo_rel,
+            abs: target_abs_s,
+        };
+
         Ok(Self {
             ctx,
             store,
             claude,
             codex,
-            target_label,
+            target,
             mode: input.mode,
             max_rounds: input.max_rounds.max(1),
             wait_for_claude_idle: input.wait_for_claude_idle,
@@ -148,7 +178,7 @@ impl LoopCtx {
 
         for n in 1..=self.max_rounds {
             // 1. Codex 复核（含 ASK_USER 挂起处理）。
-            let codex_prompt = prompt::render_codex_prompt(&self.target_label, self.mode, n);
+            let codex_prompt = prompt::render_codex_prompt(&self.target, self.mode, n);
             let review = match self.send_and_resolve(&self.codex, &codex_prompt).await? {
                 Resolved::Reply(r) => r,
                 Resolved::Timeout => {
@@ -192,7 +222,7 @@ impl LoopCtx {
             }
 
             // 4. Claude 据意见修订（含 ASK_USER 挂起处理）。
-            let claude_prompt = prompt::render_claude_prompt(&self.target_label, &review);
+            let claude_prompt = prompt::render_claude_prompt(&self.target, &review);
             let revision = match self.send_and_resolve(&self.claude, &claude_prompt).await? {
                 Resolved::Reply(r) => r,
                 Resolved::Timeout => {
@@ -302,7 +332,7 @@ impl LoopCtx {
         let mut payload = json!({
             "task_id": self.ctx.task_id,
             "kind": kind,
-            "title": self.target_label,
+            "title": self.target.label,
         });
         if let (Value::Object(map), Value::Object(ex)) = (&mut payload, extra) {
             map.extend(ex);

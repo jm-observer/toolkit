@@ -1,8 +1,15 @@
 //! §4.1 三方一致性校验：Claude.cwd / Codex.cwd / target_path 各自向上找 `.git` 求 repo
-//! root，要求三者相等且 target 落在 root 内。拒绝跑错仓。
+//! root，要求两端会话同根、且 target 落在 root 内。拒绝跑错仓。
+//!
+//! 越界校验**纯词法（lexical）归一**后再 `starts_with`：`std::fs::canonicalize` 对**不存在**的
+//! target 会失败回退原始路径，使 `D:\repo\..\outside\new.md` 之类的 `..` 能骗过 `starts_with`
+//! （`Path::starts_with` 按 component 比较，认为它仍以 `D:\repo` 开头）。这里改为先词法消解
+//! `.`/`..`，再 canonicalize 最近的**已存在祖先** + 拼接归一尾段，使比较两侧前缀一致
+//! （含 Windows `\\?\` 扩展长度前缀）。
 
 use anyhow::{anyhow, bail, Result};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 /// 从 `start` 向上逐级找含 `.git` 的目录（工作树根）。找不到返回 `None`。
 ///
@@ -18,7 +25,8 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// 校验结果：三方共同的 repo root，以及 canonical 化后的 target 绝对路径。
+/// 校验结果：两端共同的 repo root，以及归一化后的 target 绝对路径。
+/// 两者都已 canonicalize（Windows 下含 `\\?\` 前缀），用于安全比较。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Validated {
     pub repo_root: PathBuf,
@@ -30,8 +38,8 @@ pub struct Validated {
 /// - `claude_cwd` / `codex_cwd`：两会话解析出的工作目录。
 /// - `target_path`：可为相对（相对 repo root）或绝对路径。
 ///
-/// 成功返回共同 repo root + target 绝对路径；任一不一致 / 找不到 `.git` / target 越界 → `Err`
-/// （消息含三方实际路径，供 400 提示）。
+/// 成功返回共同 repo root + target 绝对路径；两端不同根 / 找不到 `.git` / target 越界 → `Err`
+/// （消息含实际路径，供 400 提示）。
 pub fn validate_three_way(
     claude_cwd: &Path,
     codex_cwd: &Path,
@@ -42,53 +50,110 @@ pub fn validate_three_way(
     let codex_root = find_repo_root(codex_cwd)
         .ok_or_else(|| anyhow!("Codex cwd 向上未找到 .git：{}", codex_cwd.display()))?;
 
-    // target 可能是相对路径（相对 claude_root 解析）或绝对路径。
-    let target_raw = {
+    // 两端 repo root 必须相等（canonicalize 抹平 .. / 大小写 / 符号链接差异）。
+    let cr = canon(&claude_root);
+    let dr = canon(&codex_root);
+    if cr != dr {
+        bail!(
+            "两端不在同一工作树：Claude repo root={}，Codex repo root={}（claude cwd={}，codex cwd={}）",
+            claude_root.display(),
+            codex_root.display(),
+            claude_cwd.display(),
+            codex_cwd.display(),
+        );
+    }
+    let repo_root = cr;
+
+    // target 可能是相对路径（相对 repo root 解析）或绝对路径。
+    let raw = {
         let p = Path::new(target_path);
         if p.is_absolute() {
             p.to_path_buf()
         } else {
-            claude_root.join(p)
+            repo_root.join(p)
         }
     };
-    let target_root = find_repo_root(&target_raw)
-        .ok_or_else(|| anyhow!("target_path 向上未找到 .git：{}", target_raw.display()))?;
+    // 词法归一 + canonicalize 最近已存在祖先（避免对未创建的 target 文件报错，且与 repo_root
+    // 的 canonical 前缀对齐）。
+    let target_abs = normalized_abs(&raw);
 
-    // 三方 repo root 必须相等（canonicalize 抹平 .. / 大小写 / 符号链接差异）。
-    let cr = canon(&claude_root);
-    let dr = canon(&codex_root);
-    let tr = canon(&target_root);
-    if cr != dr || cr != tr {
+    // target 必须落在 root 内（此时两侧前缀一致，`..` 已被消解）。
+    if !target_abs.starts_with(&repo_root) {
         bail!(
-            "三方不在同一工作树：Claude repo root={}，Codex repo root={}，target repo root={}（claude cwd={}，codex cwd={}，target={}）",
-            claude_root.display(),
-            codex_root.display(),
-            target_root.display(),
-            claude_cwd.display(),
-            codex_cwd.display(),
+            "target_path 越界 / 不在 repo root 内：target={}，root={}（原始 target={}）",
+            target_abs.display(),
+            repo_root.display(),
             target_path,
         );
     }
 
-    // target 必须落在 root 内。
-    let target_abs = canon(&target_raw);
-    if !target_abs.starts_with(&cr) {
-        bail!(
-            "target_path 不在 repo root 内：target={}，root={}",
-            target_abs.display(),
-            cr.display(),
-        );
-    }
-
     Ok(Validated {
-        repo_root: cr,
+        repo_root,
         target_abs,
     })
 }
 
-/// canonicalize 兜底：路径不存在时退回逻辑归一（避免对未创建的 target 文件报错）。
+/// canonicalize 兜底：路径不存在时退回逻辑归一（仅用于必存在的 repo root）。
 fn canon(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// 纯词法归一：消解 `.` 与 `..`（不触碰文件系统），`..` 不会越过 root/prefix。
+fn normalize_lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // pop 到 root（含 Windows 盘符前缀）即停，`..` 不会逃出 root。
+                out.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                out.push(comp.as_os_str());
+            }
+        }
+    }
+    out
+}
+
+/// 词法归一后，canonicalize 最近的已存在祖先，再拼接归一过的尾段。
+///
+/// 这样即便 target 文件尚未创建，比较两侧（target 与 repo_root）也都经过 canonicalize，
+/// 前缀（如 Windows `\\?\`）一致，`starts_with` 判定可靠。
+fn normalized_abs(raw: &Path) -> PathBuf {
+    let lex = normalize_lexical(raw);
+    let mut tail: Vec<OsString> = Vec::new();
+    let mut cur: &Path = &lex;
+    loop {
+        if cur.exists() {
+            let mut base = std::fs::canonicalize(cur).unwrap_or_else(|_| cur.to_path_buf());
+            for name in tail.iter().rev() {
+                base.push(name);
+            }
+            return base;
+        }
+        match (cur.file_name(), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                cur = parent;
+            }
+            // 无更上层（已到 root 且不存在）：退回词法归一结果（best-effort）。
+            _ => return lex,
+        }
+    }
+}
+
+/// 去掉 Windows `\\?\` 扩展长度前缀，得到适合显示 / 传给子进程 `--cd` 的常规路径。
+/// 非 Windows / 无前缀时原样返回。
+pub fn display_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p.to_path_buf()
 }
 
 #[cfg(test)]
@@ -150,5 +215,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = validate_three_way(tmp.path(), tmp.path(), "foo.md").unwrap_err();
         assert!(format!("{err}").contains(".git"));
+    }
+
+    #[test]
+    fn three_way_ok_for_nonexistent_target_in_repo() {
+        // target 尚未创建：仍应通过（落在 repo root 内）。
+        let tmp = make_repo();
+        let root = tmp.path();
+        let v = validate_three_way(root, root, "docs/new-not-created.md").unwrap();
+        assert!(v.target_abs.starts_with(&v.repo_root));
+        assert!(v.target_abs.ends_with("new-not-created.md"));
+    }
+
+    #[test]
+    fn three_way_rejects_parent_escape_even_when_nonexistent() {
+        // `..` 逃出 repo root（且目标不存在）必须被拒——这是修复前能绕过的越界路径。
+        let tmp = make_repo();
+        let root = tmp.path();
+        let err = validate_three_way(root, root, "../outside/new.md").unwrap_err();
+        assert!(format!("{err}").contains("repo root"));
+    }
+
+    #[test]
+    fn three_way_rejects_absolute_outside_root() {
+        let tmp = make_repo();
+        let other = tempfile::tempdir().unwrap();
+        let outside = other.path().join("evil.md");
+        let err =
+            validate_three_way(tmp.path(), tmp.path(), &outside.to_string_lossy()).unwrap_err();
+        assert!(format!("{err}").contains("repo root"));
+    }
+
+    #[test]
+    fn three_way_accepts_dotdot_that_stays_within_root() {
+        // crates/../docs/foo.md 词法归一 = docs/foo.md，仍在 root 内 → 通过。
+        let tmp = make_repo();
+        let root = tmp.path();
+        let v = validate_three_way(root, root, "crates/../docs/foo.md").unwrap();
+        assert_eq!(v.target_abs, canon(&root.join("docs/foo.md")));
     }
 }

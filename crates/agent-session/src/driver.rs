@@ -19,9 +19,16 @@ use crate::{Provider, SessionRef, TurnResult};
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 /// stdout 末段保留长度（排障用），避免把超长输出整段塞进 TurnResult。
 const RAW_TAIL_MAX: usize = 4096;
+
+/// 单轮 CLI 执行硬超时：codex / claude 网络卡死、等交互、子进程不退出时兜底，
+/// 防止任务永久 running。超时后 kill 子进程并返回基础设施错（→ 任务 failed）。
+/// 取较宽松值（含 agent 真实改文件的耗时），仅防真正的 hang。
+const TURN_TIMEOUT: Duration = Duration::from_secs(1200);
 
 /// 构造 Codex `exec resume` 的 argv（不含 `codex` 程序名本身）。
 ///
@@ -150,16 +157,31 @@ pub async fn send(s: &SessionRef, prompt: &str) -> Result<TurnResult> {
 }
 
 /// 起子进程并捕获 stdout；非零退出码视为基础设施错误（`Err`）。
+///
+/// 带 [`TURN_TIMEOUT`] 硬超时：`stdin` 接 null（CLI 误等交互时立即 EOF），`kill_on_drop`
+/// 保证超时丢弃 future 时子进程被杀，避免僵尸进程 / 任务永久 running。
 async fn run_capture(program: &str, argv: &[String], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(argv);
+    cmd.args(argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    let output = cmd
-        .output()
-        .await
+    let child = cmd
+        .spawn()
         .with_context(|| format!("spawn {program} 失败（CLI 是否已安装并在 PATH 中？）"))?;
+    let output = match tokio::time::timeout(TURN_TIMEOUT, child.wait_with_output()).await {
+        Ok(r) => r.with_context(|| format!("等待 {program} 子进程退出失败"))?,
+        // 超时：child future 在此被丢弃，kill_on_drop 触发子进程终止。
+        Err(_) => {
+            return Err(anyhow!(
+                "{program} 单轮执行超时（{TURN_TIMEOUT:?}），已终止子进程",
+            ));
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
