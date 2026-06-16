@@ -12,6 +12,8 @@ interface Props {
   setWaitIdle: (v: boolean) => void
   stepConfirm: boolean
   setStepConfirm: (v: boolean) => void
+  useWorktree: boolean
+  setUseWorktree: (v: boolean) => void
   running: boolean
   canStart: boolean
   onStart: () => void
@@ -114,6 +116,19 @@ export function LoopStatusBar(props: Props) {
             disabled={running}
           />
           逐步确认（每次传递先弹窗）
+        </label>
+
+        <label
+          className="flex items-center gap-1.5 pb-2 text-xs text-gray-600 dark:text-gray-300"
+          title="勾选后让 Claude 自己用 git worktree + 子 agent 隔离实现，再把 Codex 复核重定位到该 worktree"
+        >
+          <input
+            type="checkbox"
+            checked={props.useWorktree}
+            onChange={e => props.setUseWorktree(e.target.checked)}
+            disabled={running}
+          />
+          worktree 模式（Claude 用 worktree+子 agent 实现）
         </label>
 
         {running ? (

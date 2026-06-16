@@ -70,6 +70,46 @@ export interface StartInput {
   wait_for_claude_idle?: boolean
   /** 逐步确认（手动）：每次跨会话传递前弹窗等用户拍板；默认 true。 */
   step_confirm?: boolean
+  /** worktree 模式：让 Claude 自己用 git worktree + 子 agent 隔离实现，Codex 复核 worktree。 */
+  use_worktree?: boolean
+}
+
+// ── 复核循环记录（持久化）──────────────────────────────────────────────────
+//   字段 snake_case，与后端 db::LoopRow / LoopMessageRow 一致。
+
+export type LoopStatus = 'running' | 'done' | 'failed' | 'aborted'
+
+/** 一条复核循环记录。 */
+export interface LoopRow {
+  id: number
+  created_at: string
+  updated_at: string
+  claude_session: string
+  codex_session: string
+  repo_root: string
+  target_repo_rel: string
+  target_abs: string
+  target_label: string
+  mode: ReviewMode
+  max_rounds: number
+  step_confirm: boolean
+  use_worktree: boolean
+  status: LoopStatus
+  final_verdict?: string | null
+  total_rounds: number
+  worktree_path?: string | null
+  error?: string | null
+}
+
+/** 记录里的一条逐轮消息。 */
+export interface LoopMessageRow {
+  id: number
+  loop_id: number
+  ts: string
+  round: number
+  kind: 'codex_review' | 'claude_revise' | 'system'
+  verdict?: string | null
+  content: string
 }
 
 export const CodeloopAPI = {
@@ -83,6 +123,10 @@ export const CodeloopAPI = {
   answer: (seq: number, text: string) => invoke<void>('codeloop_answer', { seq, text }),
   confirm: (seq: number, approve: boolean) => invoke<void>('codeloop_confirm', { seq, approve }),
   stop: () => invoke<void>('codeloop_stop'),
+  // 记录列表 / 详情 / 删除
+  listLoops: (limit = 50) => invoke<LoopRow[]>('codeloop_list_loops', { limit }),
+  loopMessages: (loopId: number) => invoke<LoopMessageRow[]>('codeloop_loop_messages', { loopId }),
+  deleteLoop: (loopId: number) => invoke<void>('codeloop_delete_loop', { loopId }),
 }
 
 /** 订阅循环进度事件。返回值用于取消订阅。 */

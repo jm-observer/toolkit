@@ -26,13 +26,14 @@ impl AppState {
         let net_policy = Arc::new(NetPolicyState::new(workspace.clone()));
         let g10_deploy = Arc::new(G10DeployState::new(workspace.clone()));
         let music = MusicState::new(&workspace);
+        let codeloop = Arc::new(CodeloopState::new(&workspace)?);
         Ok(Self {
             workspace,
             english: Arc::new(EnglishState::default()),
             speech,
             cookie,
             net_policy,
-            codeloop: Arc::new(CodeloopState::default()),
+            codeloop,
             g10_deploy,
             music,
         })
