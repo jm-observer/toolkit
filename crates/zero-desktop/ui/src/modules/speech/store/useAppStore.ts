@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { SpeechAPI, type SegmentDiscardedEvent, type SegmentUpdatedEvent } from '../api/tauri-client';
 import type { Segment } from '../api/tauri-client';
 import { listen } from '@tauri-apps/api/event';
@@ -22,7 +22,13 @@ function compareSegments(a: Segment, b: Segment): number {
   return a.start - b.start;
 }
 
-export const useAppStore = () => {
+export interface UseAppStoreOptions {
+  /// 优化稿（`optimize_status==="success"`）首次就绪时回调，每个 revision 仅触发一次。
+  /// 用 ref 持有避免重订阅；向后兼容（不传则无副作用）。供语音指令通道做唤醒词门控。
+  onOptimizedText?: (text: string, revision: number) => void;
+}
+
+export const useAppStore = (options: UseAppStoreOptions = {}) => {
   const [status, setStatus] = useState<AppStatus>('initializing');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -30,6 +36,12 @@ export const useAppStore = () => {
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   const [showEnglish, setShowEnglish] = useState(true);
   const [isInitialized, setIsInitialized] = useState(false);
+
+  // 优化稿回调用 ref 持有，避免每次 prop 变化都重订阅事件。
+  const onOptimizedTextRef = useRef(options.onOptimizedText);
+  onOptimizedTextRef.current = options.onOptimizedText;
+  // 已就绪触发过的 revision，避免重复触发（优化稿可能多次写入）。
+  const optimizedFiredRef = useRef<Set<number>>(new Set());
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
@@ -182,6 +194,16 @@ export const useAppStore = () => {
       const next = mapDbSegment(row as unknown as Record<string, unknown>);
       if (next.revision === undefined) return;
       console.debug('[segment_updated]', { revision: next.revision, segmentId: next.segment_id });
+
+      // 优化稿就绪 → 触发回调（每 revision 一次，供语音门控）。
+      if (next.optimize_status === 'success') {
+        const text = (next.text_optimized ?? '').trim();
+        if (text && !optimizedFiredRef.current.has(next.revision)) {
+          optimizedFiredRef.current.add(next.revision);
+          onOptimizedTextRef.current?.(text, next.revision);
+        }
+      }
+
       setSegments((prev) => {
         const exists = prev.some((segment) => segment.revision === next.revision);
         const updated = exists

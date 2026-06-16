@@ -7,9 +7,63 @@ import { useAppStore } from './store/useAppStore';
 import { Icon } from './components/ui/Icon';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { playCompletionSound } from './utils/notifySound';
+import { wakeGate } from '../voice/wakeGate';
+import { useVoiceConfig } from '../voice/useVoiceConfig';
+import { useVoiceChannel } from '../voice/useVoiceChannel';
+import { useToast } from '../voice/useToast';
+import { ToastHost } from '../voice/Toast';
+import { VoiceCommandPanel } from '../voice/VoiceCommandPanel';
+import type { VoiceExchange, VoiceReply } from '../voice/types';
 
 export default function SpeechPage() {
-  const store = useAppStore();
+  // —— 语音指令通道 ——
+  const toast = useToast();
+  const { config: voiceConfig, ready: voiceReady, update: updateVoiceConfig } = useVoiceConfig();
+  const [exchanges, setExchanges] = useState<VoiceExchange[]>([]);
+  const lastExchangeIdRef = useRef<string | null>(null);
+
+  const handleVoiceReply = useCallback((reply: VoiceReply) => {
+    // 回复归到最近一次指令；无指令则单独成条。
+    setExchanges((prev) => {
+      const targetId = lastExchangeIdRef.current;
+      if (targetId && prev.some((e) => e.id === targetId)) {
+        return prev.map((e) =>
+          e.id === targetId ? { ...e, replies: [...e.replies, reply] } : e,
+        );
+      }
+      return prev;
+    });
+  }, []);
+
+  const voiceChannel = useVoiceChannel({
+    url: voiceConfig.url,
+    sessionId: voiceConfig.sessionId,
+    enabled: voiceReady,
+    onReply: handleVoiceReply,
+  });
+
+  // 优化稿就绪 → 唤醒词门控 → 命中则 WS 送指令 + toast。
+  const handleOptimizedText = useCallback(
+    (text: string) => {
+      const command = wakeGate(text, voiceConfig.wakeWords);
+      if (!command) return;
+      const ok = voiceChannel.send(command);
+      if (ok) {
+        const id = `ex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        lastExchangeIdRef.current = id;
+        setExchanges((prev) => [
+          ...prev,
+          { id, command, replies: [], sentAt: Date.now() },
+        ]);
+        toast.push(`已发送指令：${command}`, 'success');
+      } else {
+        toast.push('未连接到 zero，指令未发送', 'error');
+      }
+    },
+    [voiceConfig.wakeWords, voiceChannel, toast],
+  );
+
+  const store = useAppStore({ onOptimizedText: handleOptimizedText });
   const pollTimer = useRef<number | null>(null);
   const pollInFlightRef = useRef(false);
   const notifiedRevisionsRef = useRef<Set<string>>(new Set());
@@ -472,6 +526,13 @@ export default function SpeechPage() {
       <main className="flex-1 flex flex-col min-w-0">
         <div className="flex-1 overflow-y-auto p-4 px-6">
           <div className="max-w-none mx-0 flex flex-col gap-3">
+            <VoiceCommandPanel
+              state={voiceChannel.state}
+              config={voiceConfig}
+              exchanges={exchanges}
+              onUpdateConfig={updateVoiceConfig}
+            />
+
             <div className="flex justify-end">
               <button
                 onClick={handleExportSamples}
@@ -505,6 +566,8 @@ export default function SpeechPage() {
           </div>
         </div>
       </main>
+
+      <ToastHost toasts={toast.toasts} onDismiss={toast.dismiss} />
     </div>
   );
 }
