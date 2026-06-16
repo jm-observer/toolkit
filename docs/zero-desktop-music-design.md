@@ -5,183 +5,229 @@
 
 ## 1. 目标与范围
 
-在 zero-desktop 里集成**本地音乐播放**：
+在 zero-desktop 里集成**本地音乐播放**，**按最高音质标准（bit-perfect / hi-res）设计**：
 
 - **曲库来源**：用户选定的本地文件夹，后端递归扫描音频文件。
-- **形态**：独立模块页「音乐」（曲库浏览 / 播放列表）+ **常驻迷你播放器**（底栏，跨页不中断播放）。
-- **音质目标**：尽量「原始、逼真」——预留**高保真后端**（bit-perfect / hi-res），但默认走简单后端。
+- **形态**：独立模块页「音乐」（曲库浏览 / 播放列表）+ **常驻迷你播放器**（底栏，跨页不中断）。
+- **架构基调**：**UI 只是控制面（control surface）**——选曲、按钮、进度展示；**解码、混音、输出全部在 Rust 后端**，由一个原生音频引擎统一负责。**不使用浏览器 `<audio>` 播放音频。**
 
-非目标（本期不做）：在线流媒体 / 版权曲库、歌词滚动、音效均衡器、跨设备同步。
+非目标（本期不做）：在线流媒体 / 版权曲库、歌词滚动、均衡器/音效、跨设备同步。
 
-## 2. 关键技术决策：浏览器解码 vs 后端解码（音质分析）
+## 2. 为什么"播放下沉到后端"是正确选择（音质论证）
 
-这是本设计的核心争点。结论先行：
+> **解码阶段不丢音质；丢音质的是"输出阶段"——重采样 + 系统共享混音器。**
+> 浏览器 `<audio>` 永远在 Windows 共享混音器后面，**做不到 bit-perfect**；只有原生后端能把文件 PCM 原样、按原始采样率、绕过混音器直送 DAC。
 
-> **解码阶段不丢音质；丢音质的是"输出阶段"（重采样 + 系统混音器）。**
-> 普通文件 + 普通设备：两种方案**听感无差异**。
-> 追求 bit-perfect / hi-res 原始音质：**必须走原生后端（WASAPI 独占 / ASIO），浏览器 `<audio>` 永远做不到**。
-
-### 2.1 解码本身（FLAC/MP3 → PCM）
-
-- **无损格式（FLAC / WAV / ALAC）**：解码是确定性的，任何正确解码器输出的 PCM **逐位相同**。浏览器和 Symphonia 没有区别。
-- **有损格式（MP3 / AAC / Ogg）**：不同解码器的 PCM 可能有极微小差异，但**不可闻**，且不是"音质高低"问题。
-
-**所以解码器选谁都不影响音质。**
-
-### 2.2 输出阶段——音质真正的分水岭
-
-| 环节 | 浏览器 `<audio>` / Web Audio | 原生（cpal/WASAPI/ASIO） |
+| 环节 | 浏览器 `<audio>` / Web Audio | **原生后端（本设计）** |
 |---|---|---|
-| 采样率 | **强制重采样**到 AudioContext 速率（常见 48kHz 固定）；hi-res 96/192kHz 文件被降采样 | 可**跟随文件原始采样率**切换设备 |
-| 系统混音器 | 必经 Windows 共享混音器（WASAPI shared），再被系统音量/音效处理 | **独占模式可绕过混音器**，PCM 直达 DAC |
-| 位深 | 内部 32-bit float，输出经系统混音降到 16/24bit | 可 bit-perfect 输出文件原始位深 |
-| 重采样质量 | 浏览器内置（够用，非发烧级） | 可选 Rubato sinc（发烧级） |
-| Gapless 无缝 | ❌ HTML5 `<audio>` 切歌有间隙 | ✅ Symphonia + 自管缓冲可无缝 |
-| ReplayGain / 抖动 | ❌ | ✅ 可控 |
+| 采样率 | 强制重采样到固定 48kHz；hi-res 96/192k 被降采样 | **跟随文件原始采样率**切换输出 |
+| 系统混音器 | 必经 Windows 共享混音器 + 系统音效 | **WASAPI 独占绕过混音器**，PCM 直达 DAC |
+| 位深 | 经系统混音降到 16/24bit | bit-perfect 原始位深 |
+| 重采样质量 | 浏览器内置（非发烧级） | 必要时用 Rubato sinc（发烧级），原生速率时**零重采样** |
+| 无缝切歌 | ❌ 有间隙 | ✅ gapless（预解码下一首） |
+| 设备/独占控制 | ❌ 无 | ✅ 设备选择、独占/共享、event-driven |
 
-**一句话**：浏览器播放永远在系统共享混音器后面，做不到 bit-perfect；对 16bit/44.1kHz 普通文件经普通音箱**听不出差**，但对 hi-res 文件 + 好 DAC，原生独占模式有**可闻**的提升（避免二次重采样）。
+无损格式（FLAC/WAV/ALAC）解码出的 PCM 逐位相同——音质差异**完全来自输出链路**，所以把播放放到后端是拿到原始音质的**前提**。
 
-### 2.3 可用的 Rust 仓库（原生高保真链路）
+## 3. 后端音频引擎选型（Rust）
 
 | crate | 角色 | 说明 |
 |---|---|---|
-| **`symphonia`** | 解码 + 解封装 | 纯 Rust，支持 FLAC/MP3/AAC/ALAC/Ogg/Vorbis/WAV/MP4 等，**逐位精确**、支持 gapless。事实标准。 |
-| **`cpal`** | 跨平台音频输出 | Windows=WASAPI、macOS=CoreAudio、Linux=ALSA。可选 `asio` feature（需 ASIO SDK）。**默认共享模式**；近期加了 WASAPI 实时线程优先级。 |
-| **`rodio`** | 高层播放器 | 基于 cpal，解码默认用 symphonia，`.with_gapless(true)` 开无缝。**上手最快**，但重采样是基础线性、非 bit-perfect。 |
-| **`wasapi`** | WASAPI 直接绑定 | 若要 Windows **独占模式 / event-driven**（cpal 对独占支持不完整），用它（CamillaDSP 作者维护）。bit-perfect 必需。 |
-| **`rubato`** | 高质量重采样 | 仅当确需重采样时用（sinc，发烧级）。 |
-| **`lofty`** | 标签元数据 | 解析 title/artist/album/duration/封面。与播放链路解耦。 |
+| **`symphonia`** | 解码 + 解封装 | 纯 Rust，FLAC/MP3/AAC/ALAC/Ogg/Vorbis/WAV/MP4 全套，逐位精确、支持 gapless。解码核心。 |
+| **`cpal`** | 跨平台音频输出 | Win=WASAPI / mac=CoreAudio / Linux=ALSA。默认共享模式，跨平台兜底。 |
+| **`wasapi`** | Windows 独占模式 | bit-perfect 的关键：WASAPI **exclusive + event-driven**，cpal 对独占支持不完整时由它接管（CamillaDSP 作者维护）。 |
+| **`rubato`** | 高质量重采样 | 仅当输出设备不支持文件原始采样率时启用（sinc，发烧级）。原生速率匹配时**不经过它**。 |
+| **`rtrb`** / `ringbuf` | 无锁环形缓冲 | 解码线程 → 输出回调之间的实时安全 SPSC 队列。 |
+| **`lofty`** | 标签/封面元数据 | title/artist/album/duration/封面，与播放链路解耦。 |
 
-### 2.4 选型建议：分层、可切换后端
+**输出后端抽象成 trait `AudioSink`**，两个实现：
+- `WasapiExclusiveSink`（Windows，**默认首选**，bit-perfect）。
+- `CpalSink`（跨平台兜底 / 非 Windows / 独占协商失败时回退）。
 
-把「播放引擎」抽象成接口，**默认浏览器、可选原生**：
+引擎按"**优先独占 + 跟随原始采样率**，失败逐级回退（独占→共享、原始速率→Rubato 重采样）"协商，并把实际生效的"采样率/位深/独占与否"通过事件回报 UI（让用户看到是不是真 bit-perfect）。
 
-- **MVP / 默认后端 = 浏览器 `<audio>`**：零原生依赖、跨平台稳、实现快；满足绝大多数听感需求。
-- **高保真后端（可选，二期）= Symphonia + cpal**（Windows 进一步上 `wasapi` 独占模式）：在设置里开「高保真/独占模式」开关时启用，PCM 原样直达 DAC。
-- 两个后端实现同一个前端 `Player` 接口（play/pause/seek/...），UI 与曲库扫描完全复用。
-
-> 决策理由：发烧级 bit-perfect 要写音频线程、缓冲、seek、设备枚举、独占模式协商，工作量大且只对 hi-res+好硬件可闻。先用浏览器把整条产品链路跑通，把原生后端作为**可插拔增强**，避免一上来背上原生音频的复杂度。
-
-## 3. 架构总览
+## 4. 架构总览
 
 ```
-┌─ UI (React) ─────────────────────────────────────────────┐
+┌─ UI (React) — 纯控制面 ───────────────────────────────────┐
 │  MusicPage（曲库/列表）   MiniPlayer（底栏常驻）           │
-│              └──────┬───────────┘                         │
-│            PlayerContext（唯一 <audio> / 或原生后端代理）   │
-└──────────────────────────┬───────────────────────────────┘
-              invoke         │  convertFileSrc(asset://)
-┌──────────────────────────┴───────────────────────────────┐
-│  Rust: modules/music                                      │
-│   music_pick_folder / music_scan / music_grant_dir        │
-│   （扫目录 + lofty 元数据 + 运行时授权 asset scope）        │
-│   [二期] native_play/pause/seek（symphonia+cpal 音频线程）  │
+│        │  invoke 命令              ▲  Tauri events          │
+│        │  play/pause/seek/next…    │  state/progress/ended  │
+└────────┼──────────────────────────┼───────────────────────┘
+         ▼                          │
+┌─ Rust: modules/music ─────────────┴───────────────────────┐
+│  MusicState { tx: Sender<AudioCommand>, shared: Arc<...> } │
+│  命令: pick_folder / scan / play_queue / pause / resume /  │
+│        seek / next / prev / set_volume / stop              │
+│                     │ AudioCommand                         │
+│  ┌──────────────────▼─────────────────────────────────┐   │
+│  │ AudioEngine（专用 std 线程，actor 模式）            │   │
+│  │  队列管理 + 自动续播 + gapless 预解码               │   │
+│  │  Symphonia 解码 ─► rtrb 环形缓冲 ─► AudioSink 回调   │   │
+│  │  AudioSink = WasapiExclusive（首选）│ Cpal（回退）   │   │
+│  └────────────────────────────────────────────────────┘   │
 └───────────────────────────────────────────────────────────┘
 ```
 
-**核心原则**：默认后端下，Rust 端**无状态、无音频依赖**——只做"扫目录 + 出元数据 + 授权文件访问"。播放在前端。
+**核心原则**：后端是**单一播放真值源**——队列、当前曲、播放位置、自动续播、gapless 全在后端；UI 只发命令 + 渲染事件。
 
-## 4. 后端设计（Rust）：新增 `crates/zero-desktop/src/modules/music/`
+## 5. 后端设计（`crates/zero-desktop/src/modules/music/`）
 
-### 4.1 状态与命令
+### 5.1 模块文件划分
+
+```
+modules/music/
+  mod.rs        # Tauri 命令 + MusicState + setup（建引擎线程、注册事件）
+  engine.rs     # AudioEngine：控制循环、队列、自动续播、gapless 调度
+  decode.rs     # Symphonia 解码包装（open/seek/decode→f32 帧）
+  sink/
+    mod.rs      # AudioSink trait（start/write/stop/actual_format）
+    wasapi.rs   # Windows 独占 bit-perfect 实现（cfg(windows)）
+    cpal.rs     # 跨平台共享模式回退
+  scan.rs       # 递归扫描 + lofty 元数据
+  types.rs      # Track / PlaybackState / AudioFormat 等
+```
+
+### 5.2 状态、命令、事件
 
 ```rust
-pub struct MusicState {}   // 默认后端无状态；选中目录存 tauri-plugin-store
-
-#[derive(Serialize)]
-struct Track {
-    path: String,              // 绝对路径，前端 convertFileSrc 用
-    title: String,             // lofty 标签；缺失回退文件名
-    artist: Option<String>,
-    album: Option<String>,
-    duration_secs: Option<f64>,
-    has_cover: bool,
+pub struct MusicState {
+    tx: Sender<AudioCommand>,            // → 引擎线程
+    shared: Arc<SharedPlayback>,         // 原子快照：position / playing / index
 }
 
-#[tauri::command] async fn music_pick_folder(app) -> Option<String>  // dialog 选目录 → 授权 → 返回路径
-#[tauri::command] async fn music_scan(dir: String) -> Result<Vec<Track>, String>  // 递归扫描 + 元数据
-#[tauri::command]       fn music_grant_dir(app, dir: String)         // 启动时对已存目录重新授权
-#[tauri::command] async fn music_cover(path: String) -> Result<Option<String>, String>  // 可选：内嵌封面落临时文件
+// 控制命令（UI → 引擎，全异步，立即返回）
+enum AudioCommand {
+    PlayQueue { tracks: Vec<String>, start: usize },
+    Pause, Resume, TogglePlay,
+    Seek { secs: f64 },
+    Next, Prev,
+    SetVolume(f32),                      // 软件音量；独占 bit-perfect 时可绕过/置 1.0
+    SetRepeat(RepeatMode), SetShuffle(bool),
+    Stop,
+}
+
+#[tauri::command] async fn music_pick_folder(app) -> Option<String>
+#[tauri::command] async fn music_scan(dir: String) -> Result<Vec<Track>, String>
+#[tauri::command] fn music_play_queue(state, paths: Vec<String>, start: usize)
+#[tauri::command] fn music_pause(state) / music_resume / music_toggle / music_stop
+#[tauri::command] fn music_seek(state, secs: f64)
+#[tauri::command] fn music_next(state) / music_prev
+#[tauri::command] fn music_set_volume(state, vol: f32)
+#[tauri::command] fn music_set_repeat / music_set_shuffle
+#[tauri::command] fn music_get_state(state) -> PlaybackState   // 首屏/自愈拉取
 ```
 
-支持扩展名：`mp3 / flac / wav / m4a / aac / ogg / opus`。
+**事件（引擎 → UI，`app.emit`）：**
+- `music_state_changed` → `{ status: playing|paused|stopped, index, track }`
+- `music_progress` → `{ position_secs, duration_secs }`（节流 ~250ms）
+- `music_format_changed` → `{ sample_rate, bits, exclusive, resampled }`（让 UI 显示是否真 bit-perfect）
+- `music_track_changed` → 自动续播 / next 后的新曲
+- `music_error` → 引擎侧错误（解码失败、设备丢失等）
 
-### 4.2 关键点 —— 运行时授权 asset 协议
+> 这与 speech 模块的事件模式（`speech_recording_state_changed` + 轮询自愈）一致；UI 既听事件、也可周期 `music_get_state` 兜底竞态。
 
-`tauri.conf.json` 的 `assetProtocol.scope` 是**静态**的（仅含 app 数据目录），用户自选音乐目录不在内，`convertFileSrc` 会被拦。必须在选目录 / 启动重授权时动态放行：
+### 5.3 AudioEngine（actor 模式，专用线程）
+
+- **不进 tokio**：音频是实时负载，引擎跑在独立 `std::thread`，命令经 `crossbeam-channel` 进入。
+- **控制循环**：`select` { 收命令 → 改状态/seek/切曲；解码定时推帧 → rtrb }。
+- **解码 → 输出**：解码线程把 Symphonia 帧（f32 交织）写 `rtrb` 环形缓冲；`AudioSink` 的实时回调只从缓冲拉数据（回调内**零分配、零锁**）。
+- **跟随采样率**：切到不同采样率的曲子时，重建 `AudioSink`（按新曲原始速率开输出流）；设备不支持该速率才用 Rubato 重采样并置 `resampled=true`。
+- **gapless**：当前曲将尽时预解码下一首，无缝衔接。
+- **自动续播**：曲终→按 repeat/shuffle 推进队列，emit `music_track_changed`。
+- **进度**：输出回调累计已消费帧数 → `SharedPlayback` 原子量；控制循环节流 emit `music_progress`。
+
+### 5.4 AudioSink trait
 
 ```rust
-app.asset_protocol_scope().allow_directory(&dir, true);  // recursive
-app.fs_scope().allow_directory(&dir, true);
+trait AudioSink {
+    fn start(&mut self, fmt: AudioFormat) -> Result<()>;   // 协商独占/速率/位深
+    fn actual_format(&self) -> AudioFormat;                // 实际生效（回报 UI）
+    fn write(&mut self, frames: &[f32]) -> Result<()>;     // 或回调拉模型
+    fn pause(&mut self); fn resume(&mut self); fn stop(&mut self);
+}
 ```
 
-启动时（`main.rs` 的 `.setup()`）从 plugin-store 读回上次选的目录并重授权，否则重启后放不了。
+- `wasapi.rs`：`IAudioClient` 独占 + event-driven，按文件原始 `WAVEFORMATEXTENSIBLE` 申请；失败回退共享。
+- `cpal.rs`：`build_output_stream`，挑最接近的 supported config；非 Windows 默认走它。
 
-### 4.3 持久化
+### 5.5 元数据扫描（`scan.rs`）
 
-- 选中的文件夹路径：用现成的 **`tauri-plugin-store`**（与 english 存 KV 同套路），**不进 workspace、不建 SQLite**。
-- 音乐文件**留在用户文件夹，不复制进 workspace**。
+- 递归扫 `mp3/flac/wav/m4a/aac/ogg/opus`，`lofty` 取 title/artist/album/duration/封面。
+- 大目录：异步 + 可分批 emit 进度（MVP 可先一次性返回）。
+- 封面：内嵌图落临时文件，前端用 `convertFileSrc` 显示**图片**（图片仍走 asset 协议，只有**音频**不走浏览器）。
 
-### 4.4 后端接线清单
+### 5.6 持久化与目录
 
-1. `src/modules/mod.rs` → `pub mod music;`
-2. `src/app_state.rs` → `AppState` 加 `pub music: Arc<MusicState>`
-3. `src/main.rs` → `invoke_handler!` 注册命令；`.setup()` 里读 store 已存目录并 `allow_directory`
-4. `Cargo.toml` → 加 `lofty`（MVP 可暂缓，先文件名当标题）
+- 选中文件夹路径、音量、repeat/shuffle：`tauri-plugin-store`（与 english 同套路）。
+- 音乐文件留用户文件夹，**不进 workspace、不建 SQLite**。
+- **封面临时文件**落 workspace（如 `music/covers/`），需在 `ensure_workspace` 加子目录 + asset scope 放行。
 
-## 5. 前端设计（UI）：`crates/zero-desktop/ui/src/modules/music/`
+### 5.7 后端接线清单
 
-### 5.1 全局播放状态 `PlayerContext.tsx`
+1. `Cargo.toml` → 加 `symphonia`(含所需 codec features) / `cpal` / `wasapi`(cfg windows) / `rubato` / `rtrb` / `lofty` / `crossbeam-channel`
+2. `src/modules/mod.rs` → `pub mod music;`
+3. `src/app_state.rs` → `AppState` 加 `pub music: Arc<MusicState>`，`AppState::new` 建引擎线程
+4. `src/main.rs` → `invoke_handler!` 注册全部命令；`.setup()` 给引擎注入 `AppHandle`（emit 用）+ 读 store 已选目录授权封面 scope
+5. `src/shared/workspace.rs` → `ensure_workspace` 加 `music/covers`
 
-- Provider 内持唯一一个隐藏 `<audio>`（默认后端），暴露 `play(track)/pause/next/prev/seek/setVolume` 与 `{current, queue, playing, progressSec, durationSec}`。
-- 在 `App.tsx` 把 `<MusicPlayerProvider>` 包在 `<ShellLayout>` **外层** → 切路由 audio 不卸载，**播放不中断**。
-- 后端可切换：接口对 UI 不变；二期原生后端时，这里把 `<audio>` 调用替换成 invoke 原生命令。
+## 6. 前端设计（`crates/zero-desktop/ui/src/modules/music/`）
 
-### 5.2 模块页 `MusicPage.tsx`（侧栏「音乐」入口）
+UI **不持有任何音频对象**，纯命令 + 事件。
 
-- 顶部：当前文件夹 + 「选择文件夹」「重新扫描」。
-- 主体：曲库列表（标题/歌手/时长/封面），搜索过滤，点击即 `play` 并设队列。
+### 6.1 `PlayerContext.tsx`（全局，无 `<audio>`）
+
+- 挂在 `App.tsx` 的 `<ShellLayout>` 外层；启动 `listen` 三个事件（state/progress/track_changed）→ React state；首屏 `music_get_state` 拉初值。
+- 暴露 `play(paths, start)/pause/resume/toggle/seek/next/prev/setVolume` —— 全是 `invoke`，无本地播放逻辑。
+- 切路由不卸载 → 播放与状态订阅不中断（播放本就在后端，UI 卸载也不停）。
+
+### 6.2 `MusicPage.tsx`（侧栏「音乐」）
+
+- 顶部：当前文件夹 + 「选择文件夹」「重新扫描」+ **实时格式徽标**（来自 `music_format_changed`：`FLAC 96kHz/24bit · 独占 · 无重采样`）。
+- 主体：曲库列表（标题/歌手/时长/封面），搜索过滤，点击 → `music_play_queue(列表, index)`。
 - 复用 `chat-summary` / `english` 的 Tailwind 卡片风格。
 
-### 5.3 常驻迷你播放器 `MiniPlayer.tsx`
+### 6.3 `MiniPlayer.tsx`（ShellLayout 底栏常驻）
 
-- 渲染在 `ShellLayout` 底部（现有 G10/Cookie/识别指示灯区下方）。
-- 封面缩略 + 标题 + 播放/暂停/上一首/下一首 + 进度条 + 音量；全部从 `usePlayer()` 取，任何页面可控。
+- 封面 + 标题/歌手 + 播/暂停/上下首 + 进度条（拖动 → `music_seek`）+ 音量 + repeat/shuffle。
+- 全从 `usePlayer()` 取；任何页面可控。
 
-### 5.4 前端接线清单
+### 6.4 前端接线清单
 
-1. `App.tsx` → import `MusicPage`，加 `<Route path="music" .../>`；外层包 `MusicPlayerProvider`
-2. `shared/ShellLayout.tsx` → `navItems` 加 `{ to:'/music', icon: Music, label:'音乐' }`（lucide `Music` 图标）；底部渲染 `<MiniPlayer/>`
+1. `App.tsx` → 加 `<Route path="music">`；外层包 `<MusicPlayerProvider>`
+2. `shared/ShellLayout.tsx` → `navItems` 加 `{ to:'/music', icon: Music, label:'音乐' }`（lucide `Music`）；底部渲染 `<MiniPlayer/>`
 3. 新增 `ui/src/modules/music/`：`MusicPage.tsx` / `PlayerContext.tsx` / `MiniPlayer.tsx` / `api/tauri-client.ts`
 
-## 6. 端到端播放路径（默认后端）
+## 7. 端到端路径
 
 ```
-选文件夹 → music_pick_folder（授权 scope + 存 store）→ music_scan → Track[]
-  → 点歌 → usePlayer().play(track)
-  → audio.src = convertFileSrc(track.path) → 浏览器解码播放
-  → MiniPlayer 跨页常驻控制
+选文件夹 → music_pick_folder → music_scan(lofty) → Track[]
+  → 点歌 → invoke music_play_queue(paths, i)
+  → 引擎线程: Symphonia 解码 → rtrb → WasapiExclusiveSink(原始速率/位深, 绕混音器) → DAC
+  → emit music_state_changed / music_progress / music_format_changed
+  → MiniPlayer + MusicPage 渲染（含 bit-perfect 徽标）
 ```
 
-## 7. 分期落地
+## 8. 分期落地
 
-- **MVP（1 个 PR）**：后端扫目录（先文件名当标题，不引 lofty）+ 运行时授权；前端 Context + MusicPage 列表 + MiniPlayer 基本控件（播/暂停/上下首/进度/音量）。端到端能放，浏览器后端。
-- **二期 · 元数据**：引 `lofty`，出 title/artist/album/duration/封面；列表按歌手/专辑分组、播放列表持久化、随机/循环。
-- **三期 · 高保真后端（可选）**：Symphonia + cpal 原生播放引擎，设置加「高保真/独占模式」开关；Windows 上 `wasapi` 独占模式实现 bit-perfect，hi-res 文件跟随原始采样率，gapless 无缝。
+- **一期 · 原生引擎打通**：`AudioEngine` + Symphonia 解码 + `CpalSink`（共享模式，跨平台）+ 队列/续播/seek/音量 + 全套命令事件；前端 Context + MusicPage + MiniPlayer。**已是后端解码、无浏览器音频**，但暂用共享模式。
+- **二期 · bit-perfect**：`WasapiExclusiveSink`（独占 + event-driven + 跟随原始采样率）+ Rubato 回退 + 格式徽标。Windows 拿到真 bit-perfect。
+- **三期 · 体验增强**：gapless 预解码、按歌手/专辑分组、播放列表持久化、ReplayGain/音量归一（可选）。
 
-## 8. 风险与注意
+## 9. 风险与注意
 
-- **asset scope 授权**：忘了运行时 `allow_directory` 会导致选了目录也放不了（CSP/scope 拦截）——MVP 必测重启后仍可播。
-- **大目录扫描**：几千首时 `music_scan` + lofty 解析要异步 + 可加进度；MVP 先同步小目录。
-- **原生后端复杂度**：音频线程 / seek / 独占模式协商成本高，严格作为可选增强，不阻塞主链路。
-- **跨平台**：默认浏览器后端天然跨平台；原生独占（WASAPI/ASIO）是 Windows 专属优化，macOS/Linux 走 cpal 默认即可。
+- **实时回调纪律**：`AudioSink` 回调内**禁止分配/锁/系统调用**，只读 `rtrb`；违反会爆音/卡顿。
+- **独占模式协商失败**：设备被占用 / 不支持原始格式 → 必须优雅回退共享并如实回报 UI（别假装 bit-perfect）。
+- **采样率切换开销**：跨采样率切曲要重建输出流，有短暂静默；gapless 仅在同格式相邻曲生效。
+- **seek 与缓冲一致性**：seek 要清空 rtrb + 重置 Symphonia 位置 + 重算进度基准，避免回跳。
+- **设备热插拔**：输出设备消失要捕获并 emit `music_error`，引擎进 stopped 而非崩溃。
+- **跨平台**：独占是 Windows 专属优化；macOS/Linux 走 `CpalSink`（CoreAudio/ALSA 已是较短路径），按平台 `cfg` 分流。
 
 ---
 
 ### 参考
 
-- [CPAL — Rust audio library (lib.rs)](https://lib.rs/crates/cpal)
-- [RustAudio/cpal (GitHub)](https://github.com/RustAudio/cpal)
-- [symphonia (crates.io)](https://crates.io/crates/symphonia)
-- [rodio decoder docs](https://docs.rs/rodio/latest/rodio/decoder/)
+- [symphonia (crates.io)](https://crates.io/crates/symphonia) — 解码/解封装，支持 gapless
+- [CPAL — Rust audio library (lib.rs)](https://lib.rs/crates/cpal) · [RustAudio/cpal (GitHub)](https://github.com/RustAudio/cpal)
+- [rodio decoder docs](https://docs.rs/rodio/latest/rodio/decoder/) — 高层封装参考（本设计不直接用，自管引擎）
 - [WASAPI Exclusive vs Shared Mode 说明](https://aurisplayer.com/blog/wasapi-exclusive-guide.html)

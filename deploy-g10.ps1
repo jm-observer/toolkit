@@ -19,14 +19,24 @@
 .PARAMETER SkipBuild
     跳过交叉编译，直接复制已有产物（调试部署用）。
 
+.PARAMETER Service
+    部署后要重启的 systemd 用户服务名，默认 toolkit-server（$Bins 里唯一的 daemon；
+    其余是 CLI 工具，无需重启）。
+
+.PARAMETER SkipRestart
+    跳过部署后重启（仅换二进制，下次服务自然重启时生效）。
+
 .EXAMPLE
     pwsh ./deploy-g10.ps1
     pwsh ./deploy-g10.ps1 -SkipBuild
+    pwsh ./deploy-g10.ps1 -SkipRestart
 #>
 param(
     [string]$G10Host = "fengqi@192.168.0.68",
     [string]$DestDir = "~/.local/bin",
-    [switch]$SkipBuild
+    [string]$Service = "toolkit-server",
+    [switch]$SkipBuild,
+    [switch]$SkipRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,6 +110,21 @@ foreach ($b in $Bins) {
 Write-Host "==> 远端版本确认" -ForegroundColor Cyan
 foreach ($b in $Bins) {
     ssh $G10Host "$DestDir/$($b.Bin) --version"
+}
+
+# 重启 daemon 用户服务（CLI 工具无服务、不涉及；换二进制后服务需重启才加载新版）。
+# XDG_RUNTIME_DIR 显式补上：非交互 ssh 默认不带，systemctl --user 会找不到 user bus。
+if (-not $SkipRestart) {
+    Write-Host "==> 重启 $Service" -ForegroundColor Cyan
+    $restartCmd = 'export XDG_RUNTIME_DIR=/run/user/$(id -u); ' `
+        + "systemctl --user restart $Service && " `
+        + "sleep 2 && " `
+        + "systemctl --user is-active $Service && " `
+        + "systemctl --user status $Service --no-pager -n 5"
+    ssh $G10Host $restartCmd
+    if ($LASTEXITCODE -ne 0) { throw "重启 $Service 失败（检查服务名 / 是否已 systemctl --user enable）" }
+} else {
+    Write-Host "==> 跳过重启（-SkipRestart）" -ForegroundColor DarkGray
 }
 
 Write-Host "==> 完成。若 $DestDir 不在 G10 的 PATH，请确认 zero 能按该路径调用工具。" -ForegroundColor Green

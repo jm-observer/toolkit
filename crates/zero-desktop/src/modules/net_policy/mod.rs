@@ -162,9 +162,7 @@ fn compute_status(np: &NetPolicyState) -> NetPolicyStatus {
 /// **主线程**执行并卡死 webview（全景图渲染延迟、界面周期性"未响应"——该页 3s 快轮询会反复触发）。
 /// 故改为 async + `spawn_blocking`，把阻塞探测挪出 UI 线程。
 #[tauri::command]
-pub async fn net_policy_get_status(
-    state: State<'_, AppState>,
-) -> Result<NetPolicyStatus, String> {
+pub async fn net_policy_get_status(state: State<'_, AppState>) -> Result<NetPolicyStatus, String> {
     let np = state.net_policy.clone();
     tokio::task::spawn_blocking(move || compute_status(&np))
         .await

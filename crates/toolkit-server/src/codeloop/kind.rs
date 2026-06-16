@@ -192,8 +192,15 @@ impl LoopCtx {
 
         for n in 1..=self.max_rounds {
             // 1. Codex 复核（含 ASK_USER 挂起处理）。
-            let codex_prompt =
-                prompt::render_codex_prompt(&self.codex_template, &self.target, self.mode, n);
+            // first_turn = n==1：常驻说明块（定位 + ASK_USER 协议）只在持续会话首轮发一次，
+            // 后续轮依赖会话历史，不再重发（避免每条消息末尾重复刷屏/占 token）。
+            let codex_prompt = prompt::render_codex_prompt(
+                &self.codex_template,
+                &self.target,
+                self.mode,
+                n,
+                n == 1,
+            );
             let review = match self.send_and_resolve(&self.codex, &codex_prompt).await? {
                 Resolved::Reply(r) => r,
                 Resolved::Timeout => {
@@ -237,8 +244,9 @@ impl LoopCtx {
             }
 
             // 4. Claude 据意见修订（含 ASK_USER 挂起处理）。
+            // Claude 仅在 NEEDS_WORK 时被发起，其首次发送恒为第 1 轮 → n==1 即首轮。
             let claude_prompt =
-                prompt::render_claude_prompt(&self.claude_template, &self.target, &review);
+                prompt::render_claude_prompt(&self.claude_template, &self.target, &review, n == 1);
             let revision = match self.send_and_resolve(&self.claude, &claude_prompt).await? {
                 Resolved::Reply(r) => r,
                 Resolved::Timeout => {

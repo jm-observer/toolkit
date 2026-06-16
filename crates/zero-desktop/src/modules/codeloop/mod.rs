@@ -55,12 +55,20 @@ struct RunningLoop {
     progress: Arc<Mutex<Value>>,
     /// ASK_USER 挂起态（非 None = 正等用户回答）。
     pending: Arc<Mutex<Option<Pending>>>,
+    /// 逐步确认门挂起态（非 None = 正等用户确认/否决某次传递）。
+    pending_confirm: Arc<Mutex<Option<PendingConfirm>>>,
 }
 
 /// 一个待用户回答的问题：seq + 唤醒循环的 oneshot 发送端。
 struct Pending {
     seq: i64,
     answer_tx: oneshot::Sender<String>,
+}
+
+/// 一个待用户拍板的传递确认：seq + 决定（true=确认发送 / false=否决）的 oneshot 发送端。
+struct PendingConfirm {
+    seq: i64,
+    decide_tx: oneshot::Sender<bool>,
 }
 
 // ------------------------- 输入契约 -------------------------
@@ -84,10 +92,17 @@ pub struct StartInput {
     pub max_rounds: u32,
     #[serde(default)]
     pub wait_for_claude_idle: bool,
+    /// 逐步确认（手动）：每次跨会话传递前弹窗等用户拍板；关则全自动。默认开。
+    #[serde(default = "default_true")]
+    pub step_confirm: bool,
 }
 
 fn default_max_rounds() -> u32 {
     5
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 业务终态（对齐 toolkit-server 版 FinalVerdict 语义）。
@@ -98,6 +113,8 @@ enum FinalVerdict {
     MaxRounds,
     AbortedTimeout,
     AbortedParse,
+    /// 用户在逐步确认弹窗里否决了某次跨会话传递 → 主动中止。
+    AbortedByUser,
 }
 
 // ------------------------- 循环上下文 -------------------------
@@ -112,8 +129,10 @@ struct LoopCtx {
     mode: ReviewMode,
     max_rounds: u32,
     wait_for_claude_idle: bool,
+    step_confirm: bool,
     progress: Arc<Mutex<Value>>,
     pending: Arc<Mutex<Option<Pending>>>,
+    pending_confirm: Arc<Mutex<Option<PendingConfirm>>>,
     seq: Arc<AtomicI64>,
 }
 
@@ -148,10 +167,25 @@ async fn send_and_resolve(
 ) -> Result<Resolved> {
     let mut current = prompt_text.to_string();
     loop {
+        log::info!(
+            "[codeloop] → 发往 {} 会话 {}（prompt {} 字符），等待回复…",
+            session.provider.as_str(),
+            session.session_id,
+            current.chars().count(),
+        );
         let turn = driver::send(session, &current).await?;
+        log::info!(
+            "[codeloop] ← {} 回复 {} 字符",
+            session.provider.as_str(),
+            turn.reply_text.chars().count(),
+        );
         let Some(q) = parse::parse_ask_user(&turn.reply_text) else {
             return Ok(Resolved::Reply(turn.reply_text));
         };
+        log::info!(
+            "[codeloop] {} 触发 ASK_USER，挂起等用户作答",
+            session.provider.as_str()
+        );
 
         // 挂起：建 channel、存 pending、emit awaiting_input。
         let seq = ctx.seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -176,21 +210,103 @@ async fn send_and_resolve(
     }
 }
 
+/// 逐步确认门的结果。
+enum Gate {
+    /// 用户确认 / 未开启逐步确认 → 放行。
+    Approve,
+    /// 用户否决 → 主动中止。
+    Reject,
+    /// 等待超时 → 按超时中止（保守：不自动发送）。
+    Timeout,
+}
+
+/// 跨会话传递前的人工确认门：弹窗展示「即将发送的文本」，等用户拍板。
+///
+/// `step_confirm` 关时直接放行（全自动）。开时挂起：建 oneshot、存 pending_confirm、
+/// emit `awaiting_confirm`（带 direction/title/content），等 `codeloop_confirm` 唤醒。
+async fn confirm_gate(ctx: &LoopCtx, direction: &str, title: &str, content: &str) -> Gate {
+    if !ctx.step_confirm {
+        log::info!("[codeloop] 逐步确认关闭，{direction} 直接放行");
+        return Gate::Approve;
+    }
+    log::info!(
+        "[codeloop] 逐步确认门 {direction}：弹窗等用户拍板（content {} 字符）",
+        content.chars().count()
+    );
+    let seq = ctx.seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let (tx, rx) = oneshot::channel::<bool>();
+    *ctx.pending_confirm.lock().await = Some(PendingConfirm { seq, decide_tx: tx });
+    ctx.report(json!({
+        "phase": "awaiting_confirm",
+        "seq": seq,
+        "direction": direction,
+        "title": title,
+        "content": content,
+    }))
+    .await;
+
+    match tokio::time::timeout(ANSWER_TIMEOUT, rx).await {
+        Ok(Ok(true)) => Gate::Approve,
+        Ok(Ok(false)) => Gate::Reject,
+        // 发送端被丢 / 超时：清挂起态，按超时处理。
+        _ => {
+            *ctx.pending_confirm.lock().await = None;
+            Gate::Timeout
+        }
+    }
+}
+
 /// 复核↔修订主循环。基础设施错 → Err（上层 emit error）；业务终态正常收尾。
 async fn drive(ctx: &LoopCtx) -> Result<()> {
     if ctx.wait_for_claude_idle {
+        log::info!("[codeloop] 先等 Claude 当前轮空闲（超时 {CLAUDE_IDLE_TIMEOUT:?}）…");
         if let Err(e) = watch::wait_for_idle(&ctx.store, &ctx.claude, CLAUDE_IDLE_TIMEOUT).await {
-            log::warn!("wait_for_claude_idle 超时/失败，按 AbortedTimeout 处理: {e:#}");
+            log::warn!("[codeloop] wait_for_claude_idle 超时/失败，按 AbortedTimeout 处理: {e:#}");
             ctx.finish(FinalVerdict::AbortedTimeout, 0).await;
             return Ok(());
         }
+        log::info!("[codeloop] Claude 已空闲，开始复核循环");
     }
 
     let mut consecutive_parse_fail = 0u32;
+    let mut last_claude_reply = String::new();
     for n in 1..=ctx.max_rounds {
+        // 0. 二轮起：让 Codex 基于上一轮 Claude 修订重新审核前，先确认（展示 Claude 本轮回复）。
+        if n > 1 {
+            match confirm_gate(
+                ctx,
+                "claude_to_codex",
+                "让 Codex 基于 Claude 本轮修订重新审核？",
+                &last_claude_reply,
+            )
+            .await
+            {
+                Gate::Approve => {}
+                Gate::Reject => {
+                    ctx.finish(FinalVerdict::AbortedByUser, n - 1).await;
+                    return Ok(());
+                }
+                Gate::Timeout => {
+                    ctx.finish(FinalVerdict::AbortedTimeout, n - 1).await;
+                    return Ok(());
+                }
+            }
+        }
+
         // 1. Codex 复核（含 ASK_USER 挂起）。
-        let codex_prompt =
-            prompt::render_codex_prompt(prompt::DEFAULT_CODEX_TEMPLATE, &ctx.target, ctx.mode, n);
+        log::info!(
+            "[codeloop] === 第 {n}/{} 轮：发起 Codex 复核 ===",
+            ctx.max_rounds
+        );
+        // first_turn = n==1：常驻说明块（定位 + ASK_USER 协议）只在持续会话首轮发一次，
+        // 后续轮依赖会话历史，不再重发（避免每条消息末尾重复刷屏/占 token）。
+        let codex_prompt = prompt::render_codex_prompt(
+            prompt::DEFAULT_CODEX_TEMPLATE,
+            &ctx.target,
+            ctx.mode,
+            n,
+            n == 1,
+        );
         let review = match send_and_resolve(ctx, &ctx.codex, &codex_prompt).await? {
             Resolved::Reply(r) => r,
             Resolved::Timeout => {
@@ -219,40 +335,85 @@ async fn drive(ctx: &LoopCtx) -> Result<()> {
                 Verdict::NeedsWork
             }
         };
+        log::info!("[codeloop] 第 {n} 轮 Codex 判定：{verdict:?}");
         ctx.report(json!({ "round": n, "phase": "reviewed", "verdict": verdict }))
             .await;
 
         // 3. PASS → 终止。
         if verdict == Verdict::Pass {
+            log::info!("[codeloop] PASS，循环通过收尾");
             ctx.finish(FinalVerdict::Pass, n).await;
             return Ok(());
         }
 
-        // 4. Claude 据意见修订（含 ASK_USER 挂起）。
-        let claude_prompt =
-            prompt::render_claude_prompt(prompt::DEFAULT_CLAUDE_TEMPLATE, &ctx.target, &review);
-        match send_and_resolve(ctx, &ctx.claude, &claude_prompt).await? {
-            Resolved::Reply(_) => {}
+        // 4. 把 Codex 审核意见发给 Claude 修订前，先确认（展示意见全文）。
+        match confirm_gate(
+            ctx,
+            "codex_to_claude",
+            "把 Codex 审核意见发给 Claude Code 修订？",
+            &review,
+        )
+        .await
+        {
+            Gate::Approve => {}
+            Gate::Reject => {
+                ctx.finish(FinalVerdict::AbortedByUser, n - 1).await;
+                return Ok(());
+            }
+            Gate::Timeout => {
+                ctx.finish(FinalVerdict::AbortedTimeout, n - 1).await;
+                return Ok(());
+            }
+        }
+
+        // 5. Claude 据意见修订（含 ASK_USER 挂起）。
+        // Claude 仅在 NEEDS_WORK 时被发起，其首次发送恒为第 1 轮 → n==1 即首轮。
+        let claude_prompt = prompt::render_claude_prompt(
+            prompt::DEFAULT_CLAUDE_TEMPLATE,
+            &ctx.target,
+            &review,
+            n == 1,
+        );
+        last_claude_reply = match send_and_resolve(ctx, &ctx.claude, &claude_prompt).await? {
+            Resolved::Reply(r) => r,
             Resolved::Timeout => {
                 ctx.finish(FinalVerdict::AbortedTimeout, n).await;
                 return Ok(());
             }
-        }
+        };
+        log::info!("[codeloop] 第 {n} 轮 Claude 修订完成");
         ctx.report(json!({ "round": n, "phase": "revised" })).await;
     }
 
     // 跑满未 PASS。
+    log::info!(
+        "[codeloop] 跑满 {} 轮仍未 PASS，按 MaxRounds 收尾",
+        ctx.max_rounds
+    );
     ctx.finish(FinalVerdict::MaxRounds, ctx.max_rounds).await;
     Ok(())
 }
 
 /// 循环顶层：跑 drive，基础设施错时 emit error；收尾清 pending。
 async fn run_loop(ctx: LoopCtx) {
+    log::info!(
+        "[codeloop] 循环任务启动：claude={} codex={} target={} mode={:?} max_rounds={} wait_idle={} step_confirm={}",
+        ctx.claude.session_id,
+        ctx.codex.session_id,
+        ctx.target.repo_rel,
+        ctx.mode,
+        ctx.max_rounds,
+        ctx.wait_for_claude_idle,
+        ctx.step_confirm,
+    );
     if let Err(e) = drive(&ctx).await {
+        log::warn!("[codeloop] 基础设施错误，循环终止：{e:#}");
         ctx.report(json!({ "phase": "error", "error": format!("{e:#}") }))
             .await;
     }
+    log::info!("[codeloop] 循环任务结束");
     *ctx.pending.lock().await = None;
+    *ctx.pending_confirm.lock().await = None;
 }
 
 /// 把 DTO 解析成 SessionRef：cwd 缺省时从会话存储 snapshot 补全。
@@ -366,6 +527,7 @@ pub async fn codeloop_start(
 
     let progress = Arc::new(Mutex::new(json!({ "phase": "starting" })));
     let pending = Arc::new(Mutex::new(None));
+    let pending_confirm = Arc::new(Mutex::new(None));
     let seq = Arc::new(AtomicI64::new(0));
 
     let ctx = LoopCtx {
@@ -377,8 +539,10 @@ pub async fn codeloop_start(
         mode: input.mode,
         max_rounds: input.max_rounds.max(1),
         wait_for_claude_idle: input.wait_for_claude_idle,
+        step_confirm: input.step_confirm,
         progress: progress.clone(),
         pending: pending.clone(),
+        pending_confirm: pending_confirm.clone(),
         seq,
     };
 
@@ -387,6 +551,7 @@ pub async fn codeloop_start(
         handle,
         progress,
         pending,
+        pending_confirm,
     });
     Ok(())
 }
@@ -428,6 +593,31 @@ pub async fn codeloop_answer(
             Err("seq 与当前待答问题不匹配".into())
         }
         None => Err("当前没有待回答的问题".into()),
+    }
+}
+
+/// 拍板挂起的逐步确认门：`approve=true` 放行传递，`false` 否决（→ 循环按用户中止收尾）。
+#[tauri::command]
+pub async fn codeloop_confirm(
+    state: State<'_, AppState>,
+    seq: i64,
+    approve: bool,
+) -> Result<(), String> {
+    let guard = state.codeloop.inner.lock().await;
+    let Some(rl) = guard.as_ref() else {
+        return Err("没有运行中的复核循环".into());
+    };
+    let mut pending = rl.pending_confirm.lock().await;
+    match pending.take() {
+        Some(p) if p.seq == seq => p
+            .decide_tx
+            .send(approve)
+            .map_err(|_| "循环已不在等待该确认".to_string()),
+        Some(other) => {
+            *pending = Some(other);
+            Err("seq 与当前待确认项不匹配".into())
+        }
+        None => Err("当前没有待确认的传递".into()),
     }
 }
 

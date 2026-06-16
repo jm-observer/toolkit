@@ -161,14 +161,24 @@ impl Store {
         let mut out = Vec::new();
         for row in rows.into_iter().take(limit) {
             let id = str_field(&row, "id");
-            let status = match self.codex_locate(&id)? {
-                Some(path) => codex_status(&read_jsonl(&path)?),
-                None => SessionStatus::Unknown,
+            // 读一次会话文件，同时得到状态 / 首条用户消息预览 / cwd。
+            let (status, preview, cwd) = match self.codex_locate(&id)? {
+                Some(path) => {
+                    let events = read_jsonl(&path)?;
+                    (
+                        codex_status(&events),
+                        codex_first_user(&events),
+                        codex_cwd(&events).to_string_lossy().into_owned(),
+                    )
+                }
+                None => (SessionStatus::Unknown, String::new(), String::new()),
             };
             out.push(SessionSummary {
                 provider: Provider::Codex,
                 id,
                 title: str_field(&row, "thread_name"),
+                preview,
+                cwd,
                 status,
                 updated_at: str_field(&row, "updated_at"),
             });
@@ -225,6 +235,8 @@ impl Store {
                 provider: Provider::Claude,
                 id,
                 title: claude_title(&events),
+                preview: claude_first_user(&events),
+                cwd: claude_cwd(&events).to_string_lossy().into_owned(),
                 status: claude_status(&events),
                 updated_at: claude_updated_at(&events),
             });
@@ -403,6 +415,24 @@ fn codex_title(events: &[Value], session_id: &str) -> String {
     session_id.to_string()
 }
 
+/// 首条用户消息（codex `user_message` 事件正文）的前若干字符；无则空串。
+fn codex_first_user(events: &[Value]) -> String {
+    for e in events {
+        if str_field(e, "type") == "event_msg" && payload_type(e).as_deref() == Some("user_message")
+        {
+            let msg = e
+                .get("payload")
+                .and_then(|p| p.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !msg.is_empty() {
+                return clip(msg, 40);
+            }
+        }
+    }
+    String::new()
+}
+
 fn codex_updated_at(events: &[Value]) -> String {
     events
         .iter()
@@ -496,6 +526,20 @@ fn claude_title(events: &[Value]) -> String {
         if str_field(e, "type") == "user" {
             if let Some(m) = claude_message_of(e) {
                 return clip(&m.text, 50);
+            }
+        }
+    }
+    String::new()
+}
+
+/// 首条用户消息正文的前若干字符；无则空串。
+fn claude_first_user(events: &[Value]) -> String {
+    for e in events {
+        if str_field(e, "type") == "user" {
+            if let Some(m) = claude_message_of(e) {
+                if !m.text.is_empty() {
+                    return clip(&m.text, 40);
+                }
             }
         }
     }

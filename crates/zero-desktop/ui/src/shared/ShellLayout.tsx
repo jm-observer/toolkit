@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, MessageSquareText, Settings, ExternalLink } from 'lucide-react'
+import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, MessageSquareText, Rocket, Settings, ExternalLink } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import EnvConfigService from '../modules/english/services/EnvConfigService'
@@ -13,6 +13,7 @@ const navItems = [
   { to: '/net-policy', icon: ShieldCheck, label: '网络策略' },
   { to: '/codeloop', icon: GitCompareArrows, label: '复核循环' },
   { to: '/chat-summary', icon: MessageSquareText, label: '对话总结' },
+  { to: '/g10-deploy', icon: Rocket, label: 'G10 部署' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 

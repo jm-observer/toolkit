@@ -177,7 +177,14 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::codeloop::codeloop_start,
             modules::codeloop::codeloop_status,
             modules::codeloop::codeloop_answer,
+            modules::codeloop::codeloop_confirm,
             modules::codeloop::codeloop_stop,
+            // g10-deploy 模块（G10 服务部署面板：列表/连通性/版本对比/一键部署）
+            modules::g10_deploy::g10_list_services,
+            modules::g10_deploy::g10_probe_service,
+            modules::g10_deploy::g10_local_version,
+            modules::g10_deploy::g10_is_deploying,
+            modules::g10_deploy::g10_deploy,
         ])
         .setup(move |app| {
             modules::english::setup(app.handle(), state.english.clone())

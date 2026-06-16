@@ -10,30 +10,28 @@
 use serde::{Deserialize, Serialize};
 
 /// 模板语义版本。改内置模板文案时同步 bump。
-pub const TEMPLATE_VERSION: &str = "v1";
+pub const TEMPLATE_VERSION: &str = "v2";
 
 /// Codex 复核模板支持的占位符（供控制台提示）。
-pub const CODEX_PLACEHOLDERS: &[&str] = &[
-    "{LABEL}",
-    "{SCOPE}",
-    "{ROUND_HINT}",
-    "{REPO_ROOT}",
-    "{REPO_REL}",
-    "{ABS}",
-];
-/// Claude 修订模板支持的占位符。
-pub const CLAUDE_PLACEHOLDERS: &[&str] =
-    &["{LABEL}", "{REVIEW}", "{REPO_ROOT}", "{REPO_REL}", "{ABS}"];
+///
+/// 仅列「每轮核心指令」模板（DB 可配部分）的占位符；目标定位占位符（`{REPO_ROOT}` /
+/// `{REPO_REL}` / `{ABS}`）属恒定附加的 [`STANDING_BLOCK`]，不在可配模板内。
+pub const CODEX_PLACEHOLDERS: &[&str] = &["{LABEL}", "{SCOPE}", "{ROUND_HINT}"];
+/// Claude 修订模板支持的占位符。说明同 [`CODEX_PLACEHOLDERS`]。
+pub const CLAUDE_PLACEHOLDERS: &[&str] = &["{LABEL}", "{REVIEW}"];
 
 /// 复核口径（design）。
 const DESIGN_SCOPE: &str = "只关注事实/逻辑/前后一致性/可行性错误，不纠结措辞。";
 /// 复核口径（implementation）。
 const IMPL_SCOPE: &str = "只关注实现是否符合设计、有无逻辑/边界/正确性错误，不纠结风格。";
 
-/// Codex 复核内置模板。占位符见 [`CODEX_PLACEHOLDERS`]。
-pub const DEFAULT_CODEX_TEMPLATE: &str = "请以严格审阅者身份复核{LABEL}。{SCOPE}\
-逐条列出发现的问题（无问题写\"无\"）。最后另起一行只输出结论：\
-无明显错误输出 `VERDICT: PASS`，否则 `VERDICT: NEEDS_WORK`。{ROUND_HINT}\
+/// **常驻说明块**：目标精确定位 + ASK_USER 岔路协议。占位符 `{REPO_ROOT}` / `{REPO_REL}` /
+/// `{ABS}`，由 [`fill_locator`] 填充。
+///
+/// 这两段对**同一持续会话**只需首轮发一次（会话历史保留），故由渲染函数仅在 `first_turn`
+/// 时附加到核心模板末尾，避免每轮重发刷屏/占 token。不纳入 DB 可配模板：定位与 ASK_USER
+/// 协议是循环正确性的硬约束（见三方校验 §4.1），不应被用户改文案破坏。
+pub const STANDING_BLOCK: &str = "\
 \n\n复核/修订对象明确为：工作树根 `{REPO_ROOT}` 下的 `{REPO_REL}`（绝对路径 `{ABS}`）。\
 请只针对该文件，按上述绝对路径定位，不要改动其他文件。\
 \n\n若遇到需要我方做选择的岔路（例如方案 A 还是 B、改动范围是 A 还是 B），不要自行假设。\
@@ -41,15 +39,14 @@ pub const DEFAULT_CODEX_TEMPLATE: &str = "请以严格审阅者身份复核{LABE
 `ASK_USER: {\"question\": \"实现登录用哪种方案？\", \"options\": [\"方案A：JWT 无状态\", \"方案B：服务端 session\"]}`。\
 无明确候选项时 options 可省（只给 question）。该行不要包含 JSON 之外的任何文字。";
 
-/// Claude 修订内置模板。占位符见 [`CLAUDE_PLACEHOLDERS`]。
+/// Codex 复核内置模板（每轮核心指令）。占位符见 [`CODEX_PLACEHOLDERS`]；首轮另附 [`STANDING_BLOCK`]。
+pub const DEFAULT_CODEX_TEMPLATE: &str = "请以严格审阅者身份复核{LABEL}。{SCOPE}\
+逐条列出发现的问题（无问题写\"无\"）。最后另起一行只输出结论：\
+无明显错误输出 `VERDICT: PASS`，否则 `VERDICT: NEEDS_WORK`。{ROUND_HINT}";
+
+/// Claude 修订内置模板（每轮核心指令）。占位符见 [`CLAUDE_PLACEHOLDERS`]；首轮另附 [`STANDING_BLOCK`]。
 pub const DEFAULT_CLAUDE_TEMPLATE: &str = "Codex 对{LABEL}的复核意见如下：\n---\n{REVIEW}\n---\n\
-请据此修订，只改确有问题处，并在回复末尾用一句话概述本轮改动。\
-\n\n复核/修订对象明确为：工作树根 `{REPO_ROOT}` 下的 `{REPO_REL}`（绝对路径 `{ABS}`）。\
-请只针对该文件，按上述绝对路径定位，不要改动其他文件。\
-\n\n若遇到需要我方做选择的岔路（例如方案 A 还是 B、改动范围是 A 还是 B），不要自行假设。\
-请只输出一行、以 `ASK_USER: ` 开头、后接一段合法 JSON，然后停止等我答复，例如：\
-`ASK_USER: {\"question\": \"实现登录用哪种方案？\", \"options\": [\"方案A：JWT 无状态\", \"方案B：服务端 session\"]}`。\
-无明确候选项时 options 可省（只给 question）。该行不要包含 JSON 之外的任何文字。";
+请据此修订，只改确有问题处，并在回复末尾用一句话概述本轮改动。";
 
 /// 复核模式，仅影响 prompt 措辞（复核口径）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,12 +81,14 @@ fn fill_locator(template: &str, target: &TargetSpec) -> String {
         .replace("{LABEL}", &target.label)
 }
 
-/// 用给定模板渲染 Codex 复核 prompt。`round` 为当前轮次（从 1 起）。
+/// 用给定模板渲染 Codex 复核 prompt。`round` 为当前轮次（从 1 起）；`first_turn` 为本会话
+/// 的首轮（仅首轮附 [`STANDING_BLOCK`]，后续轮依赖会话历史不再重发）。
 pub fn render_codex_prompt(
     template: &str,
     target: &TargetSpec,
     mode: ReviewMode,
     round: u32,
+    first_turn: bool,
 ) -> String {
     let scope = match mode {
         ReviewMode::Design => DESIGN_SCOPE,
@@ -100,14 +99,28 @@ pub fn render_codex_prompt(
     } else {
         String::new()
     };
-    fill_locator(template, target)
+    let mut s = template.to_string();
+    if first_turn {
+        s.push_str(STANDING_BLOCK);
+    }
+    fill_locator(&s, target)
         .replace("{SCOPE}", scope)
         .replace("{ROUND_HINT}", &round_hint)
 }
 
-/// 用给定模板渲染 Claude 修订 prompt：把 Codex 的复核意见原文填入。
-pub fn render_claude_prompt(template: &str, target: &TargetSpec, codex_review: &str) -> String {
-    fill_locator(template, target).replace("{REVIEW}", codex_review)
+/// 用给定模板渲染 Claude 修订 prompt：把 Codex 的复核意见原文填入。`first_turn` 语义同
+/// [`render_codex_prompt`]（仅首轮附 [`STANDING_BLOCK`]）。
+pub fn render_claude_prompt(
+    template: &str,
+    target: &TargetSpec,
+    codex_review: &str,
+    first_turn: bool,
+) -> String {
+    let mut s = template.to_string();
+    if first_turn {
+        s.push_str(STANDING_BLOCK);
+    }
+    fill_locator(&s, target).replace("{REVIEW}", codex_review)
 }
 
 /// 由 target_path 生成默认 label（缺省 target_label 时用）。
@@ -135,18 +148,21 @@ mod tests {
             &spec("设计文档 docs/foo.md"),
             ReviewMode::Design,
             1,
+            true,
         );
         assert!(p.contains("设计文档 docs/foo.md"));
         assert!(p.contains("VERDICT: PASS"));
         assert!(!p.contains("这是第"));
+        // 首轮附带常驻说明块（定位 + ASK_USER）。
         assert!(p.contains("ASK_USER: "));
-        // 精确定位句包含绝对路径与仓库根。
         assert!(p.contains("/repo/docs/foo.md"));
         assert!(p.contains("工作树根"));
         // 占位符必须全部被替换（ASK_USER 示例 JSON 里的 `{` 属正常内容，故只校验具体占位符）。
         for ph in CODEX_PLACEHOLDERS {
             assert!(!p.contains(ph), "占位符 {ph} 未被替换");
         }
+        // 常驻块的定位占位符也应被填充。
+        assert!(!p.contains("{REPO_ROOT}") && !p.contains("{ABS}"));
     }
 
     #[test]
@@ -156,14 +172,23 @@ mod tests {
             &spec("docs/foo.md"),
             ReviewMode::Implementation,
             3,
+            false,
         );
         assert!(p.contains("第 3 轮"));
         assert!(p.contains("符合设计"));
+        // 后续轮不再重发常驻说明块。
+        assert!(!p.contains("ASK_USER: "));
+        assert!(!p.contains("工作树根"));
     }
 
     #[test]
     fn claude_prompt_embeds_review() {
-        let p = render_claude_prompt(DEFAULT_CLAUDE_TEMPLATE, &spec("docs/foo.md"), "问题1：xxx");
+        let p = render_claude_prompt(
+            DEFAULT_CLAUDE_TEMPLATE,
+            &spec("docs/foo.md"),
+            "问题1：xxx",
+            true,
+        );
         assert!(p.contains("问题1：xxx"));
         assert!(p.contains("只改确有问题处"));
         assert!(p.contains("ASK_USER: "));
@@ -171,6 +196,21 @@ mod tests {
         for ph in CLAUDE_PLACEHOLDERS {
             assert!(!p.contains(ph), "占位符 {ph} 未被替换");
         }
+    }
+
+    #[test]
+    fn claude_prompt_later_turn_omits_standing_block() {
+        let p = render_claude_prompt(
+            DEFAULT_CLAUDE_TEMPLATE,
+            &spec("docs/foo.md"),
+            "问题1：xxx",
+            false,
+        );
+        assert!(p.contains("问题1：xxx"));
+        assert!(p.contains("只改确有问题处"));
+        // 后续轮不再重发常驻说明块。
+        assert!(!p.contains("ASK_USER: "));
+        assert!(!p.contains("工作树根"));
     }
 
     #[test]

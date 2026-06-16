@@ -21,7 +21,11 @@ const SUMMARIZE_TIMEOUT: Duration = Duration::from_secs(180);
 fn map_err(prefix: &str, status: reqwest::StatusCode, body: &str) -> String {
     let detail = serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| body.chars().take(200).collect::<String>());
     match status.as_u16() {
         401 | 403 => format!("{prefix}：鉴权失败，请检查 G10 token"),
@@ -57,7 +61,10 @@ async fn request_json(
     }
     let resp = req.send().await.map_err(|e| format!("{prefix}：{e}"))?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("{prefix}：读响应失败 {e}"))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("{prefix}：读响应失败 {e}"))?;
     if !status.is_success() {
         return Err(map_err(prefix, status, &text));
     }
@@ -71,7 +78,15 @@ async fn request_json(
 
 #[tauri::command]
 pub async fn llm_get_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    request_json(&state, reqwest::Method::GET, "/config", None, QUICK_TIMEOUT, "读大模型配置失败").await
+    request_json(
+        &state,
+        reqwest::Method::GET,
+        "/config",
+        None,
+        QUICK_TIMEOUT,
+        "读大模型配置失败",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -86,14 +101,30 @@ pub async fn llm_put_config(
     if let Some(k) = api_key {
         body["api_key"] = serde_json::json!(k);
     }
-    request_json(&state, reqwest::Method::PUT, "/config", Some(body), QUICK_TIMEOUT, "保存大模型配置失败").await
+    request_json(
+        &state,
+        reqwest::Method::PUT,
+        "/config",
+        Some(body),
+        QUICK_TIMEOUT,
+        "保存大模型配置失败",
+    )
+    .await
 }
 
 // ---------------- 提示词 ----------------
 
 #[tauri::command]
 pub async fn llm_list_prompts(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    request_json(&state, reqwest::Method::GET, "/prompts", None, QUICK_TIMEOUT, "读提示词列表失败").await
+    request_json(
+        &state,
+        reqwest::Method::GET,
+        "/prompts",
+        None,
+        QUICK_TIMEOUT,
+        "读提示词列表失败",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -102,7 +133,15 @@ pub async fn llm_get_prompt(
     name: String,
 ) -> Result<serde_json::Value, String> {
     let path = format!("/prompts/{name}");
-    request_json(&state, reqwest::Method::GET, &path, None, QUICK_TIMEOUT, "读提示词失败").await
+    request_json(
+        &state,
+        reqwest::Method::GET,
+        &path,
+        None,
+        QUICK_TIMEOUT,
+        "读提示词失败",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -117,7 +156,15 @@ pub async fn llm_put_prompt(
         body["version"] = serde_json::json!(v);
     }
     let path = format!("/prompts/{name}");
-    request_json(&state, reqwest::Method::PUT, &path, Some(body), QUICK_TIMEOUT, "保存提示词失败").await
+    request_json(
+        &state,
+        reqwest::Method::PUT,
+        &path,
+        Some(body),
+        QUICK_TIMEOUT,
+        "保存提示词失败",
+    )
+    .await
 }
 
 /// 重置为内置默认（删 DB 覆盖行）。
@@ -127,14 +174,30 @@ pub async fn llm_reset_prompt(
     name: String,
 ) -> Result<serde_json::Value, String> {
     let path = format!("/prompts/{name}");
-    request_json(&state, reqwest::Method::DELETE, &path, None, QUICK_TIMEOUT, "重置提示词失败").await
+    request_json(
+        &state,
+        reqwest::Method::DELETE,
+        &path,
+        None,
+        QUICK_TIMEOUT,
+        "重置提示词失败",
+    )
+    .await
 }
 
 // ---------------- 连通性自测 / 对话总结 ----------------
 
 #[tauri::command]
 pub async fn llm_ping(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    request_json(&state, reqwest::Method::POST, "/ping", Some(serde_json::json!({})), PING_TIMEOUT, "连通性自测失败").await
+    request_json(
+        &state,
+        reqwest::Method::POST,
+        "/ping",
+        Some(serde_json::json!({})),
+        PING_TIMEOUT,
+        "连通性自测失败",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -146,5 +209,13 @@ pub async fn llm_summarize(
         return Err("会话内容不能为空".to_string());
     }
     let body = serde_json::json!({ "text": text });
-    request_json(&state, reqwest::Method::POST, "/summarize", Some(body), SUMMARIZE_TIMEOUT, "对话总结失败").await
+    request_json(
+        &state,
+        reqwest::Method::POST,
+        "/summarize",
+        Some(body),
+        SUMMARIZE_TIMEOUT,
+        "对话总结失败",
+    )
+    .await
 }

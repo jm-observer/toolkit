@@ -73,6 +73,12 @@ pub struct SessionSummary {
     pub provider: Provider,
     pub id: String,
     pub title: String,
+    /// 首条用户消息的前若干字符——比会被桌面端改写的 AI 标题更稳定，用于人工对照/筛选。
+    #[serde(default)]
+    pub preview: String,
+    /// 会话工作目录（项目路径）；前端取末段作项目名，对应桌面端「项目 / 标题」前缀。
+    #[serde(default)]
+    pub cwd: String,
     pub status: SessionStatus,
     pub updated_at: String,
 }

@@ -13,6 +13,7 @@ import { SessionPairPicker } from './components/SessionPairPicker'
 import { MessageColumn } from './components/MessageColumn'
 import { LoopStatusBar } from './components/LoopStatusBar'
 import { AskUserModal } from './components/AskUserModal'
+import { ConfirmGateModal } from './components/ConfirmGateModal'
 
 const POLL_MS = 1500
 
@@ -34,12 +35,14 @@ export default function CodeloopPage() {
   const [mode, setMode] = useState<ReviewMode>('design')
   const [maxRounds, setMaxRounds] = useState(5)
   const [waitIdle, setWaitIdle] = useState(false)
+  const [stepConfirm, setStepConfirm] = useState(true)
 
   // 循环
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<Progress | null>(null)
   const [startErr, setStartErr] = useState<string | null>(null)
   const [answeredSeq, setAnsweredSeq] = useState(0)
+  const [decidedSeq, setDecidedSeq] = useState(0)
 
   // ── 会话清单 ──────────────────────────────────────────────────────────────
   const refreshSessions = () => {
@@ -133,6 +136,7 @@ export default function CodeloopPage() {
         mode,
         max_rounds: maxRounds,
         wait_for_claude_idle: waitIdle,
+        step_confirm: stepConfirm,
       })
       setRunning(true)
       setProgress({ phase: 'starting' })
@@ -159,6 +163,17 @@ export default function CodeloopPage() {
     }
   }
 
+  const handleDecide = async (approve: boolean) => {
+    const seq = progress?.seq
+    if (seq == null) return
+    setDecidedSeq(seq) // 乐观关窗，避免重复点击
+    try {
+      await CodeloopAPI.confirm(seq, approve)
+    } catch (e) {
+      setStartErr(String(e))
+    }
+  }
+
   // ASK_USER 弹窗：进入 awaiting_input 且该 seq 未答过。
   const showAsk =
     progress?.phase === 'awaiting_input' &&
@@ -166,12 +181,19 @@ export default function CodeloopPage() {
     progress.seq > answeredSeq &&
     !!progress.question
 
+  // 逐步确认弹窗：运行中、进入 awaiting_confirm 且该 seq 未拍板过。
+  const showConfirm =
+    running &&
+    progress?.phase === 'awaiting_confirm' &&
+    progress.seq != null &&
+    progress.seq > decidedSeq
+
   return (
     <div className="flex h-full flex-col gap-3">
       <div>
         <h1 className="text-xl font-semibold">复核循环</h1>
         <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          关联一对 Codex / Claude Code 会话，自动驱动「复核 ↔ 修订」往复（本机直跑，无需额外进程）。
+          关联一对 Codex / Claude Code 会话，驱动「复核 ↔ 修订」往复。默认逐步确认：每次跨会话传递前弹窗等你拍板（本机直跑，无需额外进程）。
         </p>
       </div>
 
@@ -200,6 +222,8 @@ export default function CodeloopPage() {
         setMaxRounds={setMaxRounds}
         waitIdle={waitIdle}
         setWaitIdle={setWaitIdle}
+        stepConfirm={stepConfirm}
+        setStepConfirm={setStepConfirm}
         running={running}
         canStart={canStart}
         onStart={handleStart}
@@ -223,6 +247,17 @@ export default function CodeloopPage() {
           seq={progress.seq!}
           askedBy={progress.asked_by}
           onAnswer={handleAnswer}
+        />
+      )}
+
+      {showConfirm && (
+        <ConfirmGateModal
+          seq={progress!.seq!}
+          direction={progress!.direction}
+          title={progress!.title}
+          content={progress!.content}
+          onApprove={() => handleDecide(true)}
+          onReject={() => handleDecide(false)}
         />
       )}
     </div>

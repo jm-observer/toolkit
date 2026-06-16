@@ -10,6 +10,8 @@ interface Props {
   setMaxRounds: (v: number) => void
   waitIdle: boolean
   setWaitIdle: (v: boolean) => void
+  stepConfirm: boolean
+  setStepConfirm: (v: boolean) => void
   running: boolean
   canStart: boolean
   onStart: () => void
@@ -28,10 +30,15 @@ const FINAL_LABELS: Record<string, string> = {
   max_rounds: '达最大轮次',
   aborted_timeout: '超时中止',
   aborted_parse: '解析失败中止',
+  aborted_by_user: '用户中止（可调整后重启）',
 }
 
 function statusText(running: boolean, p: Progress | null): { text: string; cls: string } {
   if (p?.phase === 'error') return { text: '基础设施错误', cls: 'text-red-600 dark:text-red-400' }
+  if (p?.phase === 'awaiting_confirm')
+    return { text: '等待确认传递…', cls: 'text-amber-600 dark:text-amber-400' }
+  if (p?.phase === 'awaiting_input')
+    return { text: '等待你作答…', cls: 'text-amber-600 dark:text-amber-400' }
   if (p?.phase === 'done') {
     const f = p.final_verdict ?? ''
     const ok = f === 'pass'
@@ -97,6 +104,16 @@ export function LoopStatusBar(props: Props) {
             disabled={running}
           />
           先等 Claude 当前轮完成
+        </label>
+
+        <label className="flex items-center gap-1.5 pb-2 text-xs text-gray-600 dark:text-gray-300">
+          <input
+            type="checkbox"
+            checked={props.stepConfirm}
+            onChange={e => props.setStepConfirm(e.target.checked)}
+            disabled={running}
+          />
+          逐步确认（每次传递先弹窗）
         </label>
 
         {running ? (

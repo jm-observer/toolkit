@@ -76,7 +76,10 @@ pub async fn english_tts_voices(state: State<'_, AppState>) -> Result<serde_json
     }
     let resp = req.send().await.map_err(|e| format!("查询音色失败: {e}"))?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读音色响应失败: {e}"))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读音色响应失败: {e}"))?;
     if !status.is_success() {
         return Err(map_status_err("查询音色失败", status, &text));
     }
@@ -121,7 +124,10 @@ pub async fn english_tts_preview(
         let body = resp.text().await.unwrap_or_default();
         return Err(map_status_err("TTS 生成失败", status, &body));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("读 TTS 结果失败: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读 TTS 结果失败: {e}"))?;
 
     let cache_dir = crate::shared::workspace::english_audio_cache_dir(&state.workspace);
     tokio::fs::create_dir_all(&cache_dir)

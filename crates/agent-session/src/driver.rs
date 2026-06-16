@@ -210,8 +210,10 @@ pub async fn create_codex_session(cwd: &Path, prompt: &str) -> Result<String> {
 /// 带 [`TURN_TIMEOUT`] 硬超时：`stdin` 接 null（CLI 误等交互时立即 EOF），`kill_on_drop`
 /// 保证超时丢弃 future 时子进程被杀，避免僵尸进程 / 任务永久 running。
 async fn run_capture(program: &str, argv: &[String], cwd: Option<&Path>) -> Result<String> {
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(argv)
+    let (resolved, prefix) = resolve_program(program);
+    let mut cmd = tokio::process::Command::new(&resolved);
+    cmd.args(&prefix)
+        .args(argv)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -219,6 +221,14 @@ async fn run_capture(program: &str, argv: &[String], cwd: Option<&Path>) -> Resu
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    log::info!(
+        "[driver] spawn {program}（resolved={:?}, prefix={} 项, argv={} 项, cwd={:?}）",
+        resolved,
+        prefix.len(),
+        argv.len(),
+        cwd,
+    );
+    let started = std::time::Instant::now();
     let child = cmd
         .spawn()
         .with_context(|| format!("spawn {program} 失败（CLI 是否已安装并在 PATH 中？）"))?;
@@ -226,26 +236,140 @@ async fn run_capture(program: &str, argv: &[String], cwd: Option<&Path>) -> Resu
         Ok(r) => r.with_context(|| format!("等待 {program} 子进程退出失败"))?,
         // 超时：child future 在此被丢弃，kill_on_drop 触发子进程终止。
         Err(_) => {
+            log::warn!(
+                "[driver] {program} 单轮执行超时（{TURN_TIMEOUT:?}），已终止子进程",
+            );
             return Err(anyhow!(
                 "{program} 单轮执行超时（{TURN_TIMEOUT:?}），已终止子进程",
             ));
         }
     };
+    let elapsed = started.elapsed();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "[driver] {program} 退出码 {:?}（耗时 {elapsed:?}）：{}",
+            output.status.code(),
+            stderr.trim(),
+        );
         return Err(anyhow!(
             "{program} 退出码 {:?}：{}",
             output.status.code(),
             stderr.trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    log::info!(
+        "[driver] {program} 正常退出（耗时 {elapsed:?}, stdout {} 字节）",
+        stdout.len(),
+    );
+    Ok(stdout)
+}
+
+/// 解析裸命令名到实际可执行文件 + 需前置的参数。
+///
+/// 返回 `(program, prefix_args)`：`Command::new(program)` 后先 `args(prefix_args)` 再接真正 argv。
+///
+/// Windows 专属问题：npm 全局安装的 CLI（如 `codex`）落地为 `codex.cmd` / `codex.ps1` 垫片，
+/// 而 `CreateProcessW` 只会给裸名自动补 `.exe`，故 `Command::new("codex")` 报「program not
+/// found」。补扩展名指到 `codex.cmd` 后又撞上 Rust 的 CVE-2024-24576 防护：含换行的参数
+/// （我们的多行 prompt）无法安全传给 `.cmd`（经 cmd.exe），报「batch file arguments are invalid」。
+///
+/// 解法：识别 npm cmd-shim（`codex.cmd` 内 `node "<…>\node_modules\…\xxx.js" %*`），**绕开
+/// cmd.exe 直接 `node <脚本.js> <argv>`**——`node.exe` 是真 PE，多行参数照常透传。
+///
+/// 非 Windows、或命令名已带路径分隔符/扩展名、或解析不到 → 原样返回（`prefix_args` 为空），
+/// 保留有意义的报错。
+fn resolve_program(program: &str) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+    #[cfg(windows)]
+    {
+        // 已含路径分隔符或扩展名 → 调用方已给定，不再解析。
+        if !program.contains(['\\', '/', '.']) {
+            let pathext =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            let exts: Vec<String> = pathext.split(';').map(|e| e.trim().to_string()).collect();
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    for ext in &exts {
+                        let candidate = dir.join(format!("{program}{ext}"));
+                        if !candidate.is_file() {
+                            continue;
+                        }
+                        // npm 的 .cmd/.bat 垫片 → 改为直接 node 跑底层 .js，绕开 cmd.exe。
+                        if matches!(ext.to_ascii_uppercase().as_str(), ".CMD" | ".BAT") {
+                            if let Some(node_call) = npm_shim_to_node(&candidate) {
+                                return node_call;
+                            }
+                        }
+                        return (candidate.into_os_string(), Vec::new());
+                    }
+                }
+            }
+        }
+    }
+    (program.into(), Vec::new())
+}
+
+/// 解析 npm cmd-shim，抽出其调用的 `node_modules\…\*.js` 脚本，返回 `("node", [脚本路径])`。
+/// 非 npm shim / 脚本不存在 → `None`（调用方回退原 .cmd）。
+#[cfg(windows)]
+fn npm_shim_to_node(shim: &Path) -> Option<(std::ffi::OsString, Vec<std::ffi::OsString>)> {
+    let text = std::fs::read_to_string(shim).ok()?;
+    // shim 内形如 `"%dp0%\node_modules\@scope\pkg\bin\cli.js"`；取 node_modules→脚本扩展名一段。
+    let start = text.find("node_modules")?;
+    let rest = &text[start..];
+    let end = [".js", ".cjs", ".mjs"]
+        .iter()
+        .filter_map(|ext| rest.find(ext).map(|i| i + ext.len()))
+        .min()?;
+    let rel = &rest[..end]; // node_modules\…\cli.js（分隔符可能是 \ 或 /，PathBuf::join 均可）
+    let script = shim.parent()?.join(rel);
+    if !script.is_file() {
+        return None;
+    }
+    Some(("node".into(), vec![script.into_os_string()]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// npm cmd-shim 应被解析为「node + 底层 .js 脚本」，绕开 cmd.exe。
+    #[cfg(windows)]
+    #[test]
+    fn npm_shim_resolves_to_node_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("node_modules/@openai/codex/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let js = bin.join("codex.js");
+        std::fs::write(&js, b"// stub").unwrap();
+        let shim = dir.path().join("codex.cmd");
+        std::fs::write(
+            &shim,
+            "@ECHO off\r\n... & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+        )
+        .unwrap();
+
+        let (prog, prefix) = npm_shim_to_node(&shim).expect("应识别为 npm shim");
+        assert_eq!(prog, std::ffi::OsString::from("node"));
+        assert_eq!(prefix.len(), 1);
+        // 比规范化路径，规避 \ 与 / 的字面差异。
+        assert_eq!(
+            std::fs::canonicalize(PathBuf::from(&prefix[0])).unwrap(),
+            std::fs::canonicalize(&js).unwrap(),
+        );
+    }
+
+    /// 脚本文件不存在时不应误判为 shim（回退原 .cmd）。
+    #[cfg(windows)]
+    #[test]
+    fn npm_shim_missing_script_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("codex.cmd");
+        std::fs::write(&shim, "\"%dp0%\\node_modules\\x\\bin\\cli.js\" %*").unwrap();
+        assert!(npm_shim_to_node(&shim).is_none());
+    }
 
     #[test]
     fn codex_argv_shape() {
