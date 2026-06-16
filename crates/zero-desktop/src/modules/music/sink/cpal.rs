@@ -105,6 +105,7 @@ impl CpalSink {
         let actual = ActualFormat {
             sample_rate: dev_rate,
             bits: bits_for_format(sample_format),
+            channels: dev_channels as u16,
             exclusive: false,
             resampled,
         };
@@ -164,24 +165,33 @@ fn fill_callback<T>(
     T: Copy,
 {
     // 定点音量：volume 存为 (vol * 65536) 的整数。
-    let vol_q16 = volume.load(Ordering::Relaxed);
-    let vol = vol_q16 as f32 / 65536.0;
-    let mut produced_samples = 0usize;
-    for slot in out.iter_mut() {
-        match consumer.pop() {
-            Ok(sample) => {
-                *slot = convert(sample * vol);
-                produced_samples += 1;
+    let vol = volume.load(Ordering::Relaxed) as f32 / 65536.0;
+    let ch = channels.max(1);
+    let n = out.len();
+    let mut i = 0usize;
+    let mut produced_frames = 0usize;
+    // 按帧原子消费：缓冲不足一整帧时该帧写静音，避免在一帧的多声道中途欠载导致 L/R 永久错位。
+    while i + ch <= n {
+        if consumer.slots() >= ch {
+            for _ in 0..ch {
+                let s = consumer.pop().unwrap_or(0.0);
+                out[i] = convert(s * vol);
+                i += 1;
             }
-            // 欠载：写静音（0），不阻塞、不分配。
-            Err(_) => {
-                *slot = convert(0.0);
+            produced_frames += 1;
+        } else {
+            for _ in 0..ch {
+                out[i] = convert(0.0);
+                i += 1;
             }
         }
     }
-    if let Some(frames) = produced_samples.checked_div(channels) {
-        if frames > 0 {
-            frames_played.fetch_add(frames as u32, Ordering::Relaxed);
-        }
+    // 尾部不足一帧的零头（通常 out 帧对齐，不会触发）补静音。
+    while i < n {
+        out[i] = convert(0.0);
+        i += 1;
+    }
+    if produced_frames > 0 {
+        frames_played.fetch_add(produced_frames as u32, Ordering::Relaxed);
     }
 }
