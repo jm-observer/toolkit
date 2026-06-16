@@ -1,9 +1,10 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, MessageSquareText, Rocket, Settings, ExternalLink } from 'lucide-react'
+import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, MessageSquareText, Music, Rocket, Settings, ExternalLink } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import EnvConfigService from '../modules/english/services/EnvConfigService'
+import MiniPlayer from '../modules/music/MiniPlayer'
 
 const navItems = [
   { to: '/english/annotated', icon: BookOpen, label: '英语听力' },
@@ -13,6 +14,7 @@ const navItems = [
   { to: '/net-policy', icon: ShieldCheck, label: '网络策略' },
   { to: '/codeloop', icon: GitCompareArrows, label: '复核循环' },
   { to: '/chat-summary', icon: MessageSquareText, label: '对话总结' },
+  { to: '/music', icon: Music, label: '音乐' },
   { to: '/g10-deploy', icon: Rocket, label: 'G10 部署' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
@@ -297,7 +299,8 @@ function CustomerIdIndicator() {
 
 export default function ShellLayout() {
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <div className="flex min-h-0 flex-1">
       {/* 左侧导航 */}
       <aside className="flex w-44 flex-shrink-0 flex-col border-r border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900">
         <div className="flex h-12 items-center px-4 text-sm font-semibold tracking-wide text-gray-500 dark:text-gray-400">
@@ -359,6 +362,10 @@ export default function ShellLayout() {
           <Outlet />
         </main>
       </div>
+      </div>
+
+      {/* 底栏常驻迷你播放器（跨页不中断） */}
+      <MiniPlayer />
     </div>
   )
 }
