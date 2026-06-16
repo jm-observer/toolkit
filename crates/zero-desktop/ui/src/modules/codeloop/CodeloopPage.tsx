@@ -3,7 +3,6 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   CodeloopAPI,
   onProgress,
-  type LoopMessageRow,
   type LoopRow,
   type Progress,
   type Provider,
@@ -12,12 +11,11 @@ import {
   type SessionSummary,
 } from './api/tauri-client'
 import { SessionPairPicker } from './components/SessionPairPicker'
-import { MessageColumn } from './components/MessageColumn'
 import { LoopStatusBar } from './components/LoopStatusBar'
 import { AskUserModal } from './components/AskUserModal'
 import { ConfirmGateModal } from './components/ConfirmGateModal'
 import { LoopList } from './components/LoopList'
-import { LoopTranscript } from './components/LoopTranscript'
+import { TrackModal } from './components/TrackModal'
 
 const POLL_MS = 1500
 
@@ -49,13 +47,12 @@ export default function CodeloopPage() {
   const [answeredSeq, setAnsweredSeq] = useState(0)
   const [decidedSeq, setDecidedSeq] = useState(0)
 
-  // 记录列表 / 详情
-  const [view, setView] = useState<'live' | 'records'>('live')
+  // 记录列表
   const [loops, setLoops] = useState<LoopRow[]>([])
   const [loadingLoops, setLoadingLoops] = useState(false)
   const [selectedLoopId, setSelectedLoopId] = useState<number | null>(null)
-  const [loopMessages, setLoopMessages] = useState<LoopMessageRow[]>([])
-  const [loadingLoopMsgs, setLoadingLoopMsgs] = useState(false)
+  // 跟踪弹窗：展示所选两个会话的消息记录。
+  const [showTrack, setShowTrack] = useState(false)
 
   // ── 会话清单 ──────────────────────────────────────────────────────────────
   const refreshSessions = () => {
@@ -83,35 +80,6 @@ export default function CodeloopPage() {
     if (progress?.phase === 'done' || progress?.phase === 'error') refreshLoops()
   }, [progress?.phase])
 
-  // 选中记录 → 拉其往返消息；该记录在跑则轮询直至非 running。
-  useEffect(() => {
-    if (selectedLoopId == null) {
-      setLoopMessages([])
-      return
-    }
-    let alive = true
-    let timer: ReturnType<typeof setInterval> | undefined
-    const load = async () => {
-      try {
-        const msgs = await CodeloopAPI.loopMessages(selectedLoopId)
-        if (alive) setLoopMessages(msgs)
-      } catch {
-        /* ignore */
-      }
-    }
-    setLoadingLoopMsgs(true)
-    void load().finally(() => {
-      if (alive) setLoadingLoopMsgs(false)
-    })
-    if (loops.find(l => l.id === selectedLoopId)?.status === 'running') {
-      timer = setInterval(load, POLL_MS)
-    }
-    return () => {
-      alive = false
-      if (timer) clearInterval(timer)
-    }
-  }, [selectedLoopId, loops])
-
   const handleDeleteLoop = async (id: number) => {
     try {
       await CodeloopAPI.deleteLoop(id)
@@ -120,6 +88,24 @@ export default function CodeloopPage() {
     }
     if (selectedLoopId === id) setSelectedLoopId(null)
     refreshLoops()
+  }
+
+  // 点击记录：选中 + 把该记录的配置回填到上方（两个会话 / 目标 / 模式 / 各开关），
+  // 同时把消息轮询切到该记录的两个会话（供「跟踪」弹窗展示）。
+  const handleSelectLoop = (id: number) => {
+    setSelectedLoopId(id)
+    const rec = loops.find(l => l.id === id)
+    if (!rec) return
+    cursors.current.claude = 0
+    cursors.current.codex = 0
+    setMessages({ codex: [], claude: [] })
+    setClaudeId(rec.claude_session)
+    setCodexId(rec.codex_session)
+    setTargetPath(rec.target_abs)
+    setMode(rec.mode)
+    setMaxRounds(rec.max_rounds)
+    setStepConfirm(rec.step_confirm)
+    setUseWorktree(rec.use_worktree)
   }
 
   // 内联：id → 项目名（cwd 末段名）。空 cwd / 未选 → 空串。用于同项目联动。
@@ -319,6 +305,8 @@ export default function CodeloopPage() {
         canStart={canStart}
         onStart={handleStart}
         onStop={handleStop}
+        onTrack={() => setShowTrack(true)}
+        canTrack={!!claudeId && !!codexId}
         progress={progress}
       />
       {startErr && (
@@ -327,55 +315,17 @@ export default function CodeloopPage() {
         </div>
       )}
 
-      {/* 实时双栏 / 记录列表 切换 */}
-      <div className="flex items-center gap-1 text-xs">
-        <button
-          onClick={() => setView('live')}
-          className={`rounded px-2 py-1 ${
-            view === 'live'
-              ? 'bg-blue-600 text-white'
-              : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'
-          }`}
-        >
-          实时
-        </button>
-        <button
-          onClick={() => {
-            setView('records')
-            refreshLoops()
-          }}
-          className={`rounded px-2 py-1 ${
-            view === 'records'
-              ? 'bg-blue-600 text-white'
-              : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'
-          }`}
-        >
-          记录{loops.length ? `（${loops.length}）` : ''}
-        </button>
+      {/* 记录列表（常驻于启动区下方）：点击一条 → 配置回填到上方；点「跟踪」看两会话消息 */}
+      <div className="min-h-0 flex-1">
+        <LoopList
+          loops={loops}
+          selectedId={selectedLoopId}
+          onSelect={handleSelectLoop}
+          onRefresh={refreshLoops}
+          onDelete={handleDeleteLoop}
+          loading={loadingLoops}
+        />
       </div>
-
-      {view === 'live' ? (
-        <div className="flex min-h-0 flex-1 gap-3">
-          <MessageColumn title="Claude Code" sessionId={claudeId} messages={messages.claude} />
-          <MessageColumn title="Codex" sessionId={codexId} messages={messages.codex} />
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 gap-3">
-          <div className="w-80 shrink-0">
-            <LoopList
-              loops={loops}
-              selectedId={selectedLoopId}
-              onSelect={setSelectedLoopId}
-              onRefresh={refreshLoops}
-              onDelete={handleDeleteLoop}
-              loading={loadingLoops}
-            />
-          </div>
-          <div className="min-w-0 flex-1">
-            <LoopTranscript loopId={selectedLoopId} messages={loopMessages} loading={loadingLoopMsgs} />
-          </div>
-        </div>
-      )}
 
       {showAsk && progress?.question && (
         <AskUserModal
@@ -394,6 +344,16 @@ export default function CodeloopPage() {
           content={progress!.content}
           onApprove={() => handleDecide(true)}
           onReject={() => handleDecide(false)}
+        />
+      )}
+
+      {showTrack && (
+        <TrackModal
+          claudeId={claudeId}
+          codexId={codexId}
+          claudeMessages={messages.claude}
+          codexMessages={messages.codex}
+          onClose={() => setShowTrack(false)}
         />
       )}
     </div>

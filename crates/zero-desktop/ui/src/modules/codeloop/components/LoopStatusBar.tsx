@@ -1,4 +1,4 @@
-import { Play, Square } from 'lucide-react'
+import { Eye, Play, Square } from 'lucide-react'
 import type { Progress, ReviewMode } from '../api/tauri-client'
 
 interface Props {
@@ -18,6 +18,9 @@ interface Props {
   canStart: boolean
   onStart: () => void
   onStop: () => void
+  /** 跟踪：弹出所选两个会话的消息记录。 */
+  onTrack: () => void
+  canTrack: boolean
   progress: Progress | null
 }
 
@@ -130,6 +133,16 @@ export function LoopStatusBar(props: Props) {
           />
           worktree 模式（Claude 用 worktree+子 agent 实现）
         </label>
+
+        <button
+          onClick={props.onTrack}
+          disabled={!props.canTrack}
+          className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+          title="弹出所选两个会话的消息记录"
+        >
+          <Eye size={14} />
+          跟踪
+        </button>
 
         {running ? (
           <button
