@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { RefreshCw, Plus, ChevronDown } from 'lucide-react'
+import { RefreshCw, Plus, ChevronDown, Folder } from 'lucide-react'
 import type { Provider, SessionSummary } from '../api/tauri-client'
 
 interface Props {
@@ -12,6 +12,10 @@ interface Props {
   /** 新建 Codex 会话（复用所选 Claude 会话的仓库目录）。 */
   onNewCodex: () => void
   creatingCodex: boolean
+  /** 已选 Claude 会话的项目名（下发给 Codex 选择器作亲和项目）。 */
+  claudeProject?: string
+  /** 已选 Codex 会话的项目名（下发给 Claude 选择器作亲和项目）。 */
+  codexProject?: string
 }
 
 /** 主展示文本：优先首条用户消息预览（最稳定可认），回退 AI 标题，再回退短 id。 */
@@ -49,6 +53,71 @@ function shortTime(iso: string): string {
 }
 
 /**
+ * updated_at(ISO8601) → 相对时间（对齐桌面端观感）；无法解析则原样返回。
+ * <60s "刚刚" / <60min "N 分" / <24h "N 小时" / <30d "N 天" / 否则 "N 月"。
+ * 下拉打开时按当前时刻计算一次即可（瞬时交互，无需定时刷新）。
+ */
+function relativeTime(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  const diffMs = Date.now() - t
+  const sec = Math.max(0, Math.floor(diffMs / 1000))
+  if (sec < 60) return '刚刚'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} 分`
+  const hour = Math.floor(min / 60)
+  if (hour < 24) return `${hour} 小时`
+  const day = Math.floor(hour / 24)
+  if (day < 30) return `${day} 天`
+  const month = Math.floor(day / 30)
+  return `${month} 月`
+}
+
+const UNKNOWN_PROJECT = '未知项目'
+
+interface Group {
+  /** 分组键（项目名，空 cwd → UNKNOWN_PROJECT）。 */
+  project: string
+  /** 是否为亲和项目（与对侧已选会话同项目）。 */
+  affinity: boolean
+  /** 组内会话，已按 updated_at 倒序。 */
+  items: SessionSummary[]
+}
+
+/**
+ * 先筛后分组：把已筛会话按 projectName(cwd) 分组。
+ * - 组内按 updated_at 倒序；组间按组内最新会话 updated_at 倒序。
+ * - 空 cwd → UNKNOWN_PROJECT，恒排末尾。
+ * - affinityProject 非空时，该组置顶并标记 affinity。
+ */
+function groupSessions(filtered: SessionSummary[], affinityProject?: string): Group[] {
+  const byProject = new Map<string, SessionSummary[]>()
+  for (const s of filtered) {
+    const proj = projectName(s.cwd) || UNKNOWN_PROJECT
+    const arr = byProject.get(proj)
+    if (arr) arr.push(s)
+    else byProject.set(proj, [s])
+  }
+  const groups: Group[] = []
+  for (const [project, items] of byProject) {
+    items.sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
+    groups.push({ project, affinity: !!affinityProject && project === affinityProject, items })
+  }
+  const latest = (g: Group) => g.items[0]?.updated_at ?? ''
+  groups.sort((a, b) => {
+    // 亲和组置顶。
+    if (a.affinity !== b.affinity) return a.affinity ? -1 : 1
+    // 未知项目恒排末尾。
+    const aUnknown = a.project === UNKNOWN_PROJECT
+    const bUnknown = b.project === UNKNOWN_PROJECT
+    if (aUnknown !== bUnknown) return aUnknown ? 1 : -1
+    // 其余按组内最新倒序。
+    return latest(a) < latest(b) ? 1 : latest(a) > latest(b) ? -1 : 0
+  })
+  return groups
+}
+
+/**
  * 可输入过滤的会话下拉框（替代原生 select）。
  * - 输入框即筛选框：键入文本按 title/id/status 模糊匹配。
  * - 选项按 `updated_at` 倒序（最新在最前）。
@@ -60,12 +129,15 @@ function SideSelect({
   sessions,
   value,
   onPick,
+  affinityProject,
 }: {
   label: string
   provider: Provider
   sessions: SessionSummary[]
   value: string
   onPick: (provider: Provider, id: string) => void
+  /** 对侧已选会话的项目名（同项目联动）；空表示对侧未选，退化为纯 L1。 */
+  affinityProject?: string
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -91,6 +163,15 @@ function SideSelect({
       tokenMatch(`${s.preview} ${s.title} ${projectName(s.cwd)} ${s.status} ${s.id}`, q),
     )
   }, [sorted, query, open])
+
+  // 先筛后分组（空组自动隐藏）；亲和项目非空时该组置顶。
+  const groups = useMemo(
+    () => groupSessions(filtered, affinityProject),
+    [filtered, affinityProject],
+  )
+
+  // 是否需要在亲和组之后插入"其他项目"分隔（仅当确有亲和组且其后还有别的组）。
+  const hasAffinityGroup = !!affinityProject && groups.some(g => g.affinity)
 
   // 点击组件外部关闭下拉。
   useEffect(() => {
@@ -155,36 +236,56 @@ function SideSelect({
             >
               — 清除选择 —
             </li>
-            {filtered.length === 0 && (
+            {groups.length === 0 && (
               <li className="px-2 py-1.5 text-sm text-gray-400">无匹配会话</li>
             )}
-            {filtered.map(s => (
-              <li
-                key={s.id}
-                onMouseDown={e => {
-                  e.preventDefault()
-                  pick(s.id)
-                }}
-                className={`flex cursor-pointer items-center justify-between gap-2 px-2 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                  s.id === value ? 'bg-blue-50 dark:bg-gray-700/60' : ''
-                }`}
-              >
-                <span
-                  className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-                  title={s.title || undefined}
-                >
-                  {optionLabel(s)}
-                </span>
-                <span className="flex shrink-0 items-center gap-1.5 text-xs text-gray-400">
-                  {projectName(s.cwd) && (
-                    <span className="rounded bg-gray-100 px-1 py-0.5 text-gray-500 dark:bg-gray-700 dark:text-gray-300">
-                      {projectName(s.cwd)}
-                    </span>
+            {groups.map((g, gi) => {
+              // 亲和组之后、第一个非亲和组之前插入"其他项目"弱色分隔。
+              const showOtherDivider = hasAffinityGroup && !g.affinity && groups[gi - 1]?.affinity
+              return (
+                <li key={g.project} className="list-none">
+                  {showOtherDivider && (
+                    <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                      其他项目
+                    </div>
                   )}
-                  {shortTime(s.updated_at)}
-                </span>
-              </li>
-            ))}
+                  {/* 组头：📁 + 项目名，sticky 弱色不可点击；亲和组带"匹配当前选择"徽标。 */}
+                  <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-white px-2 py-1 text-xs font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                    <Folder size={12} className="shrink-0 text-gray-400" />
+                    <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                      {g.project}
+                    </span>
+                    {g.affinity && (
+                      <span className="shrink-0 rounded bg-blue-50 px-1 py-0.5 text-[10px] font-normal text-blue-500 dark:bg-blue-900/30 dark:text-blue-300">
+                        匹配当前选择
+                      </span>
+                    )}
+                  </div>
+                  <ul>
+                    {g.items.map(s => (
+                      <li
+                        key={s.id}
+                        onMouseDown={e => {
+                          e.preventDefault()
+                          pick(s.id)
+                        }}
+                        title={`${shortTime(s.updated_at)}${s.title ? ` · ${s.title}` : ''}`}
+                        className={`flex cursor-pointer items-center justify-between gap-2 px-2 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 ${
+                          s.id === value ? 'bg-blue-50 dark:bg-gray-700/60' : ''
+                        } ${hasAffinityGroup && !g.affinity ? 'opacity-70' : ''}`}
+                      >
+                        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                          {optionLabel(s)}
+                        </span>
+                        <span className="shrink-0 text-xs text-gray-400">
+                          {relativeTime(s.updated_at)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              )
+            })}
           </ul>
         )}
       </div>
@@ -201,11 +302,27 @@ export function SessionPairPicker({
   loading,
   onNewCodex,
   creatingCodex,
+  claudeProject,
+  codexProject,
 }: Props) {
   return (
     <div className="flex items-end gap-3">
-      <SideSelect label="Claude Code 会话" provider="claude" sessions={sessions} value={claudeId} onPick={onPick} />
-      <SideSelect label="Codex 会话" provider="codex" sessions={sessions} value={codexId} onPick={onPick} />
+      <SideSelect
+        label="Claude Code 会话"
+        provider="claude"
+        sessions={sessions}
+        value={claudeId}
+        onPick={onPick}
+        affinityProject={codexProject}
+      />
+      <SideSelect
+        label="Codex 会话"
+        provider="codex"
+        sessions={sessions}
+        value={codexId}
+        onPick={onPick}
+        affinityProject={claudeProject}
+      />
       <button
         onClick={onNewCodex}
         disabled={creatingCodex || !claudeId}
