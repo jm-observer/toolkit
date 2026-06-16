@@ -185,6 +185,21 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::g10_deploy::g10_local_version,
             modules::g10_deploy::g10_is_deploying,
             modules::g10_deploy::g10_deploy,
+            // music 模块（本地音乐原生后端播放 + WASAPI 独占 bit-perfect）
+            modules::music::music_pick_folder,
+            modules::music::music_scan,
+            modules::music::music_play_queue,
+            modules::music::music_pause,
+            modules::music::music_resume,
+            modules::music::music_toggle,
+            modules::music::music_stop,
+            modules::music::music_seek,
+            modules::music::music_next,
+            modules::music::music_prev,
+            modules::music::music_set_volume,
+            modules::music::music_set_repeat,
+            modules::music::music_set_shuffle,
+            modules::music::music_get_state,
         ])
         .setup(move |app| {
             modules::english::setup(app.handle(), state.english.clone())
@@ -193,6 +208,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::cookie::setup(app.handle(), state.cookie.clone()).context("cookie::setup")?;
             modules::net_policy::setup(app.handle(), state.net_policy.clone())
                 .context("net_policy::setup")?;
+            modules::music::setup(app.handle(), state.music.clone()).context("music::setup")?;
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -1,6 +1,6 @@
 use crate::modules::{
     codeloop::CodeloopState, cookie::CookieState, english::EnglishState,
-    g10_deploy::G10DeployState, net_policy::NetPolicyState, speech::SpeechState,
+    g10_deploy::G10DeployState, music::MusicState, net_policy::NetPolicyState, speech::SpeechState,
 };
 use crate::shared::workspace::speech_db_path;
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ pub struct AppState {
     pub net_policy: Arc<NetPolicyState>,
     pub codeloop: Arc<CodeloopState>,
     pub g10_deploy: Arc<G10DeployState>,
+    pub music: Arc<MusicState>,
 }
 
 impl AppState {
@@ -24,6 +25,7 @@ impl AppState {
         let speech = SpeechState::new(&speech_db_path(&workspace))?;
         let net_policy = Arc::new(NetPolicyState::new(workspace.clone()));
         let g10_deploy = Arc::new(G10DeployState::new(workspace.clone()));
+        let music = MusicState::new(&workspace);
         Ok(Self {
             workspace,
             english: Arc::new(EnglishState::default()),
@@ -32,6 +34,7 @@ impl AppState {
             net_policy,
             codeloop: Arc::new(CodeloopState::default()),
             g10_deploy,
+            music,
         })
     }
 }
