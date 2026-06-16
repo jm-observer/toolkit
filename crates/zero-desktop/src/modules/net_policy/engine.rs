@@ -159,9 +159,10 @@ pub fn start(workspace: &Path) -> Result<u32> {
         );
     }
     let dir = net_policy_dir(workspace);
-    let child = std::process::Command::new(&bin)
-        .arg("-d")
-        .arg(&dir)
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("-d").arg(&dir);
+    crate::shared::proc::hide_console(&mut cmd); // 不弹控制台窗口
+    let child = cmd
         .spawn()
         .with_context(|| format!("spawn mihomo: {}", bin.display()))?;
     Ok(child.id())

@@ -160,12 +160,10 @@ pub struct LocalVersion {
 }
 
 fn run_git(repo: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git 调用失败：{e}"))?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(repo).args(args);
+    crate::shared::proc::hide_console(&mut cmd); // 不弹控制台窗口
+    let out = cmd.output().map_err(|e| format!("git 调用失败：{e}"))?;
     if !out.status.success() {
         return Err(format!(
             "git {} 失败：{}",
@@ -333,19 +331,21 @@ async fn run_deploy(
     );
 
     // 脚本带 `#requires -Version 7` 且用 PS7 语法，必须用 pwsh（非 Windows PowerShell 5）。
-    let mut child = Command::new("pwsh")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            script,
-        ])
-        .args(args)
-        .current_dir(repo)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+    let mut cmd = Command::new("pwsh");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        script,
+    ])
+    .args(args)
+    .current_dir(repo)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    crate::shared::proc::hide_console_tokio(&mut cmd); // 不弹控制台窗口
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 pwsh 失败（未安装 PowerShell 7？）：{e}"))?;
 

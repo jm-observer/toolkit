@@ -21,6 +21,10 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/asr-client/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/audio-clean-client/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/zero-desktop/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/agent-session/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/agent-session/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/codeloop-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/toolkit-llm/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

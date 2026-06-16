@@ -332,8 +332,12 @@ impl Engine {
             ) {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    warn!(target: "music", "重采样器创建失败，按源率直送（可能音高异常）: {e:#}");
-                    None
+                    // 不能按设备率正确播放该曲 → 跳过，绝不退化为「源率直送 dev_rate 流」
+                    // （那会导致播放加速 + 音高升高）。
+                    warn!(target: "music", "重采样器创建失败，跳过该曲: {e:#}");
+                    self.emit_error(format!("无法按设备采样率播放该曲（重采样器创建失败）: {e}"));
+                    self.advance_after_error();
+                    return;
                 }
             }
         } else {
@@ -457,7 +461,9 @@ impl Engine {
         // 仅在当前曲刚解码 EOF（decoded_eof=true）时尝试；已 gapless 过的为 false。
         let (src_fmt, frames_now, buffered_frames) = match self.current.as_ref() {
             Some(cur) if cur.decoded_eof => {
-                let ch = cur.src_fmt.channels.max(1) as usize;
+                // producer 里是 sink 实际声道交织的输出帧 → 按 actual.channels 换算，与
+                // frames_played（输出帧）同基准。
+                let ch = cur.actual.channels.max(1) as usize;
                 let buffered = cur.producer_capacity.saturating_sub(cur.sink.producer.slots()) / ch;
                 (
                     cur.src_fmt,
@@ -785,13 +791,59 @@ impl Engine {
 /// 把一批源交织样本（可能重采样后）push 到 sink producer。producer 满则丢弃多余（欠/过载保护；
 /// 正常情况下 pump 已按 slots 控量）。
 fn push_chunk(cur: &mut Current, samples: &[f32]) {
-    if let Some(rs) = cur.resampler.as_mut() {
-        let mut resampled = Vec::new();
-        if rs.process(samples, &mut resampled).is_ok() {
-            push_samples(&mut cur.sink, &resampled);
+    let src_ch = cur.src_fmt.channels.max(1) as usize;
+    let dst_ch = cur.actual.channels.max(1) as usize;
+
+    // 1) 采样率：必要时重采样到 sink 实际率（重采样器按源声道工作）。
+    let rate_adj: std::borrow::Cow<[f32]> = match cur.resampler.as_mut() {
+        Some(rs) => {
+            let mut resampled = Vec::new();
+            if rs.process(samples, &mut resampled).is_err() {
+                return;
+            }
+            std::borrow::Cow::Owned(resampled)
+        }
+        None => std::borrow::Cow::Borrowed(samples),
+    };
+
+    // 2) 声道：源声道 → sink 实际声道。设备声道与源不同（如单声道音轨 + 立体声设备）时
+    //    必须适配，否则输出回调按设备声道消费按源声道交织的流 → 播放加速/音高错乱/串扰。
+    if src_ch == dst_ch {
+        push_samples(&mut cur.sink, &rate_adj);
+    } else {
+        let mut remapped = Vec::with_capacity(rate_adj.len() / src_ch * dst_ch + dst_ch);
+        remap_channels(&rate_adj, src_ch, dst_ch, &mut remapped);
+        push_samples(&mut cur.sink, &remapped);
+    }
+}
+
+/// 把交织 f32 从 `src_ch` 声道重排到 `dst_ch` 声道，结果追加到 `out`。
+/// 规则：单声道→多声道复制；多声道→单声道取平均；其余取前 min(src,dst) 声道、多出补 0。
+fn remap_channels(input: &[f32], src_ch: usize, dst_ch: usize, out: &mut Vec<f32>) {
+    if src_ch == dst_ch {
+        out.extend_from_slice(input);
+        return;
+    }
+    let frames = input.len() / src_ch.max(1);
+    if src_ch == 1 {
+        for &s in input {
+            for _ in 0..dst_ch {
+                out.push(s);
+            }
+        }
+    } else if dst_ch == 1 {
+        for f in 0..frames {
+            let base = f * src_ch;
+            let sum: f32 = input[base..base + src_ch].iter().sum();
+            out.push(sum / src_ch as f32);
         }
     } else {
-        push_samples(&mut cur.sink, samples);
+        for f in 0..frames {
+            let base = f * src_ch;
+            for c in 0..dst_ch {
+                out.push(if c < src_ch { input[base + c] } else { 0.0 });
+            }
+        }
     }
 }
 

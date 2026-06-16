@@ -104,6 +104,9 @@ pub struct AudioFormat {
 pub struct ActualFormat {
     pub sample_rate: u32,
     pub bits: u32,
+    /// sink 实际输出声道数（cpal 共享=设备声道；wasapi 独占=源声道）。引擎据此把源声道
+    /// 适配到设备声道，避免按错误声道数消费缓冲导致播放加速/错位。
+    pub channels: u16,
     /// 是否拿到 WASAPI 独占。
     pub exclusive: bool,
     /// 是否经过了 Rubato 重采样（设备不支持源采样率时为 true）。

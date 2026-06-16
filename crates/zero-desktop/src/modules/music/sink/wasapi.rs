@@ -168,6 +168,7 @@ fn output_thread(
     let actual = ActualFormat {
         sample_rate: fmt.sample_rate,
         bits: store_bits as u32,
+        channels: channels as u16, // 独占按源声道输出 → 与缓冲一致，引擎无需声道适配
         exclusive: true,
         resampled: false,
     };
@@ -213,24 +214,21 @@ fn output_thread(
         let mut produced_frames = 0usize;
         let buf = &mut byte_buf[..needed_bytes];
         let mut off = 0usize;
+        let bytes_per_sample = store_bits / 8;
         for _frame in 0..avail {
-            let mut wrote_real = false;
+            // 整帧原子取：暂停、或缓冲不足一整帧 → 该帧写静音，避免在一帧的多声道中途欠载
+            // 导致后续样本错位（声道永久串位/失真）。
+            let have_frame = !is_paused && consumer.slots() >= channels;
             for _ch in 0..channels {
-                let sample = if is_paused {
-                    0.0
+                let sample = if have_frame {
+                    consumer.pop().map(|s| s * vol).unwrap_or(0.0)
                 } else {
-                    match consumer.pop() {
-                        Ok(s) => {
-                            wrote_real = true;
-                            s * vol
-                        }
-                        Err(_) => 0.0,
-                    }
+                    0.0
                 };
-                write_sample(&mut buf[off..off + (store_bits / 8)], sample, store_bits);
-                off += store_bits / 8;
+                write_sample(&mut buf[off..off + bytes_per_sample], sample, store_bits);
+                off += bytes_per_sample;
             }
-            if wrote_real {
+            if have_frame {
                 produced_frames += 1;
             }
         }
