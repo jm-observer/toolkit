@@ -55,6 +55,19 @@ export default function CodeloopPage() {
   }
   useEffect(refreshSessions, [])
 
+  // 内联：id → 项目名（cwd 末段名）。空 cwd / 未选 → 空串。用于同项目联动。
+  const projectOf = (id: string): string => {
+    if (!id) return ''
+    const cwd = sessions.find(s => s.id === id)?.cwd || ''
+    const parts = cwd.split(/[/\\]+/).filter(Boolean)
+    return parts.length ? parts[parts.length - 1] : ''
+  }
+  const claudeProject = projectOf(claudeId)
+  const codexProject = projectOf(codexId)
+  // 两侧都选了但不在同一项目时弱提示（不拦截，启动仍由后端三方校验兜底）。
+  const projectMismatch =
+    !!claudeProject && !!codexProject && claudeProject !== codexProject
+
   const onPick = (provider: Provider, id: string) => {
     cursors.current[provider] = 0
     setMessages(m => ({ ...m, [provider]: [] }))
@@ -206,7 +219,14 @@ export default function CodeloopPage() {
         loading={loadingSessions}
         onNewCodex={handleNewCodex}
         creatingCodex={creatingCodex}
+        claudeProject={claudeProject}
+        codexProject={codexProject}
       />
+      {projectMismatch && (
+        <div className="text-xs text-amber-600 dark:text-amber-400">
+          Claude（{claudeProject}）与 Codex（{codexProject}）不在同一项目，启动时会校验失败。
+        </div>
+      )}
       {sessionsErr && (
         <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
           会话清单加载失败：{sessionsErr}（确认本机 codex / claude 已产生过会话）
