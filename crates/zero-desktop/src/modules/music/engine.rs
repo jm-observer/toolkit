@@ -5,10 +5,12 @@
 //! 2. 若在播放：从 [`Decoder`] 拉交织 f32 → 必要时 Rubato 重采样到 sink 实际采样率 →
 //!    写 sink 的 rtrb producer（写满即让出，避免忙等）。
 //! 3. 按 `frames_played` 原子量算播放位置，节流 emit `music_progress`。
-//! 4. 曲终（解码 EOF 且缓冲排空）→ 按 repeat/shuffle 推进队列，重建 sink（采样率可能变）。
+//! 4. 曲终：**同采样率/声道的相邻曲走 gapless**——解码 EOF 时原地换下一首解码器、继续喂同一
+//!    sink，按输出帧边界翻 index（无缝）；跨格式才重建 sink（采样率可能变，有短暂静默）。
 //!
 //! 事件经构造时注入的 `AppHandle` `emit`。设备/解码错误 → emit `music_error` 进 stopped 不崩。
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -71,6 +73,18 @@ struct Current {
     frames_base: u32,
     /// producer 的总容量（空时的可写 slots 数），用于判定缓冲是否已排空。
     producer_capacity: usize,
+}
+
+/// 一个已 gapless 预切、但音频尚未播到的「曲目切换边界」。
+///
+/// 在当前曲解码 EOF 时把解码器原地换成下一首并继续喂同一 sink；此时 sink 缓冲里还压着
+/// 当前曲约 1 秒的尾巴，故新曲实际出声要等到输出帧计数到达 `boundary_frame`。届时才翻
+/// `index`/位置基准、emit `music_track_changed`，让 UI 与听感对齐。
+struct PendingSwitch {
+    /// 新曲第一帧出声时的 `frames_played` 值（= 预切瞬间的输出帧 + 当时缓冲中的帧）。
+    boundary_frame: u32,
+    /// 新曲在队列中的下标。
+    index: i64,
 }
 
 /// Rubato 定块重采样器 + 其 planar 工作缓冲。
@@ -166,6 +180,7 @@ pub fn run(ctx: EngineContext) {
         volume_q16: Arc::new(AtomicU32::new(65536)),
         last_progress: Instant::now(),
         tracks_meta: Vec::new(),
+        pending_switch: VecDeque::new(),
     };
     info!(target: "music", "音频引擎线程已启动");
 
@@ -192,8 +207,10 @@ pub fn run(ctx: EngineContext) {
         // 2. 推进播放。
         if engine.status == PlayStatus::Playing {
             engine.pump();
+            engine.maybe_gapless(); // 当前曲解码 EOF → 同格式则原地换下一首解码器，不重建 sink
+            engine.check_track_boundary(); // 新曲音频到达输出 → 翻 index/位置/emit track_changed
             engine.maybe_emit_progress();
-            engine.check_advance();
+            engine.check_advance(); // 仅在未 gapless（decoded_eof 仍为真）时收尾/重建
         }
     }
 }
@@ -216,6 +233,8 @@ struct Engine {
     last_progress: Instant,
     /// queue 中各路径对应的元数据（扫描时不带；这里懒填，emit 给前端）。
     tracks_meta: Vec<Option<Track>>,
+    /// gapless 预切但尚未播到的曲目切换边界（FIFO；通常至多 1 个）。
+    pending_switch: VecDeque<PendingSwitch>,
 }
 
 impl Engine {
@@ -264,6 +283,7 @@ impl Engine {
     /// 用当前 index 的曲目建立解码器与 sink，开始播放。失败 → emit music_error 并尝试下一首。
     fn start_current(&mut self) {
         self.current = None;
+        self.pending_switch.clear(); // 重建 sink → 作废所有 gapless 预切边界
         self.frames_played.store(0, Ordering::Relaxed);
 
         let path = match self.queue.get(self.index as usize) {
@@ -429,6 +449,87 @@ impl Engine {
         }
     }
 
+    /// 当前曲解码 EOF 时，尝试「同格式无缝接下一首」：原地把解码器换成下一首、继续喂同一
+    /// sink（不重建输出流），并登记一个 [`PendingSwitch`] 边界。仅当下一首存在且**采样率与
+    /// 声道与当前曲一致**（沿用同一 sink/重采样配置、bit-perfect 不破）时生效；否则不动，交给
+    /// [`check_advance`] 走重建路径（跨格式有短暂静默，符合设计「gapless 仅同格式相邻曲」）。
+    fn maybe_gapless(&mut self) {
+        // 仅在当前曲刚解码 EOF（decoded_eof=true）时尝试；已 gapless 过的为 false。
+        let (src_fmt, frames_now, buffered_frames) = match self.current.as_ref() {
+            Some(cur) if cur.decoded_eof => {
+                let ch = cur.src_fmt.channels.max(1) as usize;
+                let buffered = cur.producer_capacity.saturating_sub(cur.sink.producer.slots()) / ch;
+                (
+                    cur.src_fmt,
+                    self.frames_played.load(Ordering::Relaxed),
+                    buffered as u32,
+                )
+            }
+            _ => return,
+        };
+
+        let Some(next_idx) = self.gapless_next_index() else {
+            return; // 队尾且非循环：不 gapless，交给 check_advance 收尾
+        };
+        let Some(path) = self.queue.get(next_idx as usize).cloned() else {
+            return;
+        };
+        let next_dec = match Decoder::open(std::path::Path::new(&path)) {
+            Ok(d) => d,
+            Err(e) => {
+                // 下一首打不开（如 .opus）：放弃 gapless，让 check_advance 走 advance
+                // （其 start_current 会 emit music_error 并跳过坏文件）。
+                warn!(target: "music", "gapless 预解码失败，回退重建: {e:#}");
+                return;
+            }
+        };
+        let nf = next_dec.format();
+        if nf.sample_rate != src_fmt.sample_rate || nf.channels != src_fmt.channels {
+            // 跨格式：不 gapless，交给 check_advance 重建 sink（按新采样率，保 bit-perfect）。
+            return;
+        }
+
+        // 原地换解码器、清 EOF，继续喂同一 sink；登记边界（新曲尾随当前缓冲之后出声）。
+        let boundary = frames_now.saturating_add(buffered_frames);
+        if let Some(cur) = self.current.as_mut() {
+            cur.decoder = next_dec;
+            cur.decoded_eof = false;
+            // 重采样器（若有）沿用：源格式相同 → 配置不变，accum 中当前曲尾样本继续出声不丢音。
+        }
+        self.pending_switch.push_back(PendingSwitch {
+            boundary_frame: boundary,
+            index: next_idx,
+        });
+        info!(target: "music", "gapless 预切 → #{next_idx}（boundary_frame={boundary}）");
+    }
+
+    /// gapless 的下一首下标：单曲循环 → 自身（无缝循环）；否则同 [`next_index`]。
+    fn gapless_next_index(&self) -> Option<i64> {
+        if self.repeat == RepeatMode::One {
+            return Some(self.index);
+        }
+        self.next_index()
+    }
+
+    /// 输出帧计数越过某个预切边界 → 新曲已开始出声：翻 index、重置位置基准、emit track_changed。
+    fn check_track_boundary(&mut self) {
+        loop {
+            let frames = self.frames_played.load(Ordering::Relaxed);
+            let cross = matches!(self.pending_switch.front(), Some(sw) if frames >= sw.boundary_frame);
+            if !cross {
+                return;
+            }
+            let sw = self.pending_switch.pop_front().unwrap();
+            self.index = sw.index;
+            if let Some(cur) = self.current.as_mut() {
+                cur.frames_base = sw.boundary_frame;
+                cur.position_base_secs = 0.0;
+            }
+            self.emit_track_changed();
+            self.publish_state();
+        }
+    }
+
     /// 推进到下一首。`manual=true` 表示用户点 next（忽略 repeat-one 语义按顺序走）。
     fn advance(&mut self, _manual: bool) {
         if self.queue.is_empty() {
@@ -515,6 +616,12 @@ impl Engine {
     }
 
     fn seek(&mut self, secs: f64) {
+        // 处于 gapless 预切窗口（解码器已换到下一首、当前曲尾巴还在缓冲）：先回到当前曲的
+        // 干净状态再 seek，避免 seek 到错误的下一首解码器。
+        if !self.pending_switch.is_empty() {
+            self.pending_switch.clear();
+            self.start_current();
+        }
         let Some(cur) = self.current.as_mut() else {
             return;
         };
@@ -575,6 +682,7 @@ impl Engine {
 
     fn stop(&mut self) {
         self.current = None;
+        self.pending_switch.clear();
         self.status = PlayStatus::Stopped;
         self.index = -1;
         self.frames_played.store(0, Ordering::Relaxed);
