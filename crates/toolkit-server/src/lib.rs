@@ -5,6 +5,7 @@ pub mod codeloop;
 pub mod config;
 #[path = "douyin/mod.rs"]
 pub mod douyin_mod;
+pub mod llm;
 pub mod routes;
 pub mod state;
 mod static_assets;
@@ -110,6 +111,7 @@ pub fn build_router(state: AppState, web_dir: &std::path::Path) -> axum::Router 
             routes::audio::router().merge(audioforge::routes::router()),
         )
         .nest("/api/web/douyin", douyin_mod::routes::router())
+        .nest("/api/web/llm", llm::routes::router())
         .nest("/api/agent", routes::agent::router())
         .nest("/api/browser", routes::browser::router());
 

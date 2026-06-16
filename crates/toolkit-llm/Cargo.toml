@@ -1,0 +1,17 @@
+[package]
+name = "toolkit-llm"
+version.workspace = true
+edition.workspace = true
+description = "统一的 OpenAI 兼容 chat completions 客户端（连接配置 + 重试 + 响应解析），供 toolkit 各功能复用。"
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+log = { workspace = true }
+sm3 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

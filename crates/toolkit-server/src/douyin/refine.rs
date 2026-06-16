@@ -15,7 +15,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use custom_utils::trace::{self, SpanScope, SpanStatus, TraceContext};
 use douyin::process::read_transcript;
-use douyin::refine::{list_pending_refine, refine_one_traced, LlmConfig};
+use douyin::refine::{list_pending_refine, refine_one_traced};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use toolkit_tasks::{TaskCtx, TaskKind};
@@ -58,8 +58,15 @@ impl TaskKind for DouyinTextRefine {
     const KIND: &'static str = "douyin_text_refine";
 
     async fn run(input: RefineInput, ctx: TaskCtx) -> Result<RefineOutput> {
-        // 提交即校验 LLM 配置：未配置 LLM_BASE_URL/LLM_MODEL 明确报错（不进入逐条循环）。
-        let cfg = LlmConfig::from_env()?;
+        // 提交即校验 LLM 配置：DB / env 都没配大模型时明确报错（不进入逐条循环）。
+        // 提示词与版本走可配目录（DB 覆盖优先，否则 douyin 内置默认 douyin_refine）。
+        let client = crate::llm::resolve_client(&ctx.pool)?;
+        let prompt_template =
+            crate::llm::resolve_prompt(&ctx.pool, crate::llm::NAME_DOUYIN_REFINE)?;
+        let prompt_version =
+            crate::llm::resolve_prompt_version(&ctx.pool, crate::llm::NAME_DOUYIN_REFINE)?;
+        let prompt_hash = toolkit_llm::prompt_hash(&prompt_template);
+        let model = client.model().to_string();
         let paths = DouyinPaths::new(&ctx.data_dir);
         paths.ensure_dirs()?;
 
@@ -74,9 +81,9 @@ impl TaskKind for DouyinTextRefine {
                 refined: 0,
                 skipped: 0,
                 failed: 0,
-                model: cfg.model.clone(),
-                prompt_version: douyin::refine::PROMPT_VERSION.to_string(),
-                prompt_hash: douyin::refine::prompt_hash(),
+                model: model.clone(),
+                prompt_version: prompt_version.clone(),
+                prompt_hash: prompt_hash.clone(),
                 failures: vec![],
                 refined_ids: vec![],
             });
@@ -88,7 +95,7 @@ impl TaskKind for DouyinTextRefine {
             "total": total,
             "done": 0,
             "failed": 0,
-            "model": cfg.model,
+            "model": model,
         }))?;
 
         // text_refine_batch 顶层 span（两阶段）：每条 LLM 调用作为其子 span（用
@@ -97,15 +104,11 @@ impl TaskKind for DouyinTextRefine {
         let batch_scope = batch_ctx.as_ref().map(|c| {
             let scope = SpanScope::new(c.clone(), "text_refine_batch").with_summary(json!({
                 "total": total,
-                "model": cfg.model,
+                "model": model,
             }));
             scope.emit_start();
             scope
         });
-
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()?;
 
         let mut refined_ids = Vec::new();
         let mut failures = Vec::new();
@@ -131,8 +134,9 @@ impl TaskKind for DouyinTextRefine {
             };
 
             match refine_one_traced(
-                &http,
-                &cfg,
+                &client,
+                &prompt_template,
+                &prompt_version,
                 &paths.refined_dir,
                 id,
                 &asr_text,
@@ -171,9 +175,9 @@ impl TaskKind for DouyinTextRefine {
             refined: refined_ids.len(),
             skipped,
             failed: failures.len(),
-            model: cfg.model,
-            prompt_version: douyin::refine::PROMPT_VERSION.to_string(),
-            prompt_hash: douyin::refine::prompt_hash(),
+            model,
+            prompt_version,
+            prompt_hash,
             failures,
             refined_ids,
         })

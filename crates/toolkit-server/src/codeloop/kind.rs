@@ -108,6 +108,9 @@ struct LoopCtx {
     max_rounds: u32,
     wait_for_claude_idle: bool,
     notify_callback: Option<String>,
+    /// 复核/修订指令模板（DB 可配，缺省用 codeloop-core 内置）。new() 解析一次。
+    codex_template: String,
+    claude_template: String,
 }
 
 impl LoopCtx {
@@ -146,6 +149,15 @@ impl LoopCtx {
             abs: target_abs_s,
         };
 
+        // 解析可配指令模板：DB 覆盖优先，否则 codeloop-core 内置默认。未知 name 不可能（内置已登记）
+        // ——保险起见仍回退内置常量。
+        let codex_template =
+            crate::llm::resolve_prompt(&ctx.pool, crate::llm::NAME_CODELOOP_CODEX_REVIEW)
+                .unwrap_or_else(|_| prompt::DEFAULT_CODEX_TEMPLATE.to_string());
+        let claude_template =
+            crate::llm::resolve_prompt(&ctx.pool, crate::llm::NAME_CODELOOP_CLAUDE_REVISION)
+                .unwrap_or_else(|_| prompt::DEFAULT_CLAUDE_TEMPLATE.to_string());
+
         Ok(Self {
             ctx,
             store,
@@ -156,6 +168,8 @@ impl LoopCtx {
             max_rounds: input.max_rounds.max(1),
             wait_for_claude_idle: input.wait_for_claude_idle,
             notify_callback: input.notify_callback,
+            codex_template,
+            claude_template,
         })
     }
 
@@ -178,7 +192,8 @@ impl LoopCtx {
 
         for n in 1..=self.max_rounds {
             // 1. Codex 复核（含 ASK_USER 挂起处理）。
-            let codex_prompt = prompt::render_codex_prompt(&self.target, self.mode, n);
+            let codex_prompt =
+                prompt::render_codex_prompt(&self.codex_template, &self.target, self.mode, n);
             let review = match self.send_and_resolve(&self.codex, &codex_prompt).await? {
                 Resolved::Reply(r) => r,
                 Resolved::Timeout => {
@@ -222,7 +237,8 @@ impl LoopCtx {
             }
 
             // 4. Claude 据意见修订（含 ASK_USER 挂起处理）。
-            let claude_prompt = prompt::render_claude_prompt(&self.target, &review);
+            let claude_prompt =
+                prompt::render_claude_prompt(&self.claude_template, &self.target, &review);
             let revision = match self.send_and_resolve(&self.claude, &claude_prompt).await? {
                 Resolved::Reply(r) => r,
                 Resolved::Timeout => {

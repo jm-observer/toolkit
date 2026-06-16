@@ -141,7 +141,11 @@ enum Resolved {
 
 /// 发一轮 → 若含 ASK_USER 则挂起等用户答（同进程 oneshot）→ 把答案发回同一会话 →
 /// 直到不再 ASK_USER。基础设施错（CLI 缺失 / spawn 失败）→ Err。
-async fn send_and_resolve(ctx: &LoopCtx, session: &SessionRef, prompt_text: &str) -> Result<Resolved> {
+async fn send_and_resolve(
+    ctx: &LoopCtx,
+    session: &SessionRef,
+    prompt_text: &str,
+) -> Result<Resolved> {
     let mut current = prompt_text.to_string();
     loop {
         let turn = driver::send(session, &current).await?;
@@ -185,7 +189,8 @@ async fn drive(ctx: &LoopCtx) -> Result<()> {
     let mut consecutive_parse_fail = 0u32;
     for n in 1..=ctx.max_rounds {
         // 1. Codex 复核（含 ASK_USER 挂起）。
-        let codex_prompt = prompt::render_codex_prompt(&ctx.target, ctx.mode, n);
+        let codex_prompt =
+            prompt::render_codex_prompt(prompt::DEFAULT_CODEX_TEMPLATE, &ctx.target, ctx.mode, n);
         let review = match send_and_resolve(ctx, &ctx.codex, &codex_prompt).await? {
             Resolved::Reply(r) => r,
             Resolved::Timeout => {
@@ -224,7 +229,8 @@ async fn drive(ctx: &LoopCtx) -> Result<()> {
         }
 
         // 4. Claude 据意见修订（含 ASK_USER 挂起）。
-        let claude_prompt = prompt::render_claude_prompt(&ctx.target, &review);
+        let claude_prompt =
+            prompt::render_claude_prompt(prompt::DEFAULT_CLAUDE_TEMPLATE, &ctx.target, &review);
         match send_and_resolve(ctx, &ctx.claude, &claude_prompt).await? {
             Resolved::Reply(_) => {}
             Resolved::Timeout => {
@@ -269,7 +275,9 @@ fn resolve_ref(store: &Store, provider: Provider, dto: &SessionRefDto) -> Result
 pub async fn codeloop_list_sessions(limit: Option<usize>) -> Result<Vec<SessionSummary>, String> {
     let store = Store::from_env()
         .map_err(|e| format!("定位会话存储失败（~/.codex / ~/.claude）：{e:#}"))?;
-    store.list(limit.unwrap_or(30)).map_err(|e| format!("{e:#}"))
+    store
+        .list(limit.unwrap_or(30))
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// 新建 Codex 会话的种子提示词（仅用于建立会话；真正的复核任务由循环后续发起）。
@@ -296,7 +304,8 @@ pub async fn codeloop_session_messages(
     session_id: String,
     after: usize,
 ) -> Result<MessagesPage, String> {
-    let p = Provider::parse(&provider).ok_or_else(|| "provider 必须是 codex 或 claude".to_string())?;
+    let p =
+        Provider::parse(&provider).ok_or_else(|| "provider 必须是 codex 或 claude".to_string())?;
     let store = Store::from_env().map_err(|e| format!("定位会话存储失败：{e:#}"))?;
     store
         .messages(p, &session_id, after)

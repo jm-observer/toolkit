@@ -117,9 +117,9 @@ impl TaskKind for DouyinPipeline {
         if input.handle.trim().is_empty() {
             bail!("handle 为空");
         }
-        // refine 环节需要 LLM 配置：提早校验，避免跑完下载/ASR 才在 refine 报配置缺失。
+        // refine 环节需要大模型配置：提早校验，避免跑完下载/ASR 才在 refine 报配置缺失。
         if input.stages.refine {
-            douyin::refine::LlmConfig::from_env().context("pipeline 开启 refine 但 LLM 未配置")?;
+            crate::llm::resolve_config(&ctx.pool).context("pipeline 开启 refine 但大模型未配置")?;
         }
         if input.stages.rag_ingest && input.rag_config.is_none() {
             bail!("pipeline 开启 rag_ingest 但未提供 rag_config 路径");
@@ -480,10 +480,10 @@ async fn run_refine_inline(
     stage_index: usize,
     stage_total: usize,
 ) -> Result<Value> {
-    let cfg = douyin::refine::LlmConfig::from_env()?;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .build()?;
+    let client = crate::llm::resolve_client(&ctx.pool)?;
+    let prompt_template = crate::llm::resolve_prompt(&ctx.pool, crate::llm::NAME_DOUYIN_REFINE)?;
+    let prompt_version =
+        crate::llm::resolve_prompt_version(&ctx.pool, crate::llm::NAME_DOUYIN_REFINE)?;
     let mut refined = 0usize;
     let mut skipped = 0usize;
     let mut failures: Vec<Value> = Vec::new();
@@ -495,8 +495,15 @@ async fn run_refine_inline(
         } else {
             match douyin::process::read_transcript(&paths.transcript_dir, id) {
                 Some(t) if !t.text.trim().is_empty() => {
-                    match douyin::refine::refine_one(&http, &cfg, &paths.refined_dir, id, &t.text)
-                        .await
+                    match douyin::refine::refine_one(
+                        &client,
+                        &prompt_template,
+                        &prompt_version,
+                        &paths.refined_dir,
+                        id,
+                        &t.text,
+                    )
+                    .await
                     {
                         Ok(_) => refined += 1,
                         Err(e) => failures.push(json!({"aweme_id": id, "error": format!("{e:#}")})),

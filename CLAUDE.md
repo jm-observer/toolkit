@@ -17,7 +17,8 @@ workspace，作为 zero/Agent 生态的统一工具底座。架构目标：
 |---|---|
 | `toolkit-core` | 领域类型 + SQLite schema/迁移（`schema.rs` 的 `DDL_V1`）+ URL 模式识别。`open_pool` / `migrate` / `new_task_id` / `now_iso8601`。 |
 | `toolkit-tasks` | **通用长任务引擎**：`TaskKind` trait + `Registry` 注册、`submit` 即 spawn、`run_task` 状态机、`store` 持久化到 `tasks` 表。 |
-| `toolkit-server` | axum daemon。`bootstrap` 装配 pool/migrate/registry/recovery；`/api/web`、`/api/web/audio`（TTS 代理）、`/api/web/douyin`、`/api/agent`、`/api/browser` 路由 + web 控制台。systemd 安装 / 自更新（`custom-utils` updater）。 |
+| `toolkit-llm` | **统一 OpenAI 兼容 LLM 客户端**：`LlmConfig`（含 `from_env`）+ `LlmClient`（`complete`/`chat` + 指数退避重试 + 响应解析）+ `prompt_hash`。任何需调大模型的内部 crate 都走它，不要自行拼 HTTP。**不持有提示词**（提示词由功能层/可配目录决定后传入）。 |
+| `toolkit-server` | axum daemon。`bootstrap` 装配 pool/migrate/registry/recovery；`/api/web`、`/api/web/audio`（TTS 代理）、`/api/web/douyin`、`/api/web/llm`（**公共大模型：连接配置/可配提示词/连通性自测/对话总结**）、`/api/agent`、`/api/browser` 路由 + web 控制台。systemd 安装 / 自更新（`custom-utils` updater）。 |
 | `toolkit-desktop` | Tauri 桌面端：抖音 / 同花顺登录窗（headless_chrome/CDP）、msToken 采集、cookie 自动上传 G10。**需 Tauri 工具链**，CI 式环境通常排除。 |
 | `asr-client` | 通用 FunASR `/transcribe` HTTP 客户端（multipart 上传 + 强类型响应 + 错误归类）。**任何需要离线 ASR 的内部 crate 都走它**，不要自行拼 multipart。端点契约权威源在 streaming-speech `docs/asr-transcribe-api.md`。 |
 | `douyin` | 抖音 web 工具：a-bogus 签名、creator/works/tags API、下载 + ASR 管线（**通过 `asr-client` 调 FunASR**）、LLM 整理（`refine`）、knowledge md 生成。既是库（被 server 调）也有独立 daemon/CLI。 |
@@ -119,6 +120,27 @@ pwsh ./deploy-g10.ps1 -SkipBuild # 仅复制已有产物
 | `:8788` | toolkit-server（Web API + 代理 + 控制台） | 本仓 |
 | `:8000` | vLLM（OpenAI 兼容 LLM） | 第三方/外部 |
 
+## 公共大模型层（LLM 中枢）
+
+把「大模型连接配置 + 可配提示词」集中到一处，各功能（抖音整理、对话总结、codeloop 文案…）共用，
+不再各自读 env / `include_str!`。
+
+- **统一客户端**：`toolkit-llm` crate（`LlmClient::complete/chat` + 指数退避重试 + 响应解析）。
+  需调大模型的内部 crate 一律走它。
+- **连接配置（运行时可改）**：存 `toolkit.db` 的 `llm_config` 单行表。解析顺序 **DB > env**
+  （`LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`）。`toolkit-server::llm::resolve_config / resolve_client`
+  统一解析；两者都没配 → 明确报错。
+- **可配提示词目录**：内置默认在 `toolkit-server::llm::builtins()` 登记（name + 语义版本 + 默认
+  文本 + 占位符）；DB 的 `llm_prompts` 表行**覆盖**内置默认，删行即「恢复内置默认」。当前登记：
+  `douyin_refine`（`{TRANSCRIPT}`）、`chat_summary`（`{CONVERSATION}`）、`codeloop_codex_review` /
+  `codeloop_claude_revision`（codeloop CLI 会话指令模板，占位符见 `codeloop_core::prompt`）。
+  **新增可配提示词 = 在 `builtins()` 加一行**。
+- **HTTP（`/api/web/llm`）**：`GET/PUT /config`、`GET /prompts`、`GET/PUT/DELETE /prompts/{name}`
+  （DELETE=重置内置）、`POST /ping`（连通性自测）、`POST /summarize`（对话总结，用 `chat_summary`）。
+- **codeloop 提示词**：走 Codex/Claude **CLI 会话**通道，纳入此目录仅为统一管理文案，与 HTTP 大模型
+  通道无关；`kind.rs` 在任务启动时按 name 从 DB 解析模板（缺失回退 `codeloop_core` 内置常量）。
+  zero-desktop 内嵌的 codeloop 直接用内置常量（暂不接 DB 配置）。
+
 ## 抖音知识管线（流 A，Phase 2）
 
 补齐了 plan 流 A 的「LLM 整理文本」与「整链编排」两块缺口：
@@ -136,12 +158,15 @@ pwsh ./deploy-g10.ps1 -SkipBuild # 仅复制已有产物
   `progress.{stage,stage_index,stage_total,stage_progress}`。任一环节失败 → 任务 failed，已完成成果
   保留（各下游任务自身幂等，重跑跳过已完成 item）。`rag_ingest` 通过 spawn `rag` 二进制完成
   （需 `rag_config` JSON 路径；rag 定位优先 `RAG_BIN` 否则同目录 `rag`）。
-- **LLM 配置（环境变量）**：`LLM_BASE_URL`（OpenAI 兼容 base，如 `http://gb10:8000/v1`，必填）、
-  `LLM_MODEL`（必填）、`LLM_API_KEY`（可选）。**未配置时 refine / 含 refine 的 pipeline 提交后
-  立即 failed** 并说明缺哪个变量（不空跑下载/ASR）。
-- **整理 prompt 管理**：prompt 文本 = `crates/douyin/src/refine_prompt.md`（`{TRANSCRIPT}` 占位符，
-  随 crate 编译）；改文案后 bump `refine.rs::PROMPT_VERSION`。每条整理稿记 `prompt_hash`（sm3 短哈希），
-  prompt 变了哈希就变，可识别旧产物、删 `refined/` 后重跑对比。
+- **LLM 配置（公共大模型层，见下方专节）**：连接配置（base_url/model/api_key）走 `toolkit-server`
+  的 `llm` 层解析——**DB（`llm_config` 表，控制台 `/api/web/llm/config` 可改）优先，缺失回退环境变量**
+  `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`。**两者都没配时 refine / 含 refine 的 pipeline 提交后
+  立即 failed**（不空跑下载/ASR）。
+- **整理 prompt 管理**：内置默认 = `crates/douyin/src/refine_prompt.md`（`{TRANSCRIPT}` 占位符，随
+  crate 编译，登记为可配提示词 `douyin_refine`）；**控制台可在 `/api/web/llm/prompts/douyin_refine`
+  覆盖文案、删除即恢复内置默认**，无需重编译。改内置文案后 bump `refine.rs::PROMPT_VERSION`。每条
+  整理稿记生效提示词的 `prompt_version` + `prompt_hash`（sm3 短哈希），prompt 变了哈希就变，可识别
+  旧产物、删 `refined/` 后重跑对比。
 - **端到端验收**：见 [docs/runbook-pipeline-e2e.md](docs/runbook-pipeline-e2e.md)。
 
 ## 英语音频生产线（流 B，Phase 3）

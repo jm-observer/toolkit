@@ -98,4 +98,26 @@ CREATE TABLE IF NOT EXISTS codeloop_io (
     answered_at TEXT,
     PRIMARY KEY(task_id, seq)
 );
+
+-- 公共大模型连接配置（单行）。DB 行存在则优先于环境变量，便于运行时在控制台改地址/模型/key
+-- 而无需重启或改 systemd 环境。纯加表、IF NOT EXISTS 幂等：同 codeloop_io，不 bump SCHEMA_VERSION。
+CREATE TABLE IF NOT EXISTS llm_config (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    base_url   TEXT,
+    model      TEXT,
+    api_key    TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- 可配提示词注册表：按名字存（如 douyin_refine / chat_summary / codeloop_*）。DB 行存在则
+-- 覆盖各功能编译期内置默认；version/hash 保留溯源，builtin_hash 记录覆盖时的内置基线哈希，
+-- 供控制台提示「已修改/可重置」。纯加表幂等，不 bump SCHEMA_VERSION。
+CREATE TABLE IF NOT EXISTS llm_prompts (
+    name         TEXT PRIMARY KEY,
+    text         TEXT NOT NULL,
+    version      TEXT NOT NULL,
+    hash         TEXT NOT NULL,
+    builtin_hash TEXT,
+    updated_at   TEXT NOT NULL
+);
 "#;

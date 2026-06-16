@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 toolkit-core = { path = "../toolkit-core" }
 toolkit-tasks = { path = "../toolkit-tasks" }
+toolkit-llm = { workspace = true }
 douyin = { path = "../douyin" }
 audio-clean-client = { path = "../audio-clean-client" }
 agent-session = { workspace = true }

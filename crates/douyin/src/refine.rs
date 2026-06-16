@@ -1,38 +1,31 @@
 //! Phase 2：LLM 整理文本（TextRefine）。
 //!
-//! 输入 ASR 原文 → 调 GB10 vLLM（OpenAI 兼容 chat completions）做纠错 / 去口语水词 /
-//! 分段 / 小结 → 产出「整理稿」。整理稿落 `douyin/refined/<aweme_id>.json`，与
-//! `douyin/transcripts/<aweme_id>.json`（ASR 原文）并列；`knowledge::run_publish_knowledge`
-//! 读取它并写进 knowledge md 的「整理稿」栏，从而被 rag ingest 索引（优先整理稿）。
+//! 输入 ASR 原文 → 调大模型（OpenAI 兼容 chat completions）做纠错 / 去口语水词 / 分段 / 小结 →
+//! 产出「整理稿」。整理稿落 `douyin/refined/<aweme_id>.json`，与 `douyin/transcripts/<aweme_id>.json`
+//! （ASR 原文）并列；`knowledge::run_publish_knowledge` 读取它并写进 knowledge md 的「整理稿」栏。
 //!
-//! ## 配置（环境变量）
-//! - `LLM_BASE_URL`：OpenAI 兼容 base，如 `http://gb10:8000/v1`（必填，未配置时整理任务提交即报错）。
-//! - `LLM_MODEL`：模型名（必填）。
-//! - `LLM_API_KEY`：可选 Bearer token（vLLM 默认无鉴权时留空）。
+//! ## 连接配置 / 提示词
+//! 本模块**不再自行装配连接配置或读取提示词**——大模型连接（[`toolkit_llm::LlmClient`]）与提示词
+//! 模板由调用方（toolkit-server 的 `llm` 层，DB 可配 + env 兜底）解析后传入。本文件仅保留
+//! [`REFINE_PROMPT`] / [`PROMPT_VERSION`] 作为该提示词的**编译期内置默认**（被 toolkit-server 的
+//! 可配提示词目录登记为 `douyin_refine`）。
 //!
-//! ## prompt 管理
-//! 整理 prompt 内置在 `refine_prompt.md`（随 crate 编译）。每条整理稿元信息记录
-//! `prompt_version`（人工语义版本）与 `prompt_hash`（prompt 文本的 sm3 短哈希），
-//! 便于迭代 prompt 后识别哪些条目是旧 prompt 产物、按需重跑对比。
-//!
-//! ## 重试 / 容错
-//! 单条 LLM 调用失败按 `MAX_ATTEMPTS` 重试（指数退避）；整批中单条最终失败不拖垮其余，
-//! 失败条目进任务 output 的 `failed[]`。
+//! ## prompt 溯源
+//! 每条整理稿记录 `prompt_version`（人工语义版本）与 `prompt_hash`（实际生效提示词模板的 sm3
+//! 短哈希）。提示词被 DB 覆盖后哈希随之变化，可识别哪些条目是旧提示词产物、按需重跑对比。
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use custom_utils::trace::{self, SpanStatus, TraceContext};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use toolkit_llm::LlmClient;
 
-/// 内置整理 prompt（随 crate 编译）。`{TRANSCRIPT}` 占位符在调用时替换为 ASR 原文。
+/// 内置整理 prompt（随 crate 编译，作为 `douyin_refine` 提示词的默认值）。`{TRANSCRIPT}`
+/// 占位符在调用时替换为 ASR 原文。
 pub const REFINE_PROMPT: &str = include_str!("refine_prompt.md");
 
-/// prompt 人工语义版本。迭代 prompt 文案时同步 bump，便于按版本筛选 / 重跑。
+/// prompt 人工语义版本。迭代内置 prompt 文案时同步 bump。
 pub const PROMPT_VERSION: &str = "v1";
-
-/// 单条最大重试次数（含首次）。
-const MAX_ATTEMPTS: usize = 3;
 
 /// 整理稿缓存（落 `douyin/refined/<aweme_id>.json`）。
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -42,51 +35,18 @@ pub struct RefinedTranscript {
     pub refined_text: String,
     /// 产出该整理稿的模型名。
     pub model: String,
-    /// prompt 语义版本（[`PROMPT_VERSION`]）。
+    /// prompt 语义版本（生效提示词的版本）。
     pub prompt_version: String,
-    /// prompt 文本 sm3 短哈希（16 hex）。prompt 改了哈希就变，可据此识别旧产物。
+    /// 生效 prompt 模板文本的 sm3 短哈希（16 hex）。
     pub prompt_hash: String,
     /// 整理时间（RFC3339）。
     pub refined_at: String,
 }
 
-/// LLM 连接配置（从环境变量装配）。
-#[derive(Clone, Debug)]
-pub struct LlmConfig {
-    pub base_url: String,
-    pub model: String,
-    pub api_key: Option<String>,
-}
-
-impl LlmConfig {
-    /// 从环境变量装配；缺 `LLM_BASE_URL` / `LLM_MODEL` 时明确报错（任务提交即失败）。
-    pub fn from_env() -> Result<Self> {
-        let base_url = std::env::var("LLM_BASE_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .context("未配置 LLM_BASE_URL（OpenAI 兼容 base，如 http://gb10:8000/v1）")?;
-        let model = std::env::var("LLM_MODEL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .context("未配置 LLM_MODEL")?;
-        let api_key = std::env::var("LLM_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-        Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            model,
-            api_key,
-        })
-    }
-}
-
-/// prompt 文本短哈希（sm3 前 8 字节 → 16 hex）。
+/// 内置默认 prompt 的短哈希（供测试 / 默认产物元信息）。生效提示词的哈希在 [`refine_one_traced`]
+/// 内按传入模板实时计算。
 pub fn prompt_hash() -> String {
-    use sm3::{Digest, Sm3};
-    let mut h = Sm3::new();
-    h.update(REFINE_PROMPT.as_bytes());
-    let out = h.finalize();
-    out.iter().take(8).map(|b| format!("{b:02x}")).collect()
+    toolkit_llm::prompt_hash(REFINE_PROMPT)
 }
 
 fn refined_path(refined_dir: &Path, aweme_id: &str) -> PathBuf {
@@ -136,22 +96,34 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// 整理单条 ASR 原文，落盘 `refined/<aweme_id>.json`。`ctx` 为该次调用的 trace 身份
-/// （顶层任务 span 的 child），trace 关闭时为 no-op。
+/// 整理单条 ASR 原文，落盘 `refined/<aweme_id>.json`。`client` 为解析好的大模型客户端，
+/// `prompt_template`/`prompt_version` 为生效提示词（含 `{TRANSCRIPT}` 占位符）及其版本。
 pub async fn refine_one(
-    http: &reqwest::Client,
-    cfg: &LlmConfig,
+    client: &LlmClient,
+    prompt_template: &str,
+    prompt_version: &str,
     refined_dir: &Path,
     aweme_id: &str,
     asr_text: &str,
 ) -> Result<RefinedTranscript> {
-    refine_one_traced(http, cfg, refined_dir, aweme_id, asr_text, None).await
+    refine_one_traced(
+        client,
+        prompt_template,
+        prompt_version,
+        refined_dir,
+        aweme_id,
+        asr_text,
+        None,
+    )
+    .await
 }
 
-/// 带 trace 子 span 的整理。
+/// 带 trace 子 span 的整理。`parent` 为顶层任务 span 的身份（trace 关闭时为 None → no-op）。
+#[allow(clippy::too_many_arguments)]
 pub async fn refine_one_traced(
-    http: &reqwest::Client,
-    cfg: &LlmConfig,
+    client: &LlmClient,
+    prompt_template: &str,
+    prompt_version: &str,
     refined_dir: &Path,
     aweme_id: &str,
     asr_text: &str,
@@ -169,7 +141,7 @@ pub async fn refine_one_traced(
             let scope =
                 trace::SpanScope::new(p.child(), "text_refine").with_summary(serde_json::json!({
                     "aweme_id": aweme_id,
-                    "model": cfg.model,
+                    "model": client.model(),
                     "input_chars": asr_text.chars().count(),
                 }));
             scope.emit_start();
@@ -178,17 +150,18 @@ pub async fn refine_one_traced(
         _ => None,
     };
 
-    let prompt = REFINE_PROMPT.replace("{TRANSCRIPT}", asr_text.trim());
-    let result = chat_with_retry(http, cfg, &prompt).await;
+    let hash = toolkit_llm::prompt_hash(prompt_template);
+    let prompt = prompt_template.replace("{TRANSCRIPT}", asr_text.trim());
+    let result = client.complete(&prompt).await;
 
     match result {
         Ok(refined_text) => {
             let refined = RefinedTranscript {
                 aweme_id: aweme_id.to_string(),
                 refined_text,
-                model: cfg.model.clone(),
-                prompt_version: PROMPT_VERSION.to_string(),
-                prompt_hash: prompt_hash(),
+                model: client.model().to_string(),
+                prompt_version: prompt_version.to_string(),
+                prompt_hash: hash,
                 refined_at: chrono::Utc::now().to_rfc3339(),
             };
             atomic_write(
@@ -217,71 +190,6 @@ pub async fn refine_one_traced(
             Err(e)
         }
     }
-}
-
-/// 调一次 chat completions，失败按指数退避重试。
-async fn chat_with_retry(http: &reqwest::Client, cfg: &LlmConfig, prompt: &str) -> Result<String> {
-    let mut last_err = None;
-    for attempt in 1..=MAX_ATTEMPTS {
-        match chat_once(http, cfg, prompt).await {
-            Ok(text) if !text.trim().is_empty() => return Ok(text),
-            Ok(_) => last_err = Some(anyhow!("LLM 返回空文本")),
-            Err(e) => last_err = Some(e),
-        }
-        if attempt < MAX_ATTEMPTS {
-            // 指数退避：0.5s, 1s, ...
-            let backoff = Duration::from_millis(500 * (1 << (attempt - 1)) as u64);
-            tokio::time::sleep(backoff).await;
-        }
-    }
-    Err(last_err.unwrap_or_else(|| anyhow!("LLM 调用失败（未知）")))
-}
-
-/// 单次 chat completions 调用，返回 assistant 消息文本。
-async fn chat_once(http: &reqwest::Client, cfg: &LlmConfig, prompt: &str) -> Result<String> {
-    let url = format!("{}/chat/completions", cfg.base_url);
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [{ "role": "user", "content": prompt }],
-        "temperature": 0.2,
-        "stream": false,
-    });
-    let mut req = http.post(&url).json(&body);
-    if let Some(key) = &cfg.api_key {
-        req = req.bearer_auth(key);
-    }
-    let resp = req.send().await.context("调 LLM chat completions")?;
-    let status = resp.status();
-    let text = resp.text().await.context("读 LLM 响应体")?;
-    if !status.is_success() {
-        bail!(
-            "LLM {status}: {}",
-            text.chars().take(300).collect::<String>()
-        );
-    }
-    let parsed: ChatResponse = serde_json::from_str(&text).context("解析 LLM 响应 JSON")?;
-    let content = parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .ok_or_else(|| anyhow!("LLM 响应无 choices"))?;
-    Ok(content.trim().to_string())
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatMessage {
-    content: String,
 }
 
 #[cfg(test)]
@@ -346,12 +254,5 @@ mod tests {
     fn list_pending_missing_dir_is_empty() {
         let nope = std::env::temp_dir().join("refine-nope-xyz-123");
         assert!(list_pending_refine(&nope, &nope).unwrap().is_empty());
-    }
-
-    #[test]
-    fn chat_response_parses() {
-        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#;
-        let p: ChatResponse = serde_json::from_str(raw).unwrap();
-        assert_eq!(p.choices[0].message.content, "hello");
     }
 }

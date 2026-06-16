@@ -17,6 +17,7 @@ sm3 = { workspace = true }
 axum = { workspace = true }
 asr-client = { path = "../asr-client" }
 audio-clean-client = { path = "../audio-clean-client" }
+toolkit-llm = { workspace = true }
 
 [[bin]]
 name = "douyin"
