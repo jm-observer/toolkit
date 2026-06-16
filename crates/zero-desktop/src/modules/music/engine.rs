@@ -1,0 +1,727 @@
+//! AudioEngine：专用 `std::thread` 上的 actor。**单一播放真值源**。
+//!
+//! 控制循环（非 tokio，实时负载）：
+//! 1. 非阻塞收 `AudioCommand`（crossbeam）→ 改队列/状态/seek/切曲。
+//! 2. 若在播放：从 [`Decoder`] 拉交织 f32 → 必要时 Rubato 重采样到 sink 实际采样率 →
+//!    写 sink 的 rtrb producer（写满即让出，避免忙等）。
+//! 3. 按 `frames_played` 原子量算播放位置，节流 emit `music_progress`。
+//! 4. 曲终（解码 EOF 且缓冲排空）→ 按 repeat/shuffle 推进队列，重建 sink（采样率可能变）。
+//!
+//! 事件经构造时注入的 `AppHandle` `emit`。设备/解码错误 → emit `music_error` 进 stopped 不崩。
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::Receiver;
+use rubato::{FftFixedInOut, Resampler};
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
+use tracing::{info, warn};
+
+use super::decode::Decoder;
+use super::sink::{build_sink, FramesPlayed, SinkHandle, VolumeQ16};
+use super::types::{ActualFormat, AudioFormat, PlayStatus, RepeatMode, Track};
+use super::SharedPlayback;
+
+/// 控制命令（UI → 引擎，全异步立即返回）。
+pub enum AudioCommand {
+    PlayQueue {
+        tracks: Vec<String>,
+        start: usize,
+    },
+    Pause,
+    Resume,
+    TogglePlay,
+    Seek {
+        secs: f64,
+    },
+    Next,
+    Prev,
+    SetVolume(f32),
+    SetRepeat(RepeatMode),
+    SetShuffle(bool),
+    Stop,
+    /// 请求完整状态快照（`music_get_state` 用）：引擎填好经回传 channel 送回。
+    Snapshot(crossbeam_channel::Sender<super::types::PlaybackState>),
+}
+
+/// rtrb 容量（帧）。约 1 秒 @ 48k 的缓冲，吸收解码抖动并支持 seek 快速清空。
+const SINK_BUFFER_FRAMES: usize = 48_000;
+/// 进度事件节流间隔。
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+/// 控制循环每轮无事可做时的让出睡眠。
+const IDLE_SLEEP: Duration = Duration::from_millis(5);
+
+/// 当前正在播放的一首的运行时状态。
+struct Current {
+    decoder: Decoder,
+    sink: SinkHandle,
+    /// sink 实际格式（驱动是否重采样）。
+    actual: ActualFormat,
+    /// 源格式。
+    src_fmt: AudioFormat,
+    /// 重采样器（仅当 sink 采样率 ≠ 源采样率时存在）。
+    resampler: Option<ResamplerState>,
+    /// 已 push 到 sink 的「源帧」累计（用于 seek 后重置进度基准 + EOF 判定）。
+    decoded_eof: bool,
+    /// seek 后的进度基准（秒）；位置 = base + frames_played / actual_rate。
+    position_base_secs: f64,
+    /// 本曲起 frames_played 的基准（每次 seek/换曲重置 sink 计数对齐）。
+    frames_base: u32,
+    /// producer 的总容量（空时的可写 slots 数），用于判定缓冲是否已排空。
+    producer_capacity: usize,
+}
+
+/// Rubato 定块重采样器 + 其 planar 工作缓冲。
+struct ResamplerState {
+    resampler: FftFixedInOut<f32>,
+    channels: usize,
+    /// 累积的源交织样本，凑够一个 input chunk 再喂。
+    in_accum: Vec<f32>,
+    /// planar 输入暂存（channels × frames）。
+    in_planar: Vec<Vec<f32>>,
+    /// planar 输出暂存。
+    out_planar: Vec<Vec<f32>>,
+    chunk_frames: usize,
+}
+
+impl ResamplerState {
+    fn new(in_rate: u32, out_rate: u32, channels: usize) -> anyhow::Result<Self> {
+        // chunk_frames：取约 1024 帧的输入块（实际值由 rubato 内部对齐）。
+        let resampler =
+            FftFixedInOut::<f32>::new(in_rate as usize, out_rate as usize, 1024, channels)
+                .map_err(|e| anyhow::anyhow!("创建重采样器失败: {e}"))?;
+        let chunk_frames = resampler.input_frames_next();
+        Ok(Self {
+            resampler,
+            channels,
+            in_accum: Vec::with_capacity(chunk_frames * channels * 2),
+            in_planar: vec![Vec::new(); channels],
+            out_planar: Vec::new(),
+            chunk_frames,
+        })
+    }
+
+    /// 喂入一批交织源样本，产出重采样后的交织样本（追加到 `out`）。
+    fn process(&mut self, interleaved: &[f32], out: &mut Vec<f32>) -> anyhow::Result<()> {
+        self.in_accum.extend_from_slice(interleaved);
+        let frame_stride = self.channels;
+        while self.in_accum.len() >= self.chunk_frames * frame_stride {
+            // 拆 planar。
+            for ch in 0..self.channels {
+                self.in_planar[ch].clear();
+                self.in_planar[ch].reserve(self.chunk_frames);
+                for f in 0..self.chunk_frames {
+                    self.in_planar[ch].push(self.in_accum[f * frame_stride + ch]);
+                }
+            }
+            let processed = self
+                .resampler
+                .process(&self.in_planar, None)
+                .map_err(|e| anyhow::anyhow!("重采样失败: {e}"))?;
+            self.out_planar = processed;
+            // 交织回 out。
+            let out_frames = self.out_planar.first().map(|c| c.len()).unwrap_or(0);
+            for f in 0..out_frames {
+                for ch in 0..self.channels {
+                    out.push(self.out_planar[ch][f]);
+                }
+            }
+            self.in_accum.drain(0..self.chunk_frames * frame_stride);
+        }
+        Ok(())
+    }
+}
+
+/// 引擎运行所需的全部句柄。
+pub struct EngineContext {
+    pub rx: Receiver<AudioCommand>,
+    pub shared: Arc<SharedPlayback>,
+    pub app: AppHandle,
+    /// 封面落盘目录（懒补元数据时用）。
+    pub covers_dir: std::path::PathBuf,
+}
+
+/// 引擎主循环（在专用线程上跑，永不返回直到进程退出）。
+pub fn run(ctx: EngineContext) {
+    let EngineContext {
+        rx,
+        shared,
+        app,
+        covers_dir,
+    } = ctx;
+    let mut engine = Engine {
+        shared,
+        app,
+        covers_dir,
+        queue: Vec::new(),
+        index: -1,
+        status: PlayStatus::Stopped,
+        repeat: RepeatMode::Off,
+        shuffle: false,
+        volume: 1.0,
+        current: None,
+        frames_played: Arc::new(AtomicU32::new(0)),
+        volume_q16: Arc::new(AtomicU32::new(65536)),
+        last_progress: Instant::now(),
+        tracks_meta: Vec::new(),
+    };
+    info!(target: "music", "音频引擎线程已启动");
+
+    loop {
+        // 1. 收命令（阻塞短超时，避免空转吃 CPU；播放时退化为非阻塞）。
+        let timeout = if engine.status == PlayStatus::Playing {
+            IDLE_SLEEP
+        } else {
+            Duration::from_millis(100)
+        };
+        match rx.recv_timeout(timeout) {
+            Ok(cmd) => engine.handle_command(cmd),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                info!(target: "music", "命令通道断开，引擎退出");
+                break;
+            }
+        }
+        // 把累积的命令都处理掉（避免一轮只处理一条）。
+        while let Ok(cmd) = rx.try_recv() {
+            engine.handle_command(cmd);
+        }
+
+        // 2. 推进播放。
+        if engine.status == PlayStatus::Playing {
+            engine.pump();
+            engine.maybe_emit_progress();
+            engine.check_advance();
+        }
+    }
+}
+
+struct Engine {
+    shared: Arc<SharedPlayback>,
+    app: AppHandle,
+    covers_dir: std::path::PathBuf,
+    queue: Vec<String>,
+    index: i64,
+    status: PlayStatus,
+    repeat: RepeatMode,
+    shuffle: bool,
+    volume: f32,
+    current: Option<Current>,
+    /// 与 sink 共享：sink 输出回调累加，引擎读出算位置。
+    frames_played: FramesPlayed,
+    /// 与 sink 共享的定点音量。
+    volume_q16: VolumeQ16,
+    last_progress: Instant,
+    /// queue 中各路径对应的元数据（扫描时不带；这里懒填，emit 给前端）。
+    tracks_meta: Vec<Option<Track>>,
+}
+
+impl Engine {
+    fn handle_command(&mut self, cmd: AudioCommand) {
+        match cmd {
+            AudioCommand::PlayQueue { tracks, start } => self.play_queue(tracks, start),
+            AudioCommand::Pause => self.set_paused(true),
+            AudioCommand::Resume => self.set_paused(false),
+            AudioCommand::TogglePlay => {
+                let paused = self.status == PlayStatus::Paused;
+                self.set_paused(!paused);
+            }
+            AudioCommand::Seek { secs } => self.seek(secs),
+            AudioCommand::Next => self.advance(true),
+            AudioCommand::Prev => self.prev(),
+            AudioCommand::SetVolume(v) => self.set_volume(v),
+            AudioCommand::SetRepeat(m) => {
+                self.repeat = m;
+                self.publish_state();
+            }
+            AudioCommand::SetShuffle(on) => {
+                self.shuffle = on;
+                self.publish_state();
+            }
+            AudioCommand::Stop => self.stop(),
+            AudioCommand::Snapshot(reply) => {
+                let snap = self.snapshot();
+                let _ = reply.send(snap);
+            }
+        }
+    }
+
+    /// 加载并播放一个新队列，从 `start` 开始。
+    fn play_queue(&mut self, tracks: Vec<String>, start: usize) {
+        if tracks.is_empty() {
+            self.stop();
+            return;
+        }
+        self.tracks_meta = vec![None; tracks.len()];
+        self.queue = tracks;
+        let start = start.min(self.queue.len() - 1);
+        self.index = start as i64;
+        self.start_current();
+    }
+
+    /// 用当前 index 的曲目建立解码器与 sink，开始播放。失败 → emit music_error 并尝试下一首。
+    fn start_current(&mut self) {
+        self.current = None;
+        self.frames_played.store(0, Ordering::Relaxed);
+
+        let path = match self.queue.get(self.index as usize) {
+            Some(p) => p.clone(),
+            None => {
+                self.stop();
+                return;
+            }
+        };
+
+        let decoder = match Decoder::open(std::path::Path::new(&path)) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(target: "music", "打开/解码失败 {path}: {e:#}");
+                self.emit_error(format!("无法播放: {e}"));
+                // 跳到下一首（避免卡死）。
+                self.advance_after_error();
+                return;
+            }
+        };
+        let src_fmt = decoder.format();
+
+        let sink = match build_sink(
+            src_fmt,
+            self.frames_played.clone(),
+            self.volume_q16.clone(),
+            SINK_BUFFER_FRAMES,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(target: "music", "建立音频输出失败: {e:#}");
+                self.emit_error(format!("音频输出设备不可用: {e}"));
+                self.status = PlayStatus::Stopped;
+                self.publish_state();
+                return;
+            }
+        };
+        let actual = sink.format;
+
+        // sink 采样率 ≠ 源采样率 → 建重采样器。
+        let resampler = if actual.sample_rate != src_fmt.sample_rate {
+            match ResamplerState::new(
+                src_fmt.sample_rate,
+                actual.sample_rate,
+                src_fmt.channels as usize,
+            ) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    warn!(target: "music", "重采样器创建失败，按源率直送（可能音高异常）: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        self.apply_volume_atomic();
+
+        // 刚建好、未写时 producer 的可写 slots = 总容量，作为「排空」判定基准。
+        let producer_capacity = sink.producer.slots();
+
+        self.current = Some(Current {
+            decoder,
+            sink,
+            actual,
+            src_fmt,
+            resampler,
+            decoded_eof: false,
+            position_base_secs: 0.0,
+            frames_base: 0,
+            producer_capacity,
+        });
+        self.status = PlayStatus::Playing;
+
+        self.emit_format_changed(actual);
+        self.emit_track_changed();
+        self.publish_state();
+    }
+
+    /// 把解码帧泵进 sink，直到 producer 接近满或解码 EOF。
+    fn pump(&mut self) {
+        let Some(cur) = self.current.as_mut() else {
+            return;
+        };
+        if cur.decoded_eof {
+            return;
+        }
+        // 限制单轮泵入量，避免长时间占用循环。
+        let mut iterations = 0;
+        while iterations < 32 {
+            iterations += 1;
+            // producer 剩余空间不足一批就停（让出给输出线程消费）。
+            if cur.sink.producer.slots() < cur.src_fmt.channels as usize * 2048 {
+                break;
+            }
+            match cur.decoder.next_frames() {
+                Ok(Some(chunk)) => {
+                    push_chunk(cur, &chunk.samples);
+                }
+                Ok(None) => {
+                    // EOF：冲洗重采样器尾巴（若有），标记。
+                    cur.decoded_eof = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!(target: "music", "解码错误: {e:#}");
+                    cur.decoded_eof = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// 当前播放位置（秒）。
+    fn position_secs(&self) -> f64 {
+        match &self.current {
+            Some(cur) => {
+                let frames = self.frames_played.load(Ordering::Relaxed);
+                let played = frames.saturating_sub(cur.frames_base) as f64
+                    / cur.actual.sample_rate.max(1) as f64;
+                cur.position_base_secs + played
+            }
+            None => 0.0,
+        }
+    }
+
+    fn duration_secs(&self) -> f64 {
+        self.current_track().map(|t| t.duration_secs).unwrap_or(0.0)
+    }
+
+    fn maybe_emit_progress(&mut self) {
+        if self.last_progress.elapsed() < PROGRESS_INTERVAL {
+            return;
+        }
+        self.last_progress = Instant::now();
+        let position = self.position_secs();
+        let duration = self.duration_secs();
+        self.shared
+            .position_secs
+            .store((position * 1000.0) as u64, Ordering::Relaxed);
+        let _ = self.app.emit(
+            "music_progress",
+            json!({ "position_secs": position, "duration_secs": duration }),
+        );
+    }
+
+    /// 解码 EOF 且 sink 缓冲排空 → 当前曲放完，按 repeat/shuffle 推进。
+    fn check_advance(&mut self) {
+        let done = match &self.current {
+            Some(cur) => cur.decoded_eof && cur.sink.producer.slots() >= cur.producer_capacity,
+            None => false,
+        };
+        if !done {
+            return;
+        }
+        // 额外宽限：缓冲排空后给输出线程一点时间播完，用位置≈时长近似。
+        match self.repeat {
+            RepeatMode::One => {
+                // 单曲循环：重新开始当前曲。
+                self.start_current();
+            }
+            _ => self.advance(false),
+        }
+    }
+
+    /// 推进到下一首。`manual=true` 表示用户点 next（忽略 repeat-one 语义按顺序走）。
+    fn advance(&mut self, _manual: bool) {
+        if self.queue.is_empty() {
+            self.stop();
+            return;
+        }
+        let next = self.next_index();
+        match next {
+            Some(i) => {
+                self.index = i;
+                self.start_current();
+            }
+            None => {
+                // 队尾且非循环：停。
+                self.stop();
+            }
+        }
+    }
+
+    /// 错误后跳下一首（避免一首坏文件卡死整个队列）；到队尾则停。
+    fn advance_after_error(&mut self) {
+        match self.next_index() {
+            Some(i) if i != self.index => {
+                self.index = i;
+                self.start_current();
+            }
+            _ => {
+                self.status = PlayStatus::Stopped;
+                self.publish_state();
+            }
+        }
+    }
+
+    /// 计算下一首下标（考虑 shuffle / repeat-all）。
+    fn next_index(&self) -> Option<i64> {
+        let len = self.queue.len() as i64;
+        if len == 0 {
+            return None;
+        }
+        if self.shuffle {
+            if len == 1 {
+                return if self.repeat == RepeatMode::All {
+                    Some(self.index)
+                } else {
+                    None
+                };
+            }
+            // 简单随机：避开当前曲。
+            let mut n = pseudo_rand() % (len as u64);
+            if n as i64 == self.index {
+                n = (n + 1) % len as u64;
+            }
+            return Some(n as i64);
+        }
+        let nxt = self.index + 1;
+        if nxt < len {
+            Some(nxt)
+        } else if self.repeat == RepeatMode::All {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    fn prev(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        // 若已播放 >3s，prev 回到本曲开头；否则上一首。
+        if self.position_secs() > 3.0 {
+            self.start_current();
+            return;
+        }
+        let len = self.queue.len() as i64;
+        let prev = if self.index > 0 {
+            self.index - 1
+        } else if self.repeat == RepeatMode::All {
+            len - 1
+        } else {
+            0
+        };
+        self.index = prev;
+        self.start_current();
+    }
+
+    fn seek(&mut self, secs: f64) {
+        let Some(cur) = self.current.as_mut() else {
+            return;
+        };
+        // 清 sink 缓冲：drop 当前 producer 数据不可行（rtrb 无 clear），改为重建解码位置 +
+        // 重置进度基准；缓冲里残留旧帧会被很快消费掉。为正确性，重建解码器位置后让
+        // frames_base 对齐当前 frames_played，position_base 设为实际 seek 到的秒。
+        match cur.decoder.seek(secs) {
+            Ok(actual_secs) => {
+                cur.position_base_secs = actual_secs;
+                cur.frames_base = self.frames_played.load(Ordering::Relaxed);
+                cur.decoded_eof = false;
+                if let Some(rs) = cur.resampler.as_mut() {
+                    rs.in_accum.clear();
+                }
+                self.publish_state();
+            }
+            Err(e) => {
+                warn!(target: "music", "seek 失败: {e:#}");
+                self.emit_error(format!("跳转失败: {e}"));
+            }
+        }
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        if self.current.is_none() {
+            return;
+        }
+        if paused && self.status == PlayStatus::Playing {
+            if let Some(cur) = self.current.as_mut() {
+                cur.sink.sink.pause();
+            }
+            self.status = PlayStatus::Paused;
+            self.publish_state();
+        } else if !paused && self.status == PlayStatus::Paused {
+            if let Some(cur) = self.current.as_mut() {
+                cur.sink.sink.resume();
+            }
+            self.status = PlayStatus::Playing;
+            self.publish_state();
+        }
+    }
+
+    fn set_volume(&mut self, v: f32) {
+        self.volume = v.clamp(0.0, 1.0);
+        self.apply_volume_atomic();
+        self.publish_state();
+    }
+
+    /// 写定点音量给 sink。独占 bit-perfect 时旁路（置 1.0），不污染原始 PCM。
+    fn apply_volume_atomic(&self) {
+        let effective = match &self.current {
+            Some(cur) if cur.actual.exclusive => 1.0,
+            _ => self.volume,
+        };
+        self.volume_q16
+            .store((effective * 65536.0) as u32, Ordering::Relaxed);
+    }
+
+    fn stop(&mut self) {
+        self.current = None;
+        self.status = PlayStatus::Stopped;
+        self.index = -1;
+        self.frames_played.store(0, Ordering::Relaxed);
+        self.publish_state();
+    }
+
+    fn current_track(&self) -> Option<&Track> {
+        if self.index < 0 {
+            return None;
+        }
+        self.tracks_meta
+            .get(self.index as usize)
+            .and_then(|o| o.as_ref())
+    }
+
+    /// 懒解析当前曲元数据（用 lofty；扫描已做过，这里为 emit 给前端补全）。
+    fn ensure_current_meta(&mut self) {
+        if self.index < 0 {
+            return;
+        }
+        let i = self.index as usize;
+        if self
+            .tracks_meta
+            .get(i)
+            .map(|o| o.is_some())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Some(path) = self.queue.get(i).cloned() else {
+            return;
+        };
+        // 复用扫描的单文件读取：covers 落 workspace 的 covers 目录（构造时注入）。
+        let meta = super::scan::read_track_pub(std::path::Path::new(&path), &self.covers_dir);
+        if let Some(slot) = self.tracks_meta.get_mut(i) {
+            *slot = Some(meta);
+        }
+    }
+
+    fn emit_track_changed(&mut self) {
+        self.ensure_current_meta();
+        let track = self.current_track().cloned();
+        let _ = self.app.emit(
+            "music_track_changed",
+            json!({ "index": self.index, "track": track }),
+        );
+    }
+
+    fn emit_format_changed(&self, actual: ActualFormat) {
+        let _ = self.app.emit(
+            "music_format_changed",
+            json!({
+                "sample_rate": actual.sample_rate,
+                "bits": actual.bits,
+                "exclusive": actual.exclusive,
+                "resampled": actual.resampled,
+            }),
+        );
+    }
+
+    fn emit_error(&self, message: String) {
+        let _ = self.app.emit("music_error", json!({ "message": message }));
+    }
+
+    /// 写共享原子 + emit `music_state_changed`。
+    fn publish_state(&mut self) {
+        self.ensure_current_meta();
+        let track = self.current_track().cloned();
+        self.shared
+            .status
+            .store(status_code(self.status), Ordering::Relaxed);
+        self.shared.index.store(self.index, Ordering::Relaxed);
+        let _ = self.app.emit(
+            "music_state_changed",
+            json!({
+                "status": self.status.as_str(),
+                "index": self.index,
+                "track": track,
+            }),
+        );
+    }
+
+    /// 构造完整 PlaybackState 快照（`music_get_state` 用）。
+    pub fn snapshot(&mut self) -> super::types::PlaybackState {
+        self.ensure_current_meta();
+        let track = self.current_track().cloned();
+        super::types::PlaybackState {
+            status: self.status.as_str().to_string(),
+            index: self.index,
+            track,
+            position_secs: self.position_secs(),
+            duration_secs: self.duration_secs(),
+            volume: self.volume,
+            repeat: self.repeat.as_str().to_string(),
+            shuffle: self.shuffle,
+        }
+    }
+}
+
+/// 把一批源交织样本（可能重采样后）push 到 sink producer。producer 满则丢弃多余（欠/过载保护；
+/// 正常情况下 pump 已按 slots 控量）。
+fn push_chunk(cur: &mut Current, samples: &[f32]) {
+    if let Some(rs) = cur.resampler.as_mut() {
+        let mut resampled = Vec::new();
+        if rs.process(samples, &mut resampled).is_ok() {
+            push_samples(&mut cur.sink, &resampled);
+        }
+    } else {
+        push_samples(&mut cur.sink, samples);
+    }
+}
+
+fn push_samples(sink: &mut SinkHandle, samples: &[f32]) {
+    for &s in samples {
+        if sink.producer.push(s).is_err() {
+            // producer 满：停止本批写入（剩余下轮再来；此处简单丢弃极少发生，因 pump 控量）。
+            break;
+        }
+    }
+}
+
+fn status_code(s: PlayStatus) -> u8 {
+    match s {
+        PlayStatus::Stopped => 0,
+        PlayStatus::Playing => 1,
+        PlayStatus::Paused => 2,
+    }
+}
+
+/// 轻量伪随机（shuffle 用，无需密码学强度）。基于时间种子的 xorshift。
+fn pseudo_rand() -> u64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E3779B97F4A7C15);
+            t | 1
+        });
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        x
+    })
+}

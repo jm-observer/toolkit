@@ -42,6 +42,14 @@ rand = "0.8"
 cpal = "0.16"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+# Music 模块依赖（原生音频引擎：解码 / 输出 / 重采样 / 元数据 / 无锁环形缓冲）
+symphonia = { version = "0.6", features = [
+    "flac", "mp3", "aac", "alac", "isomp4", "ogg", "vorbis", "wav", "pcm",
+] }
+rubato = "0.16"
+rtrb = "0.3"
+lofty = "0.24"
+crossbeam-channel = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -50,6 +58,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Diagnostics_Debug",
 ] }
+wasapi = "0.23"
 
 [features]
 default = ["custom-protocol"]
