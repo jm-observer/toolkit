@@ -3,6 +3,8 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   CodeloopAPI,
   onProgress,
+  type LoopMessageRow,
+  type LoopRow,
   type Progress,
   type Provider,
   type ReviewMode,
@@ -14,6 +16,8 @@ import { MessageColumn } from './components/MessageColumn'
 import { LoopStatusBar } from './components/LoopStatusBar'
 import { AskUserModal } from './components/AskUserModal'
 import { ConfirmGateModal } from './components/ConfirmGateModal'
+import { LoopList } from './components/LoopList'
+import { LoopTranscript } from './components/LoopTranscript'
 
 const POLL_MS = 1500
 
@@ -36,6 +40,7 @@ export default function CodeloopPage() {
   const [maxRounds, setMaxRounds] = useState(5)
   const [waitIdle, setWaitIdle] = useState(false)
   const [stepConfirm, setStepConfirm] = useState(true)
+  const [useWorktree, setUseWorktree] = useState(false)
 
   // 循环
   const [running, setRunning] = useState(false)
@@ -43,6 +48,14 @@ export default function CodeloopPage() {
   const [startErr, setStartErr] = useState<string | null>(null)
   const [answeredSeq, setAnsweredSeq] = useState(0)
   const [decidedSeq, setDecidedSeq] = useState(0)
+
+  // 记录列表 / 详情
+  const [view, setView] = useState<'live' | 'records'>('live')
+  const [loops, setLoops] = useState<LoopRow[]>([])
+  const [loadingLoops, setLoadingLoops] = useState(false)
+  const [selectedLoopId, setSelectedLoopId] = useState<number | null>(null)
+  const [loopMessages, setLoopMessages] = useState<LoopMessageRow[]>([])
+  const [loadingLoopMsgs, setLoadingLoopMsgs] = useState(false)
 
   // ── 会话清单 ──────────────────────────────────────────────────────────────
   const refreshSessions = () => {
@@ -54,6 +67,60 @@ export default function CodeloopPage() {
       .finally(() => setLoadingSessions(false))
   }
   useEffect(refreshSessions, [])
+
+  // ── 复核记录列表 / 详情 ───────────────────────────────────────────────────
+  const refreshLoops = () => {
+    setLoadingLoops(true)
+    CodeloopAPI.listLoops(50)
+      .then(setLoops)
+      .catch(() => {})
+      .finally(() => setLoadingLoops(false))
+  }
+  useEffect(refreshLoops, [])
+
+  // 循环结束（done/error）→ 刷新列表，让最新记录终态进列表。
+  useEffect(() => {
+    if (progress?.phase === 'done' || progress?.phase === 'error') refreshLoops()
+  }, [progress?.phase])
+
+  // 选中记录 → 拉其往返消息；该记录在跑则轮询直至非 running。
+  useEffect(() => {
+    if (selectedLoopId == null) {
+      setLoopMessages([])
+      return
+    }
+    let alive = true
+    let timer: ReturnType<typeof setInterval> | undefined
+    const load = async () => {
+      try {
+        const msgs = await CodeloopAPI.loopMessages(selectedLoopId)
+        if (alive) setLoopMessages(msgs)
+      } catch {
+        /* ignore */
+      }
+    }
+    setLoadingLoopMsgs(true)
+    void load().finally(() => {
+      if (alive) setLoadingLoopMsgs(false)
+    })
+    if (loops.find(l => l.id === selectedLoopId)?.status === 'running') {
+      timer = setInterval(load, POLL_MS)
+    }
+    return () => {
+      alive = false
+      if (timer) clearInterval(timer)
+    }
+  }, [selectedLoopId, loops])
+
+  const handleDeleteLoop = async (id: number) => {
+    try {
+      await CodeloopAPI.deleteLoop(id)
+    } catch {
+      /* ignore */
+    }
+    if (selectedLoopId === id) setSelectedLoopId(null)
+    refreshLoops()
+  }
 
   // 内联：id → 项目名（cwd 末段名）。空 cwd / 未选 → 空串。用于同项目联动。
   const projectOf = (id: string): string => {
@@ -150,9 +217,11 @@ export default function CodeloopPage() {
         max_rounds: maxRounds,
         wait_for_claude_idle: waitIdle,
         step_confirm: stepConfirm,
+        use_worktree: useWorktree,
       })
       setRunning(true)
       setProgress({ phase: 'starting' })
+      refreshLoops()
     } catch (e) {
       setStartErr(String(e))
     }
@@ -244,6 +313,8 @@ export default function CodeloopPage() {
         setWaitIdle={setWaitIdle}
         stepConfirm={stepConfirm}
         setStepConfirm={setStepConfirm}
+        useWorktree={useWorktree}
+        setUseWorktree={setUseWorktree}
         running={running}
         canStart={canStart}
         onStart={handleStart}
@@ -256,10 +327,55 @@ export default function CodeloopPage() {
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 gap-3">
-        <MessageColumn title="Claude Code" sessionId={claudeId} messages={messages.claude} />
-        <MessageColumn title="Codex" sessionId={codexId} messages={messages.codex} />
+      {/* 实时双栏 / 记录列表 切换 */}
+      <div className="flex items-center gap-1 text-xs">
+        <button
+          onClick={() => setView('live')}
+          className={`rounded px-2 py-1 ${
+            view === 'live'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          实时
+        </button>
+        <button
+          onClick={() => {
+            setView('records')
+            refreshLoops()
+          }}
+          className={`rounded px-2 py-1 ${
+            view === 'records'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          记录{loops.length ? `（${loops.length}）` : ''}
+        </button>
       </div>
+
+      {view === 'live' ? (
+        <div className="flex min-h-0 flex-1 gap-3">
+          <MessageColumn title="Claude Code" sessionId={claudeId} messages={messages.claude} />
+          <MessageColumn title="Codex" sessionId={codexId} messages={messages.codex} />
+        </div>
+      ) : (
+        <div className="flex min-h-0 flex-1 gap-3">
+          <div className="w-80 shrink-0">
+            <LoopList
+              loops={loops}
+              selectedId={selectedLoopId}
+              onSelect={setSelectedLoopId}
+              onRefresh={refreshLoops}
+              onDelete={handleDeleteLoop}
+              loading={loadingLoops}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <LoopTranscript loopId={selectedLoopId} messages={loopMessages} loading={loadingLoopMsgs} />
+          </div>
+        </div>
+      )}
 
       {showAsk && progress?.question && (
         <AskUserModal

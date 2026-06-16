@@ -179,6 +179,9 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::codeloop::codeloop_answer,
             modules::codeloop::codeloop_confirm,
             modules::codeloop::codeloop_stop,
+            modules::codeloop::codeloop_list_loops,
+            modules::codeloop::codeloop_loop_messages,
+            modules::codeloop::codeloop_delete_loop,
             // g10-deploy 模块（G10 服务部署面板：列表/连通性/版本对比/一键部署）
             modules::g10_deploy::g10_list_services,
             modules::g10_deploy::g10_probe_service,

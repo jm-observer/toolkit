@@ -48,6 +48,16 @@ pub const DEFAULT_CODEX_TEMPLATE: &str = "请以严格审阅者身份复核{LABE
 pub const DEFAULT_CLAUDE_TEMPLATE: &str = "Codex 对{LABEL}的复核意见如下：\n---\n{REVIEW}\n---\n\
 请据此修订，只改确有问题处，并在回复末尾用一句话概述本轮改动。";
 
+/// **worktree 模式追加指令**：仅 use_worktree 时由上层追加到 Claude 修订 prompt 末尾。
+///
+/// 不让后端跑 `git worktree add`，而是让 Claude Code 自己用 worktree + 子 agent 隔离实现，
+/// 完成后单独一行回报工作树绝对路径（`WORKTREE: <abs>`），后端据此把 Codex `--cd` 重定位过去
+/// 复核 worktree 内代码。标记约定见 [`crate::parse::parse_worktree_path`]。
+pub const WORKTREE_INSTRUCTION: &str = "\
+\n\n【worktree 模式】请勿直接在当前工作树改动。请用 `git worktree add` 新建一个独立工作树，\
+在其中用子 agent 完成本轮修订与必要验证，完成后在回复中**单独一行**回报该工作树的绝对路径，\
+格式严格为：`WORKTREE: <绝对路径>`（该行只含这一个标记，不要夹带其它文字）。后续复核将在该工作树内进行。";
+
 /// 复核模式，仅影响 prompt 措辞（复核口径）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

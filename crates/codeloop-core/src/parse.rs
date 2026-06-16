@@ -66,6 +66,25 @@ pub fn parse_ask_user(reply: &str) -> Option<AskUser> {
     None
 }
 
+/// 解析 Claude 回复里单行 `WORKTREE: <绝对路径>` 标记，取**最后一次**出现
+/// （容 Claude 中途多次打印；以末次为准）。前缀大小写不敏感；冒号后整段 trim 为路径，
+/// 空则跳过。无标记返回 `None`。
+pub fn parse_worktree_path(reply: &str) -> Option<String> {
+    let mut found = None;
+    for line in reply.lines() {
+        let t = line.trim();
+        const PFX: usize = "WORKTREE:".len();
+        if t.len() < PFX || !t.is_char_boundary(PFX) || !t[..PFX].eq_ignore_ascii_case("WORKTREE:") {
+            continue;
+        }
+        let path = t[PFX..].trim();
+        if !path.is_empty() {
+            found = Some(path.to_string());
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +143,26 @@ mod tests {
     #[test]
     fn ask_user_none_when_absent() {
         assert!(parse_ask_user("普通回复\nVERDICT: PASS").is_none());
+    }
+
+    #[test]
+    fn worktree_path_basic() {
+        let reply = "我已用子 agent 实现完毕。\nWORKTREE: D:/git/repo-wt-feat\n下面是改动概述。";
+        assert_eq!(
+            parse_worktree_path(reply),
+            Some("D:/git/repo-wt-feat".to_string())
+        );
+    }
+
+    #[test]
+    fn worktree_path_takes_last_and_case_insensitive() {
+        let reply = "worktree: /tmp/a\n...\nWORKTREE: /tmp/b";
+        assert_eq!(parse_worktree_path(reply), Some("/tmp/b".to_string()));
+    }
+
+    #[test]
+    fn worktree_path_none_when_absent_or_empty() {
+        assert!(parse_worktree_path("没有标记").is_none());
+        assert!(parse_worktree_path("WORKTREE:   ").is_none());
     }
 }
