@@ -120,8 +120,14 @@ impl Store {
         let lines = read_lines(&path)?;
         let total = lines.len();
         let start = after.min(total);
+        let slice = &lines[start..];
+        // Codex 同一轮把 user/assistant 同时写成 `response_item` 与 `event_msg`（双写）。
+        // 择一权威源：行片含 `response_item/message`(role=user|assistant) → 用新源
+        // `codex_response_item_to_msg`（逐轮完整、含 resume 用户轮）；否则回退旧源 `event_msg`。
+        // 同一轮的两族事件总在同一增量页成对出现 → 不会重复、不会割裂（见设计 §4/§5.1）。
+        let codex_new_source = provider == Provider::Codex && codex_slice_uses_response_item(slice);
         let mut messages = Vec::new();
-        for raw in &lines[start..] {
+        for raw in slice {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 continue;
@@ -130,6 +136,7 @@ impl Store {
                 continue; // 坏行跳过
             };
             let msg = match provider {
+                Provider::Codex if codex_new_source => codex_response_item_to_msg(&value),
                 Provider::Codex => codex_message_of(&value),
                 Provider::Claude => claude_message_of(&value),
             };
@@ -498,6 +505,153 @@ fn codex_message_of(e: &Value) -> Option<SessionMessage> {
     })
 }
 
+/// 行片是否含 `response_item/message`(role=user|assistant)——决定 Codex 取新源还是旧源。
+fn codex_slice_uses_response_item(lines: &[String]) -> bool {
+    for raw in lines {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if str_field(&v, "type") != "response_item" {
+            continue;
+        }
+        let Some(p) = v.get("payload") else { continue };
+        if p.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        match p.get("role").and_then(Value::as_str) {
+            Some("user") | Some("assistant") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 取 `response_item.payload.content[]` 中指定 block 类型（如 `input_text` / `output_text`）的文本。
+/// content 偶有直接为字符串的形态，一并兜底。
+fn codex_content_text(payload: &Value, block_type: &str) -> String {
+    let Some(content) = payload.get("content") else {
+        return String::new();
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    content
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some(block_type))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+/// 把 `reasoning` 的 `summary` / `content`（数组的 `text`）拼成思考正文；偶有顶层 `text`。
+fn codex_reasoning_text(payload: &Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["summary", "content"] {
+        if let Some(arr) = payload.get(key).and_then(Value::as_array) {
+            for b in arr {
+                if let Some(t) = b.get("text").and_then(Value::as_str) {
+                    if !t.is_empty() {
+                        parts.push(t.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        if let Some(s) = payload.get("text").and_then(Value::as_str) {
+            if !s.is_empty() {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// `arguments` / `output` 常是 JSON 字符串，直接用；否则 pretty 序列化。
+fn codex_detail_text(v: &Value) -> String {
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+}
+
+/// 把单行 Codex `response_item` 事件转成消息（新源，权威）。
+///
+/// 覆盖：`message`(user/assistant，跳过 developer 与每轮注入的 `<environment_context>`)、
+/// `reasoning`→`[thinking]`、`function_call`→`[tool_use: name]`、`function_call_output`→`[tool_result]`，
+/// 真实内容（思考正文 / 入参 / 返回体）汇入 `detail` 供前端折叠。非 `response_item` 行返回 `None`
+/// （新源模式下 `event_msg` 双写被天然跳过，避免重复）。
+fn codex_response_item_to_msg(e: &Value) -> Option<SessionMessage> {
+    if str_field(e, "type") != "response_item" {
+        return None;
+    }
+    let ts = str_field(e, "timestamp");
+    let p = e.get("payload")?;
+    let pt = p.get("type").and_then(Value::as_str)?;
+    let (role, text, detail): (&str, String, String) = match pt {
+        "message" => match p.get("role").and_then(Value::as_str).unwrap_or("") {
+            "developer" => return None, // 系统/权限说明，不展示
+            "user" => {
+                let body = codex_content_text(p, "input_text");
+                // 每轮注入的环境上下文块不是真实用户输入。
+                if body.trim_start().starts_with("<environment_context>") {
+                    return None;
+                }
+                ("user", body, String::new())
+            }
+            "assistant" => ("assistant", codex_content_text(p, "output_text"), String::new()),
+            _ => return None,
+        },
+        "reasoning" => {
+            let think = codex_reasoning_text(p);
+            let detail = if think.is_empty() {
+                String::new()
+            } else {
+                format!("[thinking]\n{think}")
+            };
+            ("assistant", "[thinking]".to_string(), detail)
+        }
+        "function_call" => {
+            let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = p.get("arguments").map(codex_detail_text).unwrap_or_default();
+            let detail = if args.is_empty() {
+                String::new()
+            } else {
+                format!("[tool_use: {name}] 入参\n{args}")
+            };
+            ("assistant", format!("[tool_use: {name}]"), detail)
+        }
+        "function_call_output" => {
+            let out = p.get("output").map(codex_detail_text).unwrap_or_default();
+            let detail = if out.is_empty() {
+                String::new()
+            } else {
+                format!("[tool_result]\n{out}")
+            };
+            ("assistant", "[tool_result]".to_string(), detail)
+        }
+        _ => return None,
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(SessionMessage {
+        role: role.to_string(),
+        text,
+        detail: (!detail.is_empty()).then_some(detail),
+        timestamp: ts,
+    })
+}
+
 // ----------------------------- Claude 解析 ----------------------------- //
 
 /// cwd：取首个带 `cwd` 字段的事件。
@@ -655,6 +809,8 @@ fn claude_content_to_text(content: &Value) -> (String, String) {
                     details.push(format!("[tool_result]\n{body}"));
                 }
             }
+            // 贴图/截图：仅标记 `[image]`（不把 base64 塞进 detail），避免纯图消息正文为空被丢弃。
+            Some("image") => parts.push("[image]".to_string()),
             _ => {}
         }
     }

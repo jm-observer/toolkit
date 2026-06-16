@@ -15,6 +15,9 @@ fn store() -> Store {
 
 const CODEX_DONE: &str = "11111111-aaaa-bbbb-cccc-000000000001";
 const CODEX_RUNNING: &str = "22222222-aaaa-bbbb-cccc-000000000002";
+// 新源 fixture：含 response_item（developer/environment_context/多轮 user+assistant/
+// reasoning/function_call/output）+ event_msg 双写。不在 session_index.jsonl（不进 list）。
+const CODEX_RESUME: &str = "33333333-aaaa-bbbb-cccc-000000000003";
 const CLAUDE_DONE: &str = "aaaabbbb-cccc-dddd-eeee-000000000009";
 const CLAUDE_PROCESSING: &str = "bbbbcccc-dddd-eeee-ffff-000000000010";
 
@@ -144,6 +147,92 @@ fn messages_increment_by_cursor() {
     let partial = s.messages(Provider::Codex, CODEX_DONE, 5).unwrap();
     assert!(partial.messages.len() < first.messages.len());
     assert_eq!(partial.cursor, first.cursor);
+}
+
+#[test]
+fn codex_response_item_source_shows_resume_user_rounds() {
+    let page = store().messages(Provider::Codex, CODEX_RESUME, 0).unwrap();
+    let texts: Vec<_> = page.messages.iter().map(|m| m.text.clone()).collect();
+
+    // G1：resume 轮用户 prompt 不再丢失（旧逻辑只认 event_msg 会丢这条）。
+    assert!(
+        texts.iter().any(|t| t.contains("已按意见修订")),
+        "resume 轮用户 prompt 应可见"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("请以严格审阅者身份复核")),
+        "首轮用户 prompt 应可见"
+    );
+
+    // developer 与每轮注入的 environment_context 块不展示。
+    assert!(
+        !texts.iter().any(|t| t.contains("environment_context")),
+        "环境上下文块应被过滤"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("approval_policy")),
+        "developer 说明应被过滤"
+    );
+
+    // 双写去重：assistant 回复来自 response_item，event_msg 不再重复计入。
+    assert_eq!(
+        texts.iter().filter(|t| t.contains("NEEDS_WORK")).count(),
+        1,
+        "首轮 assistant 回复不应因双写而重复"
+    );
+    assert_eq!(
+        texts.iter().filter(|t| t.contains("VERDICT: PASS")).count(),
+        1
+    );
+
+    // 恰好两条真实用户消息（developer / environment_context 不计）。
+    let users = page.messages.iter().filter(|m| m.role == "user").count();
+    assert_eq!(users, 2, "应有且仅有两轮真实用户 prompt");
+
+    // G2：思考 / 工具调用渲染为标记，真实内容入 detail 可展开。
+    let thinking = page
+        .messages
+        .iter()
+        .find(|m| m.text == "[thinking]")
+        .expect("应渲染 reasoning 为 [thinking]");
+    assert!(thinking.detail.as_deref().unwrap_or("").contains("先通读"));
+    let tool = page
+        .messages
+        .iter()
+        .find(|m| m.text.contains("[tool_use: shell]"))
+        .expect("应渲染 function_call 为 [tool_use]");
+    assert!(tool.detail.as_deref().unwrap_or("").contains("cat"));
+    let tool_out = page
+        .messages
+        .iter()
+        .find(|m| m.text == "[tool_result]")
+        .expect("应渲染 function_call_output 为 [tool_result]");
+    assert!(tool_out.detail.as_deref().unwrap_or("").contains("plan.md"));
+
+    // 游标连续翻页不重出。
+    let next = store()
+        .messages(Provider::Codex, CODEX_RESUME, page.cursor)
+        .unwrap();
+    assert!(next.messages.is_empty());
+    assert_eq!(next.cursor, page.cursor);
+}
+
+#[test]
+fn codex_old_event_msg_source_not_regressed() {
+    // 纯 event_msg rollout（无 response_item）仍走旧源，逐轮 user/assistant 不变。
+    let page = store().messages(Provider::Codex, CODEX_DONE, 0).unwrap();
+    let roles: Vec<_> = page.messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
+}
+
+#[test]
+fn claude_image_block_rendered_not_dropped() {
+    // G3：纯 image 用户消息渲染为 [image]，不再因正文为空被丢弃。
+    let page = store().messages(Provider::Claude, CLAUDE_DONE, 0).unwrap();
+    assert!(
+        page.messages.iter().any(|m| m.text == "[image]"),
+        "纯 image 消息应渲染为 [image]"
+    );
 }
 
 #[test]
