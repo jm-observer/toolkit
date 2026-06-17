@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { RefreshCw, Rocket, CircleDot, ExternalLink } from 'lucide-react'
+import { RefreshCw, Rocket, CircleDot, ExternalLink, Pencil, Save, X } from 'lucide-react'
 import {
   G10DeployAPI,
   openUrl,
@@ -94,6 +94,11 @@ export default function G10DeployPage() {
   const [warning, setWarning] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
+  // 端口编辑：editingName = 正在编辑端口的服务，draftPorts = 草稿端口列表
+  const [editingName, setEditingName] = useState<string | null>(null)
+  const [draftPorts, setDraftPorts] = useState<{ port: string; note: string }[]>([])
+  const [savingPorts, setSavingPorts] = useState(false)
+
   // 部署日志面板
   const [deployingName, setDeployingName] = useState<string | null>(null)
   const [logLines, setLogLines] = useState<DeployLog[]>([])
@@ -183,6 +188,51 @@ export default function G10DeployPage() {
     }
   }
 
+  // ── 端口编辑 ──────────────────────────────────────────────────────────────
+  const startEditPorts = (def: ServiceDef) => {
+    setEditingName(def.name)
+    setDraftPorts(def.ports.map(p => ({ port: String(p.port), note: p.note })))
+  }
+  const cancelEditPorts = () => {
+    setEditingName(null)
+    setDraftPorts([])
+  }
+  const updateDraftPort = (i: number, field: 'port' | 'note', value: string) => {
+    setDraftPorts(prev => prev.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)))
+  }
+  const addDraftPort = () => setDraftPorts(prev => [...prev, { port: '', note: '' }])
+  const removeDraftPort = (i: number) =>
+    setDraftPorts(prev => prev.filter((_, idx) => idx !== i))
+
+  const savePorts = async (name: string) => {
+    // 校验端口（1–65535 整数）
+    const parsed: { port: number; note: string }[] = []
+    for (const p of draftPorts) {
+      const trimmed = p.port.trim()
+      if (trimmed === '') continue // 空行忽略
+      const n = Number(trimmed)
+      if (!Number.isInteger(n) || n < 1 || n > 65535) {
+        window.alert(`端口 "${p.port}" 非法（需 1–65535 整数）`)
+        return
+      }
+      parsed.push({ port: n, note: p.note.trim() })
+    }
+    // 以当前 rows 的完整清单为基础，仅替换目标服务的 ports，整体写回覆盖文件。
+    const services = rows.map(r =>
+      r.def.name === name ? { ...r.def, ports: parsed } : r.def,
+    )
+    setSavingPorts(true)
+    try {
+      await G10DeployAPI.saveServices(services)
+      cancelEditPorts()
+      await loadAll() // 重新加载（读覆盖文件）+ 重新探测
+    } catch (e) {
+      window.alert(`保存端口失败：${String(e)}`)
+    } finally {
+      setSavingPorts(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-4xl space-y-4">
       <header className="flex items-center justify-between">
@@ -265,10 +315,77 @@ export default function G10DeployPage() {
                     )}
                   </div>
 
-                  {/* 端口清单 + 实时连通性 */}
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className="text-xs text-gray-400">端口</span>
-                    <PortChips def={def} ports={ports} probing={probing} />
+                  {/* 端口清单 + 实时连通性（可编辑） */}
+                  <div className="mt-2 flex items-start gap-2">
+                    <span className="pt-0.5 text-xs text-gray-400">端口</span>
+                    {editingName === def.name ? (
+                      <div className="flex flex-col gap-1.5">
+                        {draftPorts.map((p, i) => (
+                          <div key={i} className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              min={1}
+                              max={65535}
+                              value={p.port}
+                              onChange={e => updateDraftPort(i, 'port', e.target.value)}
+                              placeholder="端口"
+                              className="w-20 rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-800"
+                            />
+                            <input
+                              type="text"
+                              value={p.note}
+                              onChange={e => updateDraftPort(i, 'note', e.target.value)}
+                              placeholder="用途说明"
+                              className="w-44 rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-800"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeDraftPort(i)}
+                              title="删除该端口"
+                              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-500 dark:hover:bg-gray-800"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={addDraftPort}
+                            className="rounded border border-dashed border-gray-300 px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-800"
+                          >
+                            + 添加端口
+                          </button>
+                          <button
+                            type="button"
+                            disabled={savingPorts}
+                            onClick={() => void savePorts(def.name)}
+                            className="flex items-center gap-1 rounded bg-blue-500 px-2 py-0.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                          >
+                            <Save size={12} /> {savingPorts ? '保存中…' : '保存'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditPorts}
+                            className="rounded px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <PortChips def={def} ports={ports} probing={probing} />
+                        <button
+                          type="button"
+                          onClick={() => startEditPorts(def)}
+                          title="编辑端口"
+                          className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 

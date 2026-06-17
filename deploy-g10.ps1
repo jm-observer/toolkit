@@ -26,15 +26,27 @@
 .PARAMETER SkipRestart
     跳过部署后重启（仅换二进制，下次服务自然重启时生效）。
 
+.PARAMETER Bind
+    toolkit-server 的监听地址，默认 0.0.0.0:8788。部署时通过 `toolkit-server install`
+    把它写进 systemd unit 的 `Environment=TOOLKIT_BIND=<Bind>`（重装 unit 使新端口生效）。
+    G10 部署面板会把该服务 registry 主端口拼成 `0.0.0.0:<port>` 传进来。
+
+.PARAMETER Workspace
+    toolkit-server 的 workspace 根目录（远端路径），默认 ~/.config/toolkit-server
+    （与 install 默认一致）。install 时显式传给 `--workspace`。
+
 .EXAMPLE
     pwsh ./deploy-g10.ps1
     pwsh ./deploy-g10.ps1 -SkipBuild
     pwsh ./deploy-g10.ps1 -SkipRestart
+    pwsh ./deploy-g10.ps1 -Bind 0.0.0.0:8790
 #>
 param(
     [string]$G10Host = "fengqi@192.168.0.68",
     [string]$DestDir = "~/.local/bin",
     [string]$Service = "toolkit-server",
+    [string]$Bind = "0.0.0.0:8788",
+    [string]$Workspace = "~/.config/toolkit-server",
     [switch]$SkipBuild,
     [switch]$SkipRestart
 )
@@ -110,6 +122,17 @@ foreach ($b in $Bins) {
 Write-Host "==> 远端版本确认" -ForegroundColor Cyan
 foreach ($b in $Bins) {
     ssh $G10Host "$DestDir/$($b.Bin) --version"
+}
+
+# 重装 toolkit-server unit：把 -Bind 写进 unit 的 Environment=TOOLKIT_BIND=<Bind>，
+# 使新端口生效（install 幂等：重写 unit + daemon-reload）。仅 toolkit-server 是 daemon
+# 且支持该 install，其余 $Bins 是 CLI 工具，无 unit、跳过。
+if ($Service -eq "toolkit-server") {
+    Write-Host "==> 重装 toolkit-server unit（TOOLKIT_BIND=$Bind, workspace=$Workspace）" -ForegroundColor Cyan
+    $installCmd = 'export XDG_RUNTIME_DIR=/run/user/$(id -u); ' `
+        + "$DestDir/toolkit-server install --workspace $Workspace --bind $Bind"
+    ssh $G10Host $installCmd
+    if ($LASTEXITCODE -ne 0) { throw "toolkit-server install 失败（重装 unit）" }
 }
 
 # 重启 daemon 用户服务（CLI 工具无服务、不涉及；换二进制后服务需重启才加载新版）。

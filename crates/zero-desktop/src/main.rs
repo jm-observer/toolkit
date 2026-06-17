@@ -184,6 +184,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::codeloop::codeloop_delete_loop,
             // g10-deploy 模块（G10 服务部署面板：列表/连通性/版本对比/一键部署）
             modules::g10_deploy::g10_list_services,
+            modules::g10_deploy::g10_save_services,
             modules::g10_deploy::g10_probe_service,
             modules::g10_deploy::g10_probe_ports,
             modules::g10_deploy::g10_local_version,

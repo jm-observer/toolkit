@@ -11,12 +11,19 @@ const APP: &str = "toolkit-server";
 /// systemd watchdog 心跳间隔（秒）。axum + 后台 task 调度都很快，60s 给足喘息。
 const WATCHDOG_SEC: u32 = 60;
 
+/// 安装时写进 unit 的默认监听地址；可被 install 的 `--bind` 覆盖。
+const DEFAULT_BIND: &str = "0.0.0.0:8788";
+
 /// 安装/自更新统一描述。ExecStart 由 `{workspace}` 模板在 install 时实拼。
-fn linux_service() -> LinuxService {
+///
+/// `bind` 决定写进生成 unit `[Service]` 段的 `Environment=TOOLKIT_BIND=<bind>`，
+/// serve 子命令完全靠该 env（+ clap default）决定监听端口，故 exec_args 不再写死 `--bind`。
+fn linux_service(bind: &str) -> LinuxService {
     LinuxService::new(APP, REPO_OWNER, REPO_NAME, env!("CARGO_PKG_VERSION"))
         .bin_name(APP)
         .description("toolkit-server: axum + toolkit-core/tasks daemon")
-        .exec_args("serve --workspace {workspace} --bind 0.0.0.0:8788")
+        .exec_args("serve --workspace {workspace}")
+        .env("TOOLKIT_BIND", bind)
         .watchdog_sec(WATCHDOG_SEC)
         .restart_sec(5)
 }
@@ -48,6 +55,9 @@ enum Command {
         /// 显式 workspace 路径，覆盖 `~/.config/toolkit-server` 默认。
         #[arg(long, short = 'w')]
         workspace: Option<String>,
+        /// 监听地址，写进 unit 的 `Environment=TOOLKIT_BIND=<addr>` 决定服务端口。
+        #[arg(long, default_value = DEFAULT_BIND)]
+        bind: String,
     },
     /// 从 GitHub Release 自更新当前可执行文件。
     Update {
@@ -114,7 +124,7 @@ async fn main() -> Result<()> {
             workspace,
             web_dir,
         } => {
-            let _watchdog = linux_service().spawn_watchdog();
+            let _watchdog = linux_service(DEFAULT_BIND).spawn_watchdog();
             let bind: std::net::SocketAddr = bind.parse().context("parse bind")?;
             let workspace = match workspace {
                 Some(p) => p,
@@ -128,8 +138,12 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Command::Install { dry_run, workspace } => {
-            match linux_service()
+        Command::Install {
+            dry_run,
+            workspace,
+            bind,
+        } => {
+            match linux_service(&bind)
                 .dispatch(DeployCommand::Install { dry_run, workspace })
                 .await
                 .context("安装失败")?
@@ -141,7 +155,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Update { force } => {
-            linux_service()
+            linux_service(DEFAULT_BIND)
                 .dispatch(DeployCommand::Update { force })
                 .await
                 .context("自更新失败")?;
