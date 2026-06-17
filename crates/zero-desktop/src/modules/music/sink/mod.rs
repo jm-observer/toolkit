@@ -13,7 +13,7 @@ use anyhow::Result;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
-use super::types::{ActualFormat, AudioFormat};
+use super::types::{ActualFormat, AudioFormat, OutputMode};
 
 pub mod cpal;
 #[cfg(windows)]
@@ -54,17 +54,19 @@ pub struct SinkHandle {
 
 /// 按平台与源格式建立输出链路。`buffer_frames` 是 rtrb 容量（帧），取较大值吸收解码抖动。
 ///
-/// Windows 优先尝试独占；失败回退共享 cpal。非 Windows 直接 cpal。
+/// `mode=Auto`：Windows 优先尝试独占，失败回退共享 cpal。`mode=Shared`：跳过独占，直接走
+/// 共享 cpal（设备率 + 引擎重采样；兼容独占 44.1k 异常的设备）。非 Windows 恒走 cpal。
 pub fn build_sink(
     fmt: AudioFormat,
     frames_played: FramesPlayed,
     volume: VolumeQ16,
     buffer_frames: usize,
+    mode: OutputMode,
 ) -> Result<SinkHandle> {
     let capacity = buffer_frames * fmt.channels.max(1) as usize;
 
     #[cfg(windows)]
-    {
+    if mode == OutputMode::Auto {
         match wasapi::WasapiExclusiveSink::try_build(
             fmt,
             frames_played.clone(),

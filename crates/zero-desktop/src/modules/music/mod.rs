@@ -30,7 +30,7 @@ use tracing::info;
 
 use crate::app_state::AppState;
 use engine::AudioCommand;
-use types::{PlaybackState, RepeatMode, Track};
+use types::{OutputMode, PlaybackState, RepeatMode, Track};
 
 /// 引擎与命令层共享的播放快照原子（自愈/快速读，不经引擎线程）。
 pub struct SharedPlayback {
@@ -206,6 +206,14 @@ pub fn music_set_repeat(state: State<'_, AppState>, mode: String) {
 #[tauri::command]
 pub fn music_set_shuffle(state: State<'_, AppState>, on: bool) {
     state.music.send(AudioCommand::SetShuffle(on));
+}
+
+/// 切换输出模式：`"auto"`=独占 bit-perfect 优先；`"shared"`=强制共享+重采样（兼容/音量可调）。
+#[tauri::command]
+pub fn music_set_output_mode(state: State<'_, AppState>, mode: String) {
+    state
+        .music
+        .send(AudioCommand::SetOutputMode(OutputMode::from_str(&mode)));
 }
 
 /// 拉完整播放状态快照（首屏/自愈）。经引擎线程回传，保证一致性；引擎不可达时回退原子近似。

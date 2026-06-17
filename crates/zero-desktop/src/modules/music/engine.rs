@@ -23,7 +23,7 @@ use tracing::{info, warn};
 
 use super::decode::Decoder;
 use super::sink::{build_sink, FramesPlayed, SinkHandle, VolumeQ16};
-use super::types::{ActualFormat, AudioFormat, PlayStatus, RepeatMode, Track};
+use super::types::{ActualFormat, AudioFormat, OutputMode, PlayStatus, RepeatMode, Track};
 use super::SharedPlayback;
 
 /// 控制命令（UI → 引擎，全异步立即返回）。
@@ -43,6 +43,7 @@ pub enum AudioCommand {
     SetVolume(f32),
     SetRepeat(RepeatMode),
     SetShuffle(bool),
+    SetOutputMode(OutputMode),
     Stop,
     /// 请求完整状态快照（`music_get_state` 用）：引擎填好经回传 channel 送回。
     Snapshot(crossbeam_channel::Sender<super::types::PlaybackState>),
@@ -175,6 +176,7 @@ pub fn run(ctx: EngineContext) {
         repeat: RepeatMode::Off,
         shuffle: false,
         volume: 1.0,
+        output_mode: OutputMode::Auto,
         current: None,
         frames_played: Arc::new(AtomicU32::new(0)),
         volume_q16: Arc::new(AtomicU32::new(65536)),
@@ -225,6 +227,8 @@ struct Engine {
     repeat: RepeatMode,
     shuffle: bool,
     volume: f32,
+    /// 输出模式（独占优先 / 强制共享）。
+    output_mode: OutputMode,
     current: Option<Current>,
     /// 与 sink 共享：sink 输出回调累加，引擎读出算位置。
     frames_played: FramesPlayed,
@@ -259,6 +263,7 @@ impl Engine {
                 self.shuffle = on;
                 self.publish_state();
             }
+            AudioCommand::SetOutputMode(m) => self.set_output_mode(m),
             AudioCommand::Stop => self.stop(),
             AudioCommand::Snapshot(reply) => {
                 let snap = self.snapshot();
@@ -311,6 +316,7 @@ impl Engine {
             self.frames_played.clone(),
             self.volume_q16.clone(),
             SINK_BUFFER_FRAMES,
+            self.output_mode,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -674,6 +680,25 @@ impl Engine {
         self.volume = v.clamp(0.0, 1.0);
         self.apply_volume_atomic();
         self.publish_state();
+    }
+
+    /// 切换输出模式：存模式；若正在播放，原位重建 sink 使新模式即时生效（保留播放位置/暂停态）。
+    fn set_output_mode(&mut self, mode: OutputMode) {
+        if self.output_mode == mode {
+            return;
+        }
+        self.output_mode = mode;
+        if self.current.is_some() {
+            let pos = self.position_secs();
+            let was_paused = self.status == PlayStatus::Paused;
+            self.start_current(); // 用新模式重建解码器 + sink（从曲首）
+            if pos > 0.0 {
+                self.seek(pos); // 回到原位置
+            }
+            if was_paused {
+                self.set_paused(true);
+            }
+        }
     }
 
     /// 写定点音量给 sink。独占 bit-perfect 时旁路（置 1.0），不污染原始 PCM。
