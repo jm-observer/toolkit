@@ -743,6 +743,7 @@ impl Engine {
             json!({
                 "sample_rate": actual.sample_rate,
                 "bits": actual.bits,
+                "channels": actual.channels,
                 "exclusive": actual.exclusive,
                 "resampled": actual.resampled,
             }),

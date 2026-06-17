@@ -49,6 +49,7 @@ export interface MusicProgress {
 export interface MusicFormatChanged {
   sample_rate: number
   bits: number
+  channels: number
   exclusive: boolean
   resampled: boolean
 }
