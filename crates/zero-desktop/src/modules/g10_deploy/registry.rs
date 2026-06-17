@@ -34,9 +34,29 @@ pub struct ServiceDef {
     /// 内置默认仅 toolkit-server 填，其余留空，可在 `g10-services.json` 配置。
     #[serde(default)]
     pub web_url: String,
+    /// G10 上该服务所在主机（端口探测的目标）。默认 G10 内网 IP，可在 `g10-services.json` 改。
+    #[serde(default = "default_host")]
+    pub host: String,
+    /// 该服务监听/占用的端口清单（展示 + TCP 连通性探测）。空 = 未登记端口。
+    #[serde(default)]
+    pub ports: Vec<PortInfo>,
     /// 一键部署定义。`None` → 该服务暂不支持一键部署（仅观测）。
     #[serde(default)]
     pub deploy: Option<DeployDef>,
+}
+
+/// 一个服务监听的端口 + 用途说明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub port: u16,
+    /// 用途说明（如 "HTTP API / 控制台"）。
+    #[serde(default)]
+    pub note: String,
+}
+
+/// 默认 G10 主机（与各 health_url 同一台）。
+fn default_host() -> String {
+    "192.168.0.68".into()
 }
 
 /// 一键部署：调该仓自己的 PowerShell 部署脚本（复用 deploy-g10.ps1 范式）。
@@ -61,6 +81,11 @@ pub fn builtin() -> Vec<ServiceDef> {
             health_url: "http://192.168.0.68:8788/api/web/health".into(),
             remote_service: Some("toolkit-server".into()),
             web_url: "http://192.168.0.68:8788".into(),
+            host: default_host(),
+            ports: vec![PortInfo {
+                port: 8788,
+                note: "HTTP API / Web 控制台".into(),
+            }],
             deploy: Some(DeployDef {
                 script: "deploy-g10.ps1".into(),
                 // 部署后重启 toolkit-server 用户服务（脚本默认即此 service，显式写出更清晰）。
@@ -75,6 +100,8 @@ pub fn builtin() -> Vec<ServiceDef> {
             health_url: String::new(),
             remote_service: Some("zero.service".into()),
             web_url: String::new(),
+            host: default_host(),
+            ports: vec![], // 网关端口待确认
             deploy: None, // 待接入：脚本在 scripts/ 下、远端编译形态，需单独适配
         },
         ServiceDef {
@@ -85,6 +112,11 @@ pub fn builtin() -> Vec<ServiceDef> {
             health_url: "http://192.168.0.68:28080/health".into(),
             remote_service: Some("english.service".into()),
             web_url: String::new(),
+            host: default_host(),
+            ports: vec![PortInfo {
+                port: 28080,
+                note: "HTTP API".into(),
+            }],
             deploy: None, // 待接入：部署机制不同（自更新）
         },
         ServiceDef {
@@ -95,6 +127,11 @@ pub fn builtin() -> Vec<ServiceDef> {
             health_url: "http://192.168.0.68:9100/health".into(),
             remote_service: Some("trace-hub.service".into()),
             web_url: String::new(),
+            host: default_host(),
+            ports: vec![PortInfo {
+                port: 9100,
+                note: "HTTP / 追踪后端".into(),
+            }],
             deploy: None, // 待接入：暂无 deploy-g10.ps1
         },
         ServiceDef {
@@ -105,6 +142,17 @@ pub fn builtin() -> Vec<ServiceDef> {
             health_url: "http://192.168.0.68:8080/health".into(),
             remote_service: Some("system-prompt-show.service".into()),
             web_url: String::new(),
+            host: default_host(),
+            ports: vec![
+                PortInfo {
+                    port: 9000,
+                    note: "LLM 代理".into(),
+                },
+                PortInfo {
+                    port: 8080,
+                    note: "路由 / HTTP".into(),
+                },
+            ],
             deploy: None, // 待接入：暂无 deploy-g10.ps1
         },
         ServiceDef {
@@ -115,6 +163,8 @@ pub fn builtin() -> Vec<ServiceDef> {
             health_url: String::new(),
             remote_service: Some("alarm-server.service".into()),
             web_url: String::new(),
+            host: default_host(),
+            ports: vec![], // HTTP 端口待确认
             deploy: None,
         },
     ]
