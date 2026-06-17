@@ -14,18 +14,10 @@ pub struct AppSettings {
     /// 可选 Bearer token（若 G10 server 启用了鉴权）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g10_token: Option<String>,
-    /// toolkit-server web 控制台地址——直连 toolkit-server（不走公网反代，反代只转
-    /// `/api/web/*`，控制台静态页在 `/`、`/hub` 等路径上）。例如 `http://192.168.0.68:8788`。
-    #[serde(default = "default_console_url")]
-    pub console_url: String,
 }
 
 fn default_g10_base() -> String {
     "https://www.for-memory.cloud:28080".to_string()
-}
-
-fn default_console_url() -> String {
-    "http://192.168.0.68:8788".to_string()
 }
 
 impl Default for AppSettings {
@@ -33,7 +25,6 @@ impl Default for AppSettings {
         Self {
             g10_base: default_g10_base(),
             g10_token: None,
-            console_url: default_console_url(),
         }
     }
 }

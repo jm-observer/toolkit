@@ -105,7 +105,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             // 通用
-            shared::console::open_toolkit_console,
+            shared::console::open_url,
             // English 模块
             modules::english::english_ping,
             modules::english::english_get_g10_base,

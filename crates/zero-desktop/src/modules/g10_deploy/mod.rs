@@ -74,8 +74,11 @@ pub struct ProbeResult {
     pub reachable: bool,
     /// 健康响应里的 `status` 字段（如 "ok"）。
     pub status: Option<String>,
-    /// 健康响应里的 `version` 字段 = 远端**正在运行**的版本。
+    /// 健康响应里的 `version` 字段 = 远端**正在运行**的版本（语义版本）。
     pub remote_version: Option<String>,
+    /// 健康响应里的 `commit` 字段 = 远端**编译版**的 git 短哈希（缺则 None）。
+    #[serde(default)]
+    pub remote_commit: Option<String>,
     pub latency_ms: Option<u64>,
     pub error: Option<String>,
 }
@@ -93,6 +96,7 @@ pub async fn g10_probe_service(
             reachable: false,
             status: None,
             remote_version: None,
+            remote_commit: None,
             latency_ms: None,
             error: Some("未配置健康端点".into()),
         });
@@ -114,6 +118,7 @@ pub async fn g10_probe_service(
                 reachable: true,
                 status: v.get("status").and_then(|s| s.as_str()).map(String::from),
                 remote_version: v.get("version").and_then(|s| s.as_str()).map(String::from),
+                remote_commit: v.get("commit").and_then(|s| s.as_str()).map(String::from),
                 latency_ms: Some(latency_ms),
                 error: None,
             },
@@ -123,6 +128,7 @@ pub async fn g10_probe_service(
                 reachable: true,
                 status: None,
                 remote_version: None,
+                remote_commit: None,
                 latency_ms: Some(latency_ms),
                 error: Some(format!("健康响应解析失败：{e}")),
             },
@@ -132,6 +138,7 @@ pub async fn g10_probe_service(
             reachable: false,
             status: None,
             remote_version: None,
+            remote_commit: None,
             latency_ms: Some(latency_ms),
             error: Some(format!("HTTP {}", r.status())),
         },
@@ -140,6 +147,7 @@ pub async fn g10_probe_service(
             reachable: false,
             status: None,
             remote_version: None,
+            remote_commit: None,
             latency_ms: None,
             error: Some(err(e)),
         },
