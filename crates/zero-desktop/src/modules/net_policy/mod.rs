@@ -21,12 +21,15 @@ use config::{NetPolicySettings, Rule, RuleSet};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::State;
 
 /// net-policy 模块状态。
 pub struct NetPolicyState {
     pub workspace: PathBuf,
     rt: Mutex<Runtime>,
+    status_cache: Mutex<Option<StatusCache>>,
+    status_compute: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -38,15 +41,23 @@ struct Runtime {
     secret: Option<String>,
 }
 
+struct StatusCache {
+    at: Instant,
+    value: NetPolicyStatus,
+}
+
 /// 新防火墙白名单模型（`Program=mihomo.exe`，§0.10.1）是否已在新模型下重跑 VP-08/09/10 通过。
 /// 在重新真机验证通过前为 `false`——`protected` 仅算"实验保护"，前端须如实标注（P0-2）。
 const FIREWALL_MODEL_VALIDATED: bool = false;
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 impl NetPolicyState {
     pub fn new(workspace: PathBuf) -> Self {
         Self {
             workspace,
             rt: Mutex::new(Runtime::default()),
+            status_cache: Mutex::new(None),
+            status_compute: Mutex::new(()),
         }
     }
 }
@@ -92,7 +103,7 @@ pub fn gen_artifacts(workspace: &std::path::Path) -> Result<(String, String)> {
 
 // ============ 状态 ============
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct NetPolicyStatus {
     pub platform_supported: bool,
     pub wg_configured: bool,
@@ -109,6 +120,49 @@ pub struct NetPolicyStatus {
     /// 当前防火墙白名单模型是否已真机验证（P0-2）。false=实验保护，不能宣称 fail-closed。
     pub protection_validated: bool,
     pub firewall: Option<firewall::FirewallStatus>,
+}
+
+fn cached_status(np: &NetPolicyState) -> Option<NetPolicyStatus> {
+    let cache = np.status_cache.lock().unwrap();
+    cache
+        .as_ref()
+        .filter(|c| c.at.elapsed() < STATUS_CACHE_TTL)
+        .map(|c| c.value.clone())
+}
+
+fn store_status_cache(np: &NetPolicyState, status: &NetPolicyStatus) {
+    let mut cache = np.status_cache.lock().unwrap();
+    *cache = Some(StatusCache {
+        at: Instant::now(),
+        value: status.clone(),
+    });
+}
+
+fn invalidate_status_cache(np: &NetPolicyState) {
+    let mut cache = np.status_cache.lock().unwrap();
+    *cache = None;
+}
+
+fn compute_status_cached(np: &NetPolicyState) -> NetPolicyStatus {
+    if let Some(status) = cached_status(np) {
+        return status;
+    }
+
+    let _guard = np.status_compute.lock().unwrap();
+    if let Some(status) = cached_status(np) {
+        return status;
+    }
+
+    let status = compute_status(np);
+    store_status_cache(np, &status);
+    status
+}
+
+fn compute_status_fresh(np: &NetPolicyState) -> NetPolicyStatus {
+    let _guard = np.status_compute.lock().unwrap();
+    let status = compute_status(np);
+    store_status_cache(np, &status);
+    status
 }
 
 /// 计算当前状态快照。**含多次 PowerShell 冷启动**（firewall::status / engine::running /
@@ -164,7 +218,7 @@ fn compute_status(np: &NetPolicyState) -> NetPolicyStatus {
 #[tauri::command]
 pub async fn net_policy_get_status(state: State<'_, AppState>) -> Result<NetPolicyStatus, String> {
     let np = state.net_policy.clone();
-    tokio::task::spawn_blocking(move || compute_status(&np))
+    tokio::task::spawn_blocking(move || compute_status_cached(&np))
         .await
         .map_err(err)
 }
@@ -316,6 +370,7 @@ pub async fn net_policy_apply(
         return Err("net-policy 仅支持 Windows".into());
     }
     let np = state.net_policy.clone();
+    invalidate_status_cache(&np);
     let ws = np.workspace.clone();
     let settings = config::load_settings(&ws);
     let rules = config::load_rules(&ws);
@@ -476,7 +531,7 @@ pub async fn net_policy_apply(
     .map_err(err)?;
 
     let np = state.net_policy.clone();
-    tokio::task::spawn_blocking(move || compute_status(&np))
+    tokio::task::spawn_blocking(move || compute_status_fresh(&np))
         .await
         .map_err(err)
 }
@@ -492,6 +547,7 @@ pub async fn net_policy_emergency_stop(
         return Err("net-policy 仅支持 Windows".into());
     }
     let np = state.net_policy.clone();
+    invalidate_status_cache(&np);
     let ws = np.workspace.clone();
     let (pid, secret) = {
         let rt = np.rt.lock().unwrap();
@@ -516,7 +572,7 @@ pub async fn net_policy_emergency_stop(
         rt.mihomo_pid = None;
         rt.secret = None;
     }
-    tokio::task::spawn_blocking(move || compute_status(&np))
+    tokio::task::spawn_blocking(move || compute_status_fresh(&np))
         .await
         .map_err(err)
 }

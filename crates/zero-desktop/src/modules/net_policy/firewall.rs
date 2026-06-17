@@ -25,7 +25,7 @@ const GROUP: &str = "NetPolicy-KillSwitch";
 /// mihomo TUN 适配器名（gvisor wintun，固定 "Meta"）。
 const TUN_ALIAS: &str = "Meta";
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FirewallStatus {
     pub default_outbound: String,
     pub rule_count: u32,
@@ -157,6 +157,20 @@ if(Test-Path $state){{
 
 /// 查询 kill-switch 当前状态。
 pub fn status() -> Result<FirewallStatus> {
+    native_status().or_else(|_| powershell_status())
+}
+
+fn native_status() -> Result<FirewallStatus> {
+    let default_outbound = super::win::firewall_default_outbound_domain()?;
+    let rule_count = super::win::firewall_rule_group_count(GROUP)?;
+    Ok(FirewallStatus {
+        active: default_outbound.eq_ignore_ascii_case("Block"),
+        default_outbound,
+        rule_count,
+    })
+}
+
+fn powershell_status() -> Result<FirewallStatus> {
     let out = run_ps(&format!(
         r#"$o=(Get-NetFirewallProfile -Profile Domain).DefaultOutboundAction
 $c=(Get-NetFirewallRule -Group '{GROUP}' -ErrorAction SilentlyContinue | Measure-Object).Count

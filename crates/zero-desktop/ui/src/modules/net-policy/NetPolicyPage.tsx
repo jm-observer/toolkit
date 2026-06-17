@@ -84,32 +84,45 @@ export default function NetPolicyPage() {
 
   const [newRule, setNewRule] = useState<Rule>({ kind: 'process-name', value: '', route: 'direct' })
   const wgFileRef = useRef<HTMLInputElement>(null)
+  const statusInFlightRef = useRef<Promise<void> | null>(null)
 
   const flash = (kind: 'ok' | 'err', text: string) => {
     setMsg({ kind, text })
     setTimeout(() => setMsg(null), 5000)
   }
 
+  const loadStatus = useCallback(() => {
+    if (statusInFlightRef.current) return statusInFlightRef.current
+
+    const req = NetPolicyAPI.getStatus()
+      .then(setStatus)
+      .catch(() => {})
+      .finally(() => {
+        statusInFlightRef.current = null
+      })
+    statusInFlightRef.current = req
+    return req
+  }, [])
+
   // 快轮询数据（便宜的本地查询）：status + connections。出口 IP / DNS 等重探测不在此。
   const pollFast = useCallback(async () => {
     try {
-      const [s, c] = await Promise.all([NetPolicyAPI.getStatus(), NetPolicyAPI.getConnections()])
-      setStatus(s)
+      const [, c] = await Promise.all([loadStatus(), NetPolicyAPI.getConnections()])
       setConns(c)
     } catch {
       // 轮询失败不弹 toast（避免刷屏）；保留上次值。
     }
-  }, [])
+  }, [loadStatus])
 
   // 完整加载（含 settings / rules，动作后用）。
   // **各请求独立 setState、不再 Promise.all 整体等待**：便宜的 settings/rules（读文件）先到先显，
   // 慢的 status（~1s 的 PS 探测）/conns 后到补齐。否则首屏全景图被最慢的 status 拖住，无法秒出。
   const refresh = useCallback(() => {
-    void NetPolicyAPI.getStatus().then(setStatus).catch(() => {})
+    void loadStatus()
     void NetPolicyAPI.getConnections().then(setConns).catch(() => {})
     void NetPolicyAPI.getSettings().then(setSettings).catch(() => {})
     void NetPolicyAPI.listRules().then(setRules).catch(() => {})
-  }, [])
+  }, [loadStatus])
 
   useEffect(() => { void refresh() }, [refresh])
 

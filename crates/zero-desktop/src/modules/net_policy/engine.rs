@@ -10,7 +10,10 @@
 use super::config::{mihomo_config_path, net_policy_dir, NetPolicySettings, RuleSet};
 use super::win::run_ps;
 use anyhow::{bail, Context, Result};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// mihomo 外部控制器端口（loopback）。
 pub const CONTROLLER: &str = "127.0.0.1:9090";
@@ -196,20 +199,51 @@ if(-not $gone){{ throw 'TUN(Meta) 未在超时内优雅拆除——拒绝强杀�
 
 /// mihomo 是否在运行（查外部控制器，带鉴权）。
 pub fn running(secret: &str) -> bool {
-    let h = auth_header(secret);
-    run_ps(&format!(
-        "$h={h}; try{{ Invoke-RestMethod 'http://{CONTROLLER}/version' -Headers $h -TimeoutSec 3 | Out-Null; 'yes' }}catch{{ 'no' }}"
-    ))
-    .map(|s| s.trim() == "yes")
-    .unwrap_or(false)
+    controller_get_ok("/version", secret).unwrap_or_else(|_| {
+        let h = auth_header(secret);
+        run_ps(&format!(
+            "$h={h}; try{{ Invoke-RestMethod 'http://{CONTROLLER}/version' -Headers $h -TimeoutSec 3 | Out-Null; 'yes' }}catch{{ 'no' }}"
+        ))
+        .map(|s| s.trim() == "yes")
+        .unwrap_or(false)
+    })
 }
 
 /// mihomo TUN（Meta 适配器）是否已起栈并 Up（P2：区分"controller 活着但 TUN 没起/隧道未连通"
 /// 与"真正受保护"）。controller 可达 ≠ TUN 起栈（起栈可能失败而进程/控制器仍在）。
 pub fn tun_up() -> bool {
-    run_ps(
-        "try{ if((Get-NetAdapter -Name 'Meta' -ErrorAction Stop).Status -eq 'Up'){'yes'}else{'no'} }catch{ 'no' }",
-    )
-    .map(|s| s.trim() == "yes")
-    .unwrap_or(false)
+    super::win::adapter_up("Meta").unwrap_or_else(|_| {
+        run_ps(
+            "try{ if((Get-NetAdapter -Name 'Meta' -ErrorAction Stop).Status -eq 'Up'){'yes'}else{'no'} }catch{ 'no' }",
+        )
+        .map(|s| s.trim() == "yes")
+        .unwrap_or(false)
+    })
+}
+
+fn controller_get_ok(path: &str, secret: &str) -> Result<bool> {
+    let addr: SocketAddr = CONTROLLER.parse().context("parse mihomo controller addr")?;
+    let timeout = Duration::from_millis(900);
+    let mut stream =
+        TcpStream::connect_timeout(&addr, timeout).context("connect mihomo controller")?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+
+    let auth = if secret.is_empty() {
+        String::new()
+    } else {
+        format!("Authorization: Bearer {secret}\r\n")
+    };
+    let req =
+        format!("GET {path} HTTP/1.1\r\nHost: {CONTROLLER}\r\n{auth}Connection: close\r\n\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .context("write mihomo controller request")?;
+
+    let mut buf = [0u8; 128];
+    let n = stream
+        .read(&mut buf)
+        .context("read mihomo controller response")?;
+    let head = std::str::from_utf8(&buf[..n]).unwrap_or_default();
+    Ok(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200"))
 }
