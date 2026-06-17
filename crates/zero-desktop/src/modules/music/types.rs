@@ -43,6 +43,26 @@ pub struct PlaybackState {
     pub shuffle: bool,
 }
 
+/// 音频输出模式。
+///
+/// `Auto`=独占 bit-perfect 优先（协商失败回退共享）；`Shared`=强制共享模式 + 重采样
+/// （兼容：部分设备锁 48k 时独占 44.1k 会加速/杂音，共享模式重采样到设备率可正常播放，
+/// 且软件音量生效）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    Auto,
+    Shared,
+}
+
+impl OutputMode {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "shared" => OutputMode::Shared,
+            _ => OutputMode::Auto,
+        }
+    }
+}
+
 /// 循环模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatMode {

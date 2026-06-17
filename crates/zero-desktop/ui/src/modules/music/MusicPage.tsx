@@ -6,11 +6,21 @@
  * 复用 chat-summary / english 的 Tailwind 卡片风格。
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { Store } from '@tauri-apps/plugin-store'
 import { FolderOpen, Music, Play, RefreshCw, Search, Volume2, XCircle } from 'lucide-react'
 import { usePlayer } from './PlayerContext'
-import { musicPickFolder, musicScan, type Track } from './api/tauri-client'
+import { musicPickFolder, musicScan, type OutputMode, type Track } from './api/tauri-client'
+
+// 曲库持久化：扫描出的 { folder, tracks }，启动直接填充，无需重扫。
+const LIBRARY_STORE_FILE = 'music-library.json'
+const KEY_LIBRARY = 'library'
+
+interface PersistedLibrary {
+  folder: string
+  tracks: Track[]
+}
 
 function fmtTime(secs: number): string {
   if (!Number.isFinite(secs) || secs < 0) secs = 0
@@ -71,19 +81,35 @@ function FormatBadge() {
 }
 
 export default function MusicPage() {
-  const { folder, setFolder, play, track: current } = usePlayer()
+  const { folder, setFolder, play, track: current, outputMode, setOutputMode } = usePlayer()
 
   const [tracks, setTracks] = useState<Track[]>([])
   const [query, setQuery] = useState('')
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const libStoreRef = useRef<Store | null>(null)
+
+  // 持久化曲库到 music-library.json（folder + tracks）。
+  const persistLibrary = async (dir: string, list: Track[]) => {
+    try {
+      const store = libStoreRef.current ?? (await Store.load(LIBRARY_STORE_FILE))
+      libStoreRef.current = store
+      await store.set(KEY_LIBRARY, { folder: dir, tracks: list } as PersistedLibrary)
+      await store.save()
+    } catch (e) {
+      console.error('[Music] 曲库持久化失败:', e)
+    }
+  }
+
+  // 扫描（手动刷新 / 选新文件夹）→ 覆盖内存 + 持久化存储。
   const scan = async (dir: string) => {
     setScanning(true)
     setError(null)
     try {
       const list = await musicScan(dir)
       setTracks(list)
+      void persistLibrary(dir, list)
     } catch (e: any) {
       setError(typeof e === 'string' ? e : (e?.message ?? String(e)))
       setTracks([])
@@ -92,11 +118,30 @@ export default function MusicPage() {
     }
   }
 
-  // 进入页面时若已有持久化目录，自动扫一遍。
+  // 启动：从 music-library.json 读出上次曲库，直接填充（无需重扫）。
   useEffect(() => {
-    if (folder) void scan(folder)
+    let mounted = true
+    void (async () => {
+      try {
+        const store = await Store.load(LIBRARY_STORE_FILE)
+        libStoreRef.current = store
+        const lib = await store.get<PersistedLibrary>(KEY_LIBRARY)
+        if (!mounted) return
+        if (lib && Array.isArray(lib.tracks)) {
+          setTracks(lib.tracks)
+          // folder 由 PlayerContext 自身持久化；若缺失则回填，便于「重新扫描」可用。
+          if (lib.folder && !folder) setFolder(lib.folder)
+        }
+      } catch (e) {
+        console.error('[Music] 曲库加载失败:', e)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+    // 仅启动加载一次。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder])
+  }, [])
 
   const pickFolder = async () => {
     try {
@@ -156,6 +201,30 @@ export default function MusicPage() {
           </button>
           <span className="truncate text-xs text-gray-500 dark:text-gray-400" title={folder ?? ''}>
             {folder ?? '未选择曲库文件夹'}
+          </span>
+        </div>
+
+        {/* 输出模式选择器 */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor="music-output-mode"
+              className="text-xs font-medium text-gray-600 dark:text-gray-300"
+            >
+              输出：
+            </label>
+            <select
+              id="music-output-mode"
+              value={outputMode}
+              onChange={e => setOutputMode(e.target.value as OutputMode)}
+              className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 outline-none focus:border-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+            >
+              <option value="auto">自动(独占)</option>
+              <option value="shared">共享(兼容)</option>
+            </select>
+          </div>
+          <span className="text-[10px] leading-tight text-gray-400">
+            44.1kHz 在部分设备独占会加速失真，可切「共享(兼容)」（重采样、音量可调）。
           </span>
         </div>
       </div>

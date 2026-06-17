@@ -22,6 +22,13 @@ export interface Track {
 export type PlaybackStatus = 'playing' | 'paused' | 'stopped'
 export type RepeatMode = 'off' | 'one' | 'all'
 
+/**
+ * 输出模式：
+ * - `auto`   独占 bit-perfect 优先（现状），最高保真但部分设备 44.1kHz 会加速/杂音；
+ * - `shared` 强制共享模式 + 重采样，兼容性好、音量可调。
+ */
+export type OutputMode = 'auto' | 'shared'
+
 export interface PlaybackState {
   status: PlaybackStatus
   index: number
@@ -119,6 +126,10 @@ export function musicSetShuffle(on: boolean): Promise<void> {
 
 export function musicGetState(): Promise<PlaybackState> {
   return invoke<PlaybackState>('music_get_state')
+}
+
+export function setOutputMode(mode: OutputMode): Promise<void> {
+  return invoke('music_set_output_mode', { mode })
 }
 
 // ── 事件订阅（薄封装，返回 UnlistenFn） ──────────────────────────────────────

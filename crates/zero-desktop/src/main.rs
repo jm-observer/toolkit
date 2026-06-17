@@ -203,6 +203,7 @@ fn run_gui(workspace: PathBuf) -> Result<()> {
             modules::music::music_set_volume,
             modules::music::music_set_repeat,
             modules::music::music_set_shuffle,
+            modules::music::music_set_output_mode,
             modules::music::music_get_state,
         ])
         .setup(move |app| {

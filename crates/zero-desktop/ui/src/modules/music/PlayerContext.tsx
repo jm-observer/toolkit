@@ -42,7 +42,9 @@ import {
   onMusicProgress,
   onMusicStateChanged,
   onMusicTrackChanged,
+  setOutputMode as invokeSetOutputMode,
   type MusicFormatChanged,
+  type OutputMode,
   type PlaybackState,
   type PlaybackStatus,
   type RepeatMode,
@@ -54,6 +56,7 @@ const KEY_FOLDER = 'folder'
 const KEY_VOLUME = 'volume'
 const KEY_REPEAT = 'repeat'
 const KEY_SHUFFLE = 'shuffle'
+const KEY_OUTPUT_MODE = 'output_mode'
 
 interface PlayerContextValue {
   // 状态（事件驱动 + 首屏拉取）
@@ -71,6 +74,10 @@ interface PlayerContextValue {
   // 持久化的已选目录（曲库根）
   folder: string | null
   setFolder: (dir: string | null) => void
+
+  // 输出模式（auto=独占 bit-perfect / shared=共享兼容），持久化 + 同步后端
+  outputMode: OutputMode
+  setOutputMode: (mode: OutputMode) => void
 
   // 控制（全 invoke）
   play: (paths: string[], start: number) => Promise<void>
@@ -106,6 +113,7 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
   const [format, setFormat] = useState<MusicFormatChanged | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [folder, setFolderState] = useState<string | null>(null)
+  const [outputMode, setOutputModeState] = useState<OutputMode>('auto')
 
   const storeRef = useRef<Store | null>(null)
 
@@ -135,11 +143,18 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
         const v = await store.get<number>(KEY_VOLUME)
         const r = await store.get<RepeatMode>(KEY_REPEAT)
         const sh = await store.get<boolean>(KEY_SHUFFLE)
+        const om = await store.get<OutputMode>(KEY_OUTPUT_MODE)
         if (!mounted) return
         if (f) setFolderState(f)
         if (typeof v === 'number') setVolumeState(v)
         if (r === 'off' || r === 'one' || r === 'all') setRepeatState(r)
         if (typeof sh === 'boolean') setShuffleState(sh)
+        // 输出模式：读出持久值（默认 auto）→ 同步给后端一次
+        const mode: OutputMode = om === 'shared' ? 'shared' : 'auto'
+        setOutputModeState(mode)
+        void invokeSetOutputMode(mode).catch(e =>
+          console.error('[MusicPlayer] 同步输出模式失败:', e),
+        )
       } catch (e) {
         console.error('[MusicPlayer] store 加载失败:', e)
       }
@@ -226,6 +241,18 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
     [persist],
   )
 
+  // ── 输出模式 ─────────────────────────────────────────────────────────────────
+  const setOutputMode = useCallback(
+    (mode: OutputMode) => {
+      setOutputModeState(mode)
+      void persist(KEY_OUTPUT_MODE, mode)
+      void invokeSetOutputMode(mode).catch(e =>
+        console.error('[MusicPlayer] 设置输出模式失败:', e),
+      )
+    },
+    [persist],
+  )
+
   // ── 控制方法（全 invoke，乐观更新本地控件态再以后端事件为准） ───────────────
   const play = useCallback((paths: string[], start: number) => musicPlayQueue(paths, start), [])
   const pause = useCallback(() => musicPause(), [])
@@ -280,6 +307,8 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
       error,
       folder,
       setFolder,
+      outputMode,
+      setOutputMode,
       play,
       pause,
       resume,
@@ -305,6 +334,8 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
       error,
       folder,
       setFolder,
+      outputMode,
+      setOutputMode,
       play,
       pause,
       resume,
