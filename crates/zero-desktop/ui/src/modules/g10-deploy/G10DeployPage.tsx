@@ -7,6 +7,7 @@ import {
   onDeployLog,
   type DeployLog,
   type LocalVersion,
+  type PortsResult,
   type ProbeResult,
   type ServiceDef,
 } from './api/tauri-client'
@@ -17,6 +18,7 @@ interface Row {
   def: ServiceDef
   probe?: ProbeResult
   local?: LocalVersion
+  ports?: PortsResult
   probing: boolean
 }
 
@@ -50,6 +52,43 @@ function StatusDot({ probe, configured }: { probe?: ProbeResult; configured: boo
   return <CircleDot size={14} className={cls} aria-label={title} />
 }
 
+/** 端口清单 + 实时 TCP 连通性：绿=在监听 / 红=连不上 / 灰=未探测。 */
+function PortChips({ def, ports, probing }: { def: ServiceDef; ports?: PortsResult; probing: boolean }) {
+  if (def.ports.length === 0) {
+    return <span className="text-xs text-gray-400">端口未登记</span>
+  }
+  const statusOf = (port: number) => ports?.ports.find(p => p.port === port)
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {def.ports.map(p => {
+        const st = statusOf(p.port)
+        let dot = 'bg-gray-300 dark:bg-gray-600'
+        let title = probing ? '探测中…' : '未探测'
+        if (st) {
+          if (st.open) {
+            dot = 'bg-green-500'
+            title = `在监听 ${st.latency_ms ?? ''}ms`
+          } else {
+            dot = 'bg-red-500'
+            title = st.error ?? '连不上'
+          }
+        }
+        return (
+          <span
+            key={p.port}
+            title={`${def.host}:${p.port}${p.note ? ` · ${p.note}` : ''} — ${title}`}
+            className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-xs dark:border-gray-700 dark:bg-gray-800"
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+            <span className="font-mono text-gray-700 dark:text-gray-200">:{p.port}</span>
+            {p.note && <span className="text-gray-400">{p.note}</span>}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function G10DeployPage() {
   const [rows, setRows] = useState<Row[]>([])
   const [warning, setWarning] = useState<string | null>(null)
@@ -64,7 +103,7 @@ export default function G10DeployPage() {
   // ── 加载清单 + 逐个探测/取本地版本 ────────────────────────────────────────
   const refreshOne = useCallback(async (name: string) => {
     setRows(prev => prev.map(r => (r.def.name === name ? { ...r, probing: true } : r)))
-    const [probe, local] = await Promise.all([
+    const [probe, local, ports] = await Promise.all([
       G10DeployAPI.probe(name).catch(e => ({
         name, reachable: false, status: null, remote_version: null,
         latency_ms: null, error: String(e),
@@ -72,9 +111,10 @@ export default function G10DeployPage() {
       G10DeployAPI.localVersion(name).catch(e => ({
         name, git_hash: null, dirty: false, error: String(e),
       } as LocalVersion)),
+      G10DeployAPI.probePorts(name).catch(() => undefined),
     ])
     setRows(prev =>
-      prev.map(r => (r.def.name === name ? { ...r, probe, local, probing: false } : r)),
+      prev.map(r => (r.def.name === name ? { ...r, probe, local, ports, probing: false } : r)),
     )
   }, [])
 
@@ -174,7 +214,7 @@ export default function G10DeployPage() {
 
       {/* 服务卡片列表 */}
       <div className="space-y-3">
-        {rows.map(({ def, probe, local, probing }) => {
+        {rows.map(({ def, probe, local, ports, probing }) => {
           const configured = def.health_url.length > 0
           const canDeploy = def.deploy != null
           const hint = driftHint(probe, local)
@@ -223,6 +263,12 @@ export default function G10DeployPage() {
                     {probe?.error && !probe.reachable && (
                       <span className="text-red-500">{probe.error}</span>
                     )}
+                  </div>
+
+                  {/* 端口清单 + 实时连通性 */}
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-xs text-gray-400">端口</span>
+                    <PortChips def={def} ports={ports} probing={probing} />
                   </div>
                 </div>
 

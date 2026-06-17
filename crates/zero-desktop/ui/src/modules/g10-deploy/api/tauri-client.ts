@@ -8,6 +8,11 @@ export interface DeployDef {
   args: string[]
 }
 
+export interface PortInfo {
+  port: number
+  note: string
+}
+
 export interface ServiceDef {
   name: string
   label: string
@@ -17,7 +22,26 @@ export interface ServiceDef {
   remote_service: string | null
   /** 服务 web 后台地址；空串 = 无后台。 */
   web_url: string
+  /** G10 上该服务所在主机（端口探测目标）。 */
+  host: string
+  /** 该服务监听/占用的端口清单。 */
+  ports: PortInfo[]
   deploy: DeployDef | null
+}
+
+export interface PortStatus {
+  port: number
+  note: string
+  /** TCP 能否连上（在监听）。 */
+  open: boolean
+  latency_ms: number | null
+  error: string | null
+}
+
+export interface PortsResult {
+  name: string
+  host: string
+  ports: PortStatus[]
 }
 
 export interface ServiceList {
@@ -60,6 +84,7 @@ export interface DeployDone {
 export const G10DeployAPI = {
   listServices: () => invoke<ServiceList>('g10_list_services'),
   probe: (name: string) => invoke<ProbeResult>('g10_probe_service', { name }),
+  probePorts: (name: string) => invoke<PortsResult>('g10_probe_ports', { name }),
   localVersion: (name: string) => invoke<LocalVersion>('g10_local_version', { name }),
   isDeploying: () => invoke<boolean>('g10_is_deploying'),
   deploy: (name: string) => invoke<void>('g10_deploy', { name }),

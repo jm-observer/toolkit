@@ -155,6 +155,74 @@ pub async fn g10_probe_service(
     Ok(result)
 }
 
+// ============ 端口连通性（TCP 探测各服务登记端口是否在监听） ============
+
+#[derive(Serialize)]
+pub struct PortStatus {
+    pub port: u16,
+    pub note: String,
+    /// TCP 能否连上（在监听）。
+    pub open: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PortsResult {
+    pub name: String,
+    pub host: String,
+    pub ports: Vec<PortStatus>,
+}
+
+/// 单端口 TCP 连接超时。
+const PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// TCP 探测某服务在 G10 主机上登记的各端口是否在监听（仅 connect，不发数据）。
+/// 端口未登记则返回空列表。用 `std::net::TcpStream::connect_timeout`（spawn_blocking），
+/// 无需 tokio net feature。
+#[tauri::command]
+pub async fn g10_probe_ports(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<PortsResult, String> {
+    let svc = find_service(&state.g10_deploy, &name)?;
+    let host = svc.host.clone();
+    let ports = svc.ports.clone();
+    let probed = tokio::task::spawn_blocking(move || {
+        use std::net::{TcpStream, ToSocketAddrs};
+        ports
+            .into_iter()
+            .map(|p| {
+                let started = std::time::Instant::now();
+                let (open, error) = match (host.as_str(), p.port).to_socket_addrs() {
+                    Ok(mut addrs) => match addrs.next() {
+                        Some(addr) => match TcpStream::connect_timeout(&addr, PORT_PROBE_TIMEOUT) {
+                            Ok(_) => (true, None),
+                            Err(e) => (false, Some(e.to_string())),
+                        },
+                        None => (false, Some("无法解析地址".into())),
+                    },
+                    Err(e) => (false, Some(format!("解析 {host} 失败：{e}"))),
+                };
+                PortStatus {
+                    port: p.port,
+                    note: p.note,
+                    open,
+                    latency_ms: open.then(|| started.elapsed().as_millis() as u64),
+                    error,
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(err)?;
+    Ok(PortsResult {
+        name,
+        host: svc.host,
+        ports: probed,
+    })
+}
+
 // ============ 本地编译版（git 短哈希 + 是否有未提交改动） ============
 
 #[derive(Serialize)]
