@@ -47,7 +47,7 @@ impl WasapiExclusiveSink {
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(capacity.max(4096));
 
         let stop = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(true));
 
         // 初始化结果回传通道：Ok(实际格式) 或 Err(协商失败原因)。
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<ActualFormat, String>>();

@@ -13,7 +13,7 @@ use anyhow::Result;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
-use super::types::{ActualFormat, AudioFormat, OutputMode};
+use super::types::{ActualFormat, AudioFormat, AudioKind, OutputMode};
 
 pub mod cpal;
 #[cfg(windows)]
@@ -54,8 +54,8 @@ pub struct SinkHandle {
 
 /// 按平台与源格式建立输出链路。`buffer_frames` 是 rtrb 容量（帧），取较大值吸收解码抖动。
 ///
-/// `mode=Auto`：Windows 优先尝试独占，失败回退共享 cpal。`mode=Shared`：跳过独占，直接走
-/// 共享 cpal（设备率 + 引擎重采样；兼容独占 44.1k 异常的设备）。非 Windows 恒走 cpal。
+/// `mode=Auto`：Windows 优先尝试独占，失败回退共享 cpal；FLAC/高位深源走共享 float 优先策略。
+/// `mode=Shared`：跳过独占，直接走共享 cpal。非 Windows 恒走 cpal。
 pub fn build_sink(
     fmt: AudioFormat,
     frames_played: FramesPlayed,
@@ -66,7 +66,7 @@ pub fn build_sink(
     let capacity = buffer_frames * fmt.channels.max(1) as usize;
 
     #[cfg(windows)]
-    if mode == OutputMode::Auto {
+    if mode == OutputMode::Auto && !prefers_shared_float(fmt) {
         match wasapi::WasapiExclusiveSink::try_build(
             fmt,
             frames_played.clone(),
@@ -81,4 +81,8 @@ pub fn build_sink(
     }
 
     cpal::CpalSink::build(fmt, frames_played, volume, capacity)
+}
+
+fn prefers_shared_float(fmt: AudioFormat) -> bool {
+    fmt.kind == AudioKind::Flac || fmt.bits > 16
 }

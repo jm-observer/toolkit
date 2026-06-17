@@ -89,33 +89,66 @@ fn stem_title(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+fn split_artist_title_from_stem(path: &Path) -> (String, String) {
+    let stem = stem_title(path);
+    if let Some((artist, title)) = stem.split_once(" - ") {
+        let artist = artist.trim();
+        let title = title.trim();
+        if !artist.is_empty() && !title.is_empty() {
+            return (artist.to_string(), title.to_string());
+        }
+    }
+    (String::new(), stem)
+}
+
+fn parent_album(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+fn looks_mojibake(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let suspicious = trimmed
+        .chars()
+        .filter(|&c| matches!(c, '¡'..='ÿ' | '�'))
+        .count();
+    suspicious >= 2 && suspicious * 3 >= trimmed.chars().count()
+}
+
+fn clean_tag_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| !looks_mojibake(s))
+}
+
 /// 读取单个文件的元数据，构造 [`Track`]。失败（无法解析标签）时退化为仅含路径/文件名的 Track。
 fn read_track(path: &Path, covers_dir: &Path) -> Track {
     let tagged = Probe::open(path).ok().and_then(|p| p.read().ok());
+    let (fallback_artist, fallback_title) = split_artist_title_from_stem(path);
 
     let (title, artist, album, cover_path) = match &tagged {
         Some(tf) => {
             let tag = tf.primary_tag().or_else(|| tf.first_tag());
-            let title = tag
-                .and_then(|t| t.title())
-                .map(|c| c.to_string())
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| stem_title(path));
-            let artist = tag
-                .and_then(|t| t.artist())
-                .map(|c| c.to_string())
-                .unwrap_or_default();
-            let album = tag
-                .and_then(|t| t.album())
-                .map(|c| c.to_string())
-                .unwrap_or_default();
+            let title = clean_tag_text(tag.and_then(|t| t.title()).map(|c| c.to_string()))
+                .unwrap_or_else(|| fallback_title.clone());
+            let artist = clean_tag_text(tag.and_then(|t| t.artist()).map(|c| c.to_string()))
+                .unwrap_or_else(|| fallback_artist.clone());
+            let album = clean_tag_text(tag.and_then(|t| t.album()).map(|c| c.to_string()))
+                .unwrap_or_else(|| parent_album(path));
             let cover = tag
                 .and_then(|t| t.pictures().first())
                 .and_then(|pic| dump_cover(pic, covers_dir))
                 .map(|p| p.to_string_lossy().into_owned());
             (title, artist, album, cover)
         }
-        None => (stem_title(path), String::new(), String::new(), None),
+        None => (fallback_title, fallback_artist, parent_album(path), None),
     };
 
     let duration_secs = tagged

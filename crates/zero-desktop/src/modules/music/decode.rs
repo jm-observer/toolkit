@@ -19,7 +19,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, Timestamp};
 
-use super::types::AudioFormat;
+use super::types::{AudioFormat, AudioKind};
 
 /// 单文件解码器，封装 format reader + audio decoder + 选中音轨。
 pub struct Decoder {
@@ -52,9 +52,11 @@ impl Decoder {
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if let Some(ext) = ext {
             hint.with_extension(ext);
         }
+        let kind = AudioKind::from_extension(ext);
 
         let format = symphonia::default::get_probe()
             .probe(
@@ -106,6 +108,7 @@ impl Decoder {
                 sample_rate,
                 channels,
                 bits,
+                kind,
             },
             scratch: Vec::new(),
         })

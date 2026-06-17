@@ -51,6 +51,8 @@ pub enum AudioCommand {
 
 /// rtrb 容量（帧）。约 1 秒 @ 48k 的缓冲，吸收解码抖动并支持 seek 快速清空。
 const SINK_BUFFER_FRAMES: usize = 48_000;
+/// 新建输出流后先预填一小段，避免回调刚启动时连续欠载插静音造成爆裂声。
+const PREFILL_FRAMES: usize = 12_000;
 /// 进度事件节流间隔。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 /// 控制循环每轮无事可做时的让出睡眠。
@@ -74,6 +76,9 @@ struct Current {
     frames_base: u32,
     /// producer 的总容量（空时的可写 slots 数），用于判定缓冲是否已排空。
     producer_capacity: usize,
+    /// 上次 producer 满时尚未写入的输出样本（已经过重采样/声道适配，按 actual.channels 交织）。
+    pending_output: Vec<f32>,
+    pending_pos: usize,
 }
 
 /// 一个已 gapless 预切、但音频尚未播到的「曲目切换边界」。
@@ -365,7 +370,14 @@ impl Engine {
             position_base_secs: 0.0,
             frames_base: 0,
             producer_capacity,
+            pending_output: Vec::new(),
+            pending_pos: 0,
         });
+
+        self.prefill_current();
+        if let Some(cur) = self.current.as_mut() {
+            cur.sink.sink.resume();
+        }
         self.status = PlayStatus::Playing;
 
         self.emit_format_changed(actual);
@@ -385,13 +397,19 @@ impl Engine {
         let mut iterations = 0;
         while iterations < 32 {
             iterations += 1;
+            if !flush_pending_output(cur) {
+                break;
+            }
             // producer 剩余空间不足一批就停（让出给输出线程消费）。
-            if cur.sink.producer.slots() < cur.src_fmt.channels as usize * 2048 {
+            if cur.sink.producer.slots() < cur.actual.channels.max(1) as usize * 2048 {
                 break;
             }
             match cur.decoder.next_frames() {
                 Ok(Some(chunk)) => {
                     push_chunk(cur, &chunk.samples);
+                    if !pending_output_empty(cur) {
+                        break;
+                    }
                 }
                 Ok(None) => {
                     // EOF：冲洗重采样器尾巴（若有），标记。
@@ -403,6 +421,34 @@ impl Engine {
                     cur.decoded_eof = true;
                     break;
                 }
+            }
+        }
+    }
+
+    fn prefill_current(&mut self) {
+        let Some(target) = self.current.as_ref().map(|cur| {
+            let capacity_frames = cur.producer_capacity / cur.actual.channels.max(1) as usize;
+            PREFILL_FRAMES.min(capacity_frames / 2).max(1024)
+        }) else {
+            return;
+        };
+
+        for _ in 0..16 {
+            let buffered = match self.current.as_ref() {
+                Some(cur) => buffered_output_frames(cur),
+                None => return,
+            };
+            if buffered >= target {
+                break;
+            }
+            self.pump();
+            if self
+                .current
+                .as_ref()
+                .map(|cur| cur.decoded_eof)
+                .unwrap_or(true)
+            {
+                break;
             }
         }
     }
@@ -470,7 +516,10 @@ impl Engine {
                 // producer 里是 sink 实际声道交织的输出帧 → 按 actual.channels 换算，与
                 // frames_played（输出帧）同基准。
                 let ch = cur.actual.channels.max(1) as usize;
-                let buffered = cur.producer_capacity.saturating_sub(cur.sink.producer.slots()) / ch;
+                let buffered = cur
+                    .producer_capacity
+                    .saturating_sub(cur.sink.producer.slots())
+                    / ch;
                 (
                     cur.src_fmt,
                     self.frames_played.load(Ordering::Relaxed),
@@ -527,7 +576,8 @@ impl Engine {
     fn check_track_boundary(&mut self) {
         loop {
             let frames = self.frames_played.load(Ordering::Relaxed);
-            let cross = matches!(self.pending_switch.front(), Some(sw) if frames >= sw.boundary_frame);
+            let cross =
+                matches!(self.pending_switch.front(), Some(sw) if frames >= sw.boundary_frame);
             if !cross {
                 return;
             }
@@ -645,6 +695,8 @@ impl Engine {
                 cur.position_base_secs = actual_secs;
                 cur.frames_base = self.frames_played.load(Ordering::Relaxed);
                 cur.decoded_eof = false;
+                cur.pending_output.clear();
+                cur.pending_pos = 0;
                 if let Some(rs) = cur.resampler.as_mut() {
                     rs.in_accum.clear();
                 }
@@ -814,8 +866,15 @@ impl Engine {
     }
 }
 
-/// 把一批源交织样本（可能重采样后）push 到 sink producer。producer 满则丢弃多余（欠/过载保护；
-/// 正常情况下 pump 已按 slots 控量）。
+fn buffered_output_frames(cur: &Current) -> usize {
+    let ch = cur.actual.channels.max(1) as usize;
+    cur.producer_capacity
+        .saturating_sub(cur.sink.producer.slots())
+        / ch
+}
+
+/// 把一批源交织样本（可能重采样后）push 到 sink producer。producer 满时保留剩余样本，
+/// 下轮继续写，避免 FLAC/重采样大块输出被截断导致听感加速。
 fn push_chunk(cur: &mut Current, samples: &[f32]) {
     let src_ch = cur.src_fmt.channels.max(1) as usize;
     let dst_ch = cur.actual.channels.max(1) as usize;
@@ -835,11 +894,11 @@ fn push_chunk(cur: &mut Current, samples: &[f32]) {
     // 2) 声道：源声道 → sink 实际声道。设备声道与源不同（如单声道音轨 + 立体声设备）时
     //    必须适配，否则输出回调按设备声道消费按源声道交织的流 → 播放加速/音高错乱/串扰。
     if src_ch == dst_ch {
-        push_samples(&mut cur.sink, &rate_adj);
+        push_or_buffer(cur, &rate_adj);
     } else {
         let mut remapped = Vec::with_capacity(rate_adj.len() / src_ch * dst_ch + dst_ch);
         remap_channels(&rate_adj, src_ch, dst_ch, &mut remapped);
-        push_samples(&mut cur.sink, &remapped);
+        push_or_buffer(cur, &remapped);
     }
 }
 
@@ -873,13 +932,40 @@ fn remap_channels(input: &[f32], src_ch: usize, dst_ch: usize, out: &mut Vec<f32
     }
 }
 
-fn push_samples(sink: &mut SinkHandle, samples: &[f32]) {
-    for &s in samples {
-        if sink.producer.push(s).is_err() {
-            // producer 满：停止本批写入（剩余下轮再来；此处简单丢弃极少发生，因 pump 控量）。
+fn push_or_buffer(cur: &mut Current, samples: &[f32]) {
+    debug_assert!(pending_output_empty(cur));
+    let mut idx = 0usize;
+    while idx < samples.len() {
+        if cur.sink.producer.push(samples[idx]).is_err() {
+            cur.pending_output.extend_from_slice(&samples[idx..]);
+            cur.pending_pos = 0;
             break;
         }
+        idx += 1;
     }
+}
+
+fn flush_pending_output(cur: &mut Current) -> bool {
+    while cur.pending_pos < cur.pending_output.len() {
+        if cur
+            .sink
+            .producer
+            .push(cur.pending_output[cur.pending_pos])
+            .is_err()
+        {
+            return false;
+        }
+        cur.pending_pos += 1;
+    }
+    if !cur.pending_output.is_empty() {
+        cur.pending_output.clear();
+        cur.pending_pos = 0;
+    }
+    true
+}
+
+fn pending_output_empty(cur: &Current) -> bool {
+    cur.pending_pos >= cur.pending_output.len()
 }
 
 fn status_code(s: PlayStatus) -> u8 {

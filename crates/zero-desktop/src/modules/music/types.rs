@@ -117,6 +117,28 @@ pub struct AudioFormat {
     pub channels: u16,
     /// 每样本有效位深（源 PCM 位深，回报 UI 用；输出统一以 f32 送出）。
     pub bits: u32,
+    /// 源文件大类。用于输出策略选择；例如 FLAC 高位深优先走共享 float 路径，避开脆弱的独占整数路径。
+    pub kind: AudioKind,
+}
+
+/// 源文件大类。保持小枚举，避免把路径/扩展名字符串带进实时播放状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioKind {
+    Flac,
+    Mp3,
+    Wav,
+    Other,
+}
+
+impl AudioKind {
+    pub fn from_extension(ext: Option<&str>) -> Self {
+        match ext.map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("flac") => AudioKind::Flac,
+            Some("mp3") => AudioKind::Mp3,
+            Some("wav") => AudioKind::Wav,
+            _ => AudioKind::Other,
+        }
+    }
 }
 
 /// sink 实际协商生效的格式（经 `music_format_changed` 回报前端，让用户看清是否真 bit-perfect）。
