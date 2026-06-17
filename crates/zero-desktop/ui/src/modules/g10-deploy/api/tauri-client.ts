@@ -15,6 +15,8 @@ export interface ServiceDef {
   repo_dir: string
   health_url: string
   remote_service: string | null
+  /** 服务 web 后台地址；空串 = 无后台。 */
+  web_url: string
   deploy: DeployDef | null
 }
 
@@ -28,6 +30,7 @@ export interface ProbeResult {
   reachable: boolean
   status: string | null
   remote_version: string | null
+  remote_commit?: string | null
   latency_ms: number | null
   error: string | null
 }
@@ -60,6 +63,11 @@ export const G10DeployAPI = {
   localVersion: (name: string) => invoke<LocalVersion>('g10_local_version', { name }),
   isDeploying: () => invoke<boolean>('g10_is_deploying'),
   deploy: (name: string) => invoke<void>('g10_deploy', { name }),
+}
+
+/** 在系统默认浏览器打开指定 URL（命令由后端 `open_url` 提供，入参 `{ url }`）。 */
+export function openUrl(url: string): Promise<void> {
+  return invoke<void>('open_url', { url })
 }
 
 // ── 部署事件订阅 ──────────────────────────────────────────────────────────────

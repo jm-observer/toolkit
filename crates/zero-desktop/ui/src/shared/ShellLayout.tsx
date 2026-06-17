@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, MessageSquareText, Music, Rocket, Settings, ExternalLink } from 'lucide-react'
+import { BookOpen, Mic, Wand2, Cookie, ShieldCheck, GitCompareArrows, MessageSquareText, Music, Rocket, Settings } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import EnvConfigService from '../modules/english/services/EnvConfigService'
@@ -324,21 +324,6 @@ export default function ShellLayout() {
               {label}
             </NavLink>
           ))}
-
-          {/* toolkit-server 控制台：外部链接，用系统浏览器打开（非路由跳转） */}
-          <button
-            type="button"
-            onClick={() => {
-              void invoke('open_toolkit_console').catch(e =>
-                console.error('[ShellLayout] 打开控制台失败:', e),
-              )
-            }}
-            title="在浏览器打开 toolkit-server 控制台（地址见设置页）"
-            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-200 dark:text-gray-300 dark:hover:bg-gray-800"
-          >
-            <ExternalLink size={16} />
-            控制台
-          </button>
         </nav>
 
         {/* 侧栏底部：全局录音开关，任何页面都能启停 */}

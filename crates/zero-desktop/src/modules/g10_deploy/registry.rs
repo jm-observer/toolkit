@@ -30,6 +30,10 @@ pub struct ServiceDef {
     /// 远端 systemd `--user` 服务名（仅展示用）。
     #[serde(default)]
     pub remote_service: Option<String>,
+    /// 服务 web 后台地址（前端「打开后台」按钮跳转）。空串 = 无后台，不显示按钮。
+    /// 内置默认仅 toolkit-server 填，其余留空，可在 `g10-services.json` 配置。
+    #[serde(default)]
+    pub web_url: String,
     /// 一键部署定义。`None` → 该服务暂不支持一键部署（仅观测）。
     #[serde(default)]
     pub deploy: Option<DeployDef>,
@@ -56,6 +60,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             repo_dir: r"D:\git\github-commit-info".into(),
             health_url: "http://192.168.0.68:8788/api/web/health".into(),
             remote_service: Some("toolkit-server".into()),
+            web_url: "http://192.168.0.68:8788".into(),
             deploy: Some(DeployDef {
                 script: "deploy-g10.ps1".into(),
                 // 部署后重启 toolkit-server 用户服务（脚本默认即此 service，显式写出更清晰）。
@@ -69,6 +74,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             repo_dir: r"D:\git\zero".into(),
             health_url: String::new(),
             remote_service: Some("zero.service".into()),
+            web_url: String::new(),
             deploy: None, // 待接入：脚本在 scripts/ 下、远端编译形态，需单独适配
         },
         ServiceDef {
@@ -78,6 +84,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             repo_dir: r"D:\git\english".into(),
             health_url: "http://192.168.0.68:28080/health".into(),
             remote_service: Some("english.service".into()),
+            web_url: String::new(),
             deploy: None, // 待接入：部署机制不同（自更新）
         },
         ServiceDef {
@@ -87,6 +94,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             repo_dir: r"D:\git\trace-hub".into(),
             health_url: "http://192.168.0.68:9100/health".into(),
             remote_service: Some("trace-hub.service".into()),
+            web_url: String::new(),
             deploy: None, // 待接入：暂无 deploy-g10.ps1
         },
         ServiceDef {
@@ -96,6 +104,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             repo_dir: r"D:\git\system-prompt-show".into(),
             health_url: "http://192.168.0.68:8080/health".into(),
             remote_service: Some("system-prompt-show.service".into()),
+            web_url: String::new(),
             deploy: None, // 待接入：暂无 deploy-g10.ps1
         },
         ServiceDef {
@@ -105,6 +114,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             repo_dir: r"D:\git\timer-util".into(),
             health_url: String::new(),
             remote_service: Some("alarm-server.service".into()),
+            web_url: String::new(),
             deploy: None,
         },
     ]

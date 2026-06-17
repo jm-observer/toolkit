@@ -21,3 +21,8 @@ description = "release 编译 zero-desktop（cargo tauri build：前端构建 + 
 cwd = "crates/zero-desktop"
 command = "cargo"
 args = ["tauri", "build"]
+
+[tasks.dev]
+cwd = "crates/zero-desktop"
+command = "cargo"
+args = ["tauri", "dev"]

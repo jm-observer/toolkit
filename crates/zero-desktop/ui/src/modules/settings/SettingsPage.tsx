@@ -30,13 +30,11 @@ function applyTheme(theme: 'light' | 'dark') {
 interface AppSettings {
   g10_base: string
   g10_token?: string | null
-  console_url: string
 }
 
 function G10ConfigSection() {
   const [g10Base, setG10Base] = useState('')
   const [g10Token, setG10Token] = useState('')
-  const [consoleUrl, setConsoleUrl] = useState('')
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -44,7 +42,6 @@ function G10ConfigSection() {
     void invoke<AppSettings>('cookie_get_app_settings').then(s => {
       setG10Base(s.g10_base ?? '')
       setG10Token(s.g10_token ?? '')
-      setConsoleUrl(s.console_url ?? '')
     }).catch(err => console.error('[SettingsPage] 加载 G10 配置失败:', err))
   }, [])
 
@@ -58,8 +55,7 @@ function G10ConfigSection() {
     try {
       const settings: AppSettings = {
         g10_base: g10Base.trim(),
-        g10_token: g10Token.trim() || null,
-        console_url: consoleUrl.trim()
+        g10_token: g10Token.trim() || null
       }
       await invoke('cookie_save_app_settings', { settings })
       showFeedback('ok', 'G10 配置已保存')
@@ -104,17 +100,6 @@ function G10ConfigSection() {
           value={g10Token}
           onChange={e => setG10Token(e.target.value)}
           placeholder="留空表示不鉴权"
-          className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
-        />
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <label className="text-xs text-gray-500 dark:text-gray-400">控制台地址（侧栏「控制台」按钮打开；直连局域网，不走反代）</label>
-        <input
-          type="text"
-          value={consoleUrl}
-          onChange={e => setConsoleUrl(e.target.value)}
-          placeholder="http://192.168.0.68:8788"
           className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
         />
       </div>

@@ -19,7 +19,13 @@ function fmtTime(secs: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-/** 格式徽标文案，如 “FLAC 96kHz/24bit · 独占 · 无重采样”。 */
+/**
+ * 格式徽标文案，如 “FLAC 96kHz/24bit/2ch · 独占 · 无重采样”。
+ *
+ * 颜色编码（便于定位底噪来源）：
+ * - 独占 bit-perfect（exclusive && !resampled）→ 绿色，走原始 PCM 直送路径；
+ * - 走了重采样（resampled）→ 琥珀/红色醒目标注，底噪很可能来自此路径。
+ */
 function FormatBadge() {
   const { format, track } = usePlayer()
   if (!format) return null
@@ -27,25 +33,40 @@ function FormatBadge() {
   const ext = track?.path?.split('.').pop()?.toUpperCase()
   const khz = (format.sample_rate / 1000)
   const khzStr = Number.isInteger(khz) ? `${khz}kHz` : `${khz.toFixed(1)}kHz`
+  const ch = format.channels
+  const chStr = ch ? `${ch}ch` : null
   const parts = [
-    [ext, `${khzStr}/${format.bits}bit`].filter(Boolean).join(' '),
+    [ext, [`${khzStr}/${format.bits}bit`, chStr].filter(Boolean).join('/')]
+      .filter(Boolean)
+      .join(' '),
     format.exclusive ? '独占' : '共享',
     format.resampled ? '已重采样' : '无重采样',
   ]
 
+  const cls = format.resampled
+    ? 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
+    : format.exclusive
+      ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+      : 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400'
+
   return (
-    <span
-      className={[
-        'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium',
-        format.exclusive && !format.resampled
-          ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
-          : 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400',
-      ].join(' ')}
-      title="实际生效的输出格式（是否真 bit-perfect）"
-    >
-      <Volume2 size={12} />
-      {parts.join(' · ')}
-    </span>
+    <div className="flex flex-col gap-0.5">
+      <span
+        className={[
+          'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium',
+          cls,
+        ].join(' ')}
+        title="实际生效的输出格式（采样率/位深/声道 · 独占 vs 共享 · 是否重采样）"
+      >
+        <Volume2 size={12} />
+        {parts.join(' · ')}
+      </span>
+      {format.resampled && (
+        <span className="text-[10px] leading-tight text-red-600/80 dark:text-red-400/80">
+          标注「已重采样」时，底噪可能来自设备不支持原始采样率的重采样路径
+        </span>
+      )}
+    </div>
   )
 }
 

@@ -39,6 +39,7 @@ async fn health(State(s): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("GIT_COMMIT").unwrap_or("unknown"),
         "db_path": s.db_path.display().to_string(),
     }))
 }

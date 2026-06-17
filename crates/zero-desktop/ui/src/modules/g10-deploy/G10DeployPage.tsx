@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { RefreshCw, Rocket, CircleDot } from 'lucide-react'
+import { RefreshCw, Rocket, CircleDot, ExternalLink } from 'lucide-react'
 import {
   G10DeployAPI,
+  openUrl,
   onDeployDone,
   onDeployLog,
   type DeployLog,
@@ -19,13 +20,16 @@ interface Row {
   probing: boolean
 }
 
-// 远端运行版（health.version，语义版本）与本地之间能否判定漂移：health 只暴露 crate semver，
-// 同一 semver 内的 git 漂移看不出来——dirty 时明确提示「本地有未提交改动」。
+// 漂移判定：优先用 commit 对比——远端编译版（health.commit）与本地编译版（git_hash）都有
+// 且不同 → 运行版与本地编译漂移。其次 dirty 时提示本地有未提交改动。
 function driftHint(probe?: ProbeResult, local?: LocalVersion): string {
-  if (!local?.git_hash) return ''
-  if (local.dirty) return '本地有未提交改动'
-  if (!probe?.reachable) return ''
-  return '' // semver 粒度无法进一步判断，留空
+  const remoteCommit = probe?.remote_commit ?? null
+  const localHash = local?.git_hash ?? null
+  if (remoteCommit && localHash && remoteCommit !== localHash) {
+    return '运行版与本地编译有漂移'
+  }
+  if (local?.dirty) return '本地有未提交改动'
+  return ''
 }
 
 function StatusDot({ probe, configured }: { probe?: ProbeResult; configured: boolean }) {
@@ -194,12 +198,18 @@ export default function G10DeployPage() {
                     {def.note}
                   </p>
 
-                  {/* 版本对比 */}
+                  {/* 版本对比：远端运行版(semver) · 远端编译版(commit) · 本地编译版(commit) */}
                   <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
                     <span className="text-gray-500">
                       远端运行版：
                       <span className="font-mono text-gray-800 dark:text-gray-200">
                         {probe?.remote_version ?? (probing ? '…' : '—')}
+                      </span>
+                    </span>
+                    <span className="text-gray-500">
+                      远端编译版：
+                      <span className="font-mono text-gray-800 dark:text-gray-200">
+                        {probe?.remote_commit ?? (probing ? '…' : '—')}
                       </span>
                     </span>
                     <span className="text-gray-500">
@@ -218,6 +228,16 @@ export default function G10DeployPage() {
 
                 {/* 操作 */}
                 <div className="flex flex-shrink-0 items-center gap-2">
+                  {def.web_url && (
+                    <button
+                      type="button"
+                      onClick={() => void openUrl(def.web_url)}
+                      title={`打开后台 ${def.web_url}`}
+                      className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+                    >
+                      <ExternalLink size={14} /> 打开后台
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => void refreshOne(def.name)}
