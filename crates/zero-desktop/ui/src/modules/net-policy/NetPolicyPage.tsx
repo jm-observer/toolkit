@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ShieldCheck, RefreshCw, Plus, Trash2, OctagonX, Upload } from 'lucide-react'
+import { ShieldCheck, RefreshCw, Plus, Trash2, OctagonX, Upload, Settings as SettingsIcon } from 'lucide-react'
 import {
   NetPolicyAPI,
   type Status,
@@ -8,7 +8,6 @@ import {
   type Rule,
   type RuleKind,
   type Route,
-  type ProcessCandidate,
   type VerifyReport,
   type ConnectionsSnapshot,
 } from './api/tauri-client'
@@ -16,6 +15,7 @@ import { ProtectionBanner } from './components/ProtectionBanner'
 import { FlowTopology } from './components/FlowTopology'
 import { ApplyStepper } from './components/ApplyStepper'
 import { VerifyMatrix } from './components/VerifyMatrix'
+import { CurrentStateSection } from './components/CurrentStateSection'
 
 const KIND_LABELS: Record<RuleKind, string> = {
   'process-path': '程序路径',
@@ -76,7 +76,6 @@ export default function NetPolicyPage() {
   const [conns, setConns] = useState<ConnectionsSnapshot>(EMPTY_CONNS)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [rules, setRules] = useState<RuleSet>({ rules: [], groups: [] })
-  const [candidates, setCandidates] = useState<ProcessCandidate[]>([])
   const [verify, setVerify] = useState<VerifyReport | null>(null)
   const [exitIp, setExitIp] = useState<string | null>(null)
   const [exitIpAt, setExitIpAt] = useState<string | null>(null)
@@ -156,24 +155,25 @@ export default function NetPolicyPage() {
     })
   const deleteRule = (index: number) =>
     run('删除规则', async () => setRules(await NetPolicyAPI.deleteRule(index)))
-  const loadCandidates = () =>
-    run('扫描进程', async () => setCandidates(await NetPolicyAPI.listProcessCandidates()))
-  const addCandidateDirect = (c: ProcessCandidate) =>
-    run('加入直连', async () =>
-      setRules(await NetPolicyAPI.saveRule({ kind: 'process-name', value: c.name, route: 'direct' })),
-    )
 
   // 验证（含 exit-ip / dns-hijack）：手动触发，重探测不进 3s 快轮询。
+  // 现状区挂载/「刷新现状」会自动跑 verify 并经 onVerify/onExitIp 回填这里；
+  // VerifyMatrix 的「一键自检」也复用此函数。
   const runVerify = () =>
     run('验证', async () => {
       const rep = await NetPolicyAPI.verify()
-      setVerify(rep)
-      const ip = rep.cases.find(c => c.id === 'exit-ip')
-      if (ip && ip.status === 'passed') {
-        setExitIp(ip.observed)
-        setExitIpAt(new Date().toLocaleTimeString())
-      }
+      handleVerify(rep)
     })
+
+  // 现状区/自检共用的 verify 结果回填。
+  const handleVerify = (rep: VerifyReport) => {
+    setVerify(rep)
+    const ip = rep.cases.find(c => c.id === 'exit-ip')
+    if (ip && ip.status === 'passed') {
+      setExitIp(ip.observed)
+      setExitIpAt(new Date().toLocaleTimeString())
+    }
+  }
 
   return (
     <div className="mx-auto max-w-4xl space-y-5">
@@ -200,11 +200,36 @@ export default function NetPolicyPage() {
         </div>
       )}
 
-      {/* 保护状态横幅 */}
-      {status && <ProtectionBanner status={status} exitIp={exitIp} exitIpAt={exitIpAt} />}
+      {/* ════════════ 现状查询区（只读 · 进页自动查 · 不改系统） ════════════ */}
+      <div className="space-y-3 rounded-xl border border-sky-200/70 bg-sky-50/30 p-3 dark:border-sky-900/40 dark:bg-sky-950/10">
+        <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-300">
+          <span>① 本机现状查询</span>
+          <span className="font-normal normal-case text-sky-600/70 dark:text-sky-400/70">只读 · 不改系统 · 进页自动刷新</span>
+        </div>
 
-      {/* 数据通路全景图：用占位状态立即渲染骨架，真实探测回来即覆盖（不被 ~1s 的 status 阻塞）。 */}
-      <FlowTopology status={status ?? LOADING_STATUS} conns={conns} settings={settings} />
+        {/* 保护状态横幅（汇总当前真实保护态） */}
+        {status && <ProtectionBanner status={status} exitIp={exitIp} exitIpAt={exitIpAt} />}
+
+        {/* 本机现状只读查询区：出口 IP / DNS / 控制器 / 防火墙 / TUN / WG / 活跃连接 / 进程候选 */}
+        <CurrentStateSection
+          status={status}
+          conns={conns}
+          busy={busy}
+          onVerify={handleVerify}
+          onExitIp={(ip, at) => { setExitIp(ip); setExitIpAt(at) }}
+        />
+
+        {/* 数据通路全景图：节点标注「现状可查 / 应用后才有」。占位状态立即渲染骨架。 */}
+        <FlowTopology status={status ?? LOADING_STATUS} conns={conns} settings={settings} />
+      </div>
+
+      {/* ════════════ 应用策略区（独立显式操作 · 有副作用 · 改系统） ════════════ */}
+      <div className="space-y-3 rounded-xl border border-violet-200/70 bg-violet-50/30 p-3 dark:border-violet-900/40 dark:bg-violet-950/10">
+        <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">
+          <SettingsIcon size={13} />
+          <span>② 应用策略</span>
+          <span className="font-normal normal-case text-violet-600/70 dark:text-violet-400/70">有副作用 · 会改防火墙/路由/起引擎 · 需显式点击</span>
+        </div>
 
       {/* 应用流程分步 stepper */}
       <ApplyStepper onApply={applyPolicy} busy={busy} canApply={!!status?.wg_configured} />
@@ -325,20 +350,13 @@ export default function NetPolicyPage() {
         </ul>
       </Panel>
 
-      {/* 进程发现 */}
-      <Panel title="进程发现" right={<button className={btn()} onClick={loadCandidates} disabled={busy}>扫描近期连接</button>}>
-        <ul className="divide-y divide-gray-200 text-sm dark:divide-gray-800">
-          {candidates.length === 0 && <li className="py-2 text-gray-500">点击「扫描近期连接」列出有公网连接的进程。</li>}
-          {candidates.map(c => (
-            <li key={c.pid} className="flex items-center gap-2 py-1.5">
-              <span className="flex-1 truncate" title={c.path}>{c.name || `pid ${c.pid}`} <span className="text-xs text-gray-400">({c.remotes.length} 连接)</span></span>
-              <button className={btn()} onClick={() => addCandidateDirect(c)} disabled={busy}>设为直连</button>
-            </li>
-          ))}
-        </ul>
-      </Panel>
+        <p className="px-1 text-[11px] text-gray-500 dark:text-gray-400">
+          提示：要把某个程序设为直连，可在上方表单选「程序名」+ 填可执行名（如 steam.exe）+「本地直连」添加；
+          近期有公网连接的进程清单在上方「本机现状 → 扫描进程」里查看。
+        </p>
+      </div>
 
-      {/* 验证矩阵（VP / §9，源自报告 §0.8.2）：报告历史结论 vs 当前代码模型 + 手动实时检查 */}
+      {/* ════════════ 验证证据（只读评估 · 报告历史结论 vs 当前模型 + 一键自检） ════════════ */}
       {status && <VerifyMatrix status={status} verify={verify} onVerify={runVerify} busy={busy} />}
     </div>
   )

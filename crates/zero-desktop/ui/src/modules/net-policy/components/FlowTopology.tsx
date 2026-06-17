@@ -31,23 +31,50 @@ const RING: Record<NodeState, string> = {
   block: 'border-red-400/60 dark:border-red-500/50',
 }
 
+/** 节点取证属性：现状可直接查 / 仅应用策略后才存在。用于左下角小标注。 */
+type Provenance = 'live' | 'applied'
+
+function ProvBadge({ prov }: { prov: Provenance }) {
+  if (prov === 'live') {
+    return (
+      <span
+        className="absolute left-1.5 bottom-1.5 rounded bg-sky-100 px-1 py-px text-[9px] font-medium leading-none text-sky-700 dark:bg-sky-950/60 dark:text-sky-300"
+        title="本机现状即可查（无需应用策略）"
+      >
+        现状可查
+      </span>
+    )
+  }
+  return (
+    <span
+      className="absolute left-1.5 bottom-1.5 rounded bg-violet-100 px-1 py-px text-[9px] font-medium leading-none text-violet-700 dark:bg-violet-950/60 dark:text-violet-300"
+      title="仅在应用网络策略后才存在"
+    >
+      应用后才有
+    </span>
+  )
+}
+
 function Node({
   icon,
   title,
   sub,
   state,
+  prov,
 }: {
   icon: React.ReactNode
   title: string
   sub?: string
   state: NodeState
+  prov?: Provenance
 }) {
   return (
-    <div className={`relative flex w-full flex-col items-center gap-1 rounded-lg border bg-white px-3 py-2.5 text-center dark:bg-gray-900 ${RING[state]}`}>
+    <div className={`relative flex w-full flex-col items-center gap-1 rounded-lg border bg-white px-3 ${prov ? 'pb-5 pt-2.5' : 'py-2.5'} text-center dark:bg-gray-900 ${RING[state]}`}>
       <span className={`absolute right-2 top-2 inline-block h-2 w-2 rounded-full ${DOT[state]}`} />
       <span className="text-gray-600 dark:text-gray-300">{icon}</span>
       <span className="text-xs font-medium">{title}</span>
       {sub && <span className="text-[11px] text-gray-500 dark:text-gray-400">{sub}</span>}
+      {prov && <ProvBadge prov={prov} />}
     </div>
   )
 }
@@ -105,21 +132,25 @@ export function FlowTopology({
     <section className="rounded-lg border border-gray-200 dark:border-gray-800">
       <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-800">
         <h2 className="text-sm font-semibold">数据通路全景</h2>
-        <span className="text-xs text-gray-500">
-          活跃连接 {appCount}（绿=正常 · 黄=就绪中/降级 · 灰=未起 · 红=阻断）
-        </span>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+          <span>活跃连接 {appCount}（绿=正常 · 黄=就绪中/降级 · 灰=未起 · 红=阻断）</span>
+          <span className="inline-flex items-center gap-1">
+            <span className="rounded bg-sky-100 px-1 py-px text-[9px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-300">现状可查</span>
+            <span className="rounded bg-violet-100 px-1 py-px text-[9px] font-medium text-violet-700 dark:bg-violet-950/60 dark:text-violet-300">应用后才有</span>
+          </span>
+        </div>
       </div>
 
       <div className="space-y-3 p-4">
         {/* 上游链路 */}
         <div className="flex flex-col items-stretch gap-2 md:flex-row md:items-center">
-          <Node icon={<Laptop size={18} />} title="本机应用" sub={`${appCount} 活跃连接`} state={appState} />
+          <Node icon={<Laptop size={18} />} title="本机应用" sub={`${appCount} 活跃连接`} state={appState} prov="live" />
           <HArrow />
-          <Node icon={<Network size={18} />} title="TUN (Meta)" sub={tun ? '已起栈' : running ? '起栈中' : '未起'} state={tunState} />
+          <Node icon={<Network size={18} />} title="TUN (Meta)" sub={tun ? '已起栈' : running ? '起栈中' : '未起'} state={tunState} prov="applied" />
           <HArrow />
-          <Node icon={<Globe2 size={18} />} title="DNS 劫持" sub="fake-ip 198.18/16" state={dnsState} />
+          <Node icon={<Globe2 size={18} />} title="DNS 劫持" sub="fake-ip 198.18/16" state={dnsState} prov="applied" />
           <HArrow />
-          <Node icon={<Cpu size={18} />} title="规则引擎" sub={running ? 'rule mode 在线' : '离线'} state={engineState} />
+          <Node icon={<Cpu size={18} />} title="规则引擎" sub={running ? 'rule mode 在线' : '离线'} state={engineState} prov="applied" />
         </div>
 
         <div className="flex justify-center"><VArrow /></div>
@@ -131,12 +162,14 @@ export function FlowTopology({
             title="DIRECT 本地直连"
             sub={`${conns.direct_count} 活跃连接`}
             state={directState}
+            prov="live"
           />
           <Node
             icon={<Globe2 size={18} />}
             title="wg-out 海外隧道"
             sub={`${conns.wg_count} 活跃连接`}
             state={wgState}
+            prov="applied"
           />
         </div>
 
@@ -155,6 +188,7 @@ export function FlowTopology({
               fenceState === 'block' ? 'text-red-500' : fenceState === 'warn' ? 'text-amber-500' : 'text-gray-400'
             } />
             <span className="text-xs font-semibold">物理网卡 kill-switch 围栏</span>
+            <span className="rounded bg-sky-100 px-1 py-px text-[9px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-300" title="防火墙状态本机现状即可查（无需应用）">现状可查</span>
             <span className="ml-auto text-[11px] text-gray-500">
               {fenceState === 'block'
                 ? `默认 Block 生效 · ${ruleCount} 条放行规则`
@@ -188,7 +222,7 @@ export function FlowTopology({
         {/* 出口 */}
         <div className="flex justify-center">
           <div className="w-full md:w-1/2">
-            <Node icon={<Globe2 size={18} />} title="海外出口 IP" sub="经 WG endpoint" state={exitState} />
+            <Node icon={<Globe2 size={18} />} title="海外出口 IP" sub="经 WG endpoint" state={exitState} prov="live" />
           </div>
         </div>
       </div>
