@@ -65,6 +65,16 @@ pub fn g10_list_services(state: State<'_, AppState>) -> ServiceList {
     ServiceList { services, warning }
 }
 
+/// 把编辑后的服务清单（含端口）写回 workspace 的 `g10-services.json` 覆盖文件。
+/// 前端编辑端口/字段后调用，下次 `g10_list_services` 即读到新值。
+#[tauri::command]
+pub fn g10_save_services(
+    state: State<'_, AppState>,
+    services: Vec<ServiceDef>,
+) -> Result<(), String> {
+    registry::save(&state.g10_deploy.workspace, &services)
+}
+
 // ============ 连通性探测（仅 HTTP 健康端点） ============
 
 #[derive(Serialize)]
@@ -340,6 +350,18 @@ pub async fn g10_deploy(
         return Err(format!("部署脚本不存在：{}", script_path.display()));
     }
 
+    // 端口分配链路：把 registry 主端口（ports[0]）拼成 `0.0.0.0:<port>` 作为 `-Bind`
+    // 追加进部署脚本参数，脚本据此在安装时写 unit 的 `Environment=TOOLKIT_BIND=<bind>`。
+    // 脚本已有 `-Bind` 显式参数时不重复追加（registry args 优先）。
+    let mut deploy_args = deploy.args.clone();
+    if let Some(primary) = svc.ports.first() {
+        let has_bind = deploy_args.iter().any(|a| a.eq_ignore_ascii_case("-Bind"));
+        if !has_bind {
+            deploy_args.push("-Bind".into());
+            deploy_args.push(format!("0.0.0.0:{}", primary.port));
+        }
+    }
+
     // 抢占部署锁（compare_exchange 保证只有一个能拿到）。
     if gs
         .deploying
@@ -352,7 +374,7 @@ pub async fn g10_deploy(
     let name_for_task = name.clone();
     let app_bg = app.clone();
     tokio::spawn(async move {
-        let result = run_deploy(&app_bg, &name_for_task, &repo, &deploy.script, &deploy.args).await;
+        let result = run_deploy(&app_bg, &name_for_task, &repo, &deploy.script, &deploy_args).await;
         // 无论成败，释放部署锁。
         gs.deploying.store(false, Ordering::SeqCst);
         let done = match result {

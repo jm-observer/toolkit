@@ -83,6 +83,8 @@ export interface DeployDone {
 
 export const G10DeployAPI = {
   listServices: () => invoke<ServiceList>('g10_list_services'),
+  saveServices: (services: ServiceDef[]) =>
+    invoke<void>('g10_save_services', { services }),
   probe: (name: string) => invoke<ProbeResult>('g10_probe_service', { name }),
   probePorts: (name: string) => invoke<PortsResult>('g10_probe_ports', { name }),
   localVersion: (name: string) => invoke<LocalVersion>('g10_local_version', { name }),

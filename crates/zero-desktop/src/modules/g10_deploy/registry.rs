@@ -193,3 +193,17 @@ pub fn load(workspace: &Path) -> (Vec<ServiceDef>, Option<String>) {
         ),
     }
 }
+
+/// 把编辑后的服务清单写回 workspace 的 `g10-services.json`（覆盖文件）。
+/// 之后 `load` 即读到新值；删除该文件可恢复内置默认。
+pub fn save(workspace: &Path, services: &[ServiceDef]) -> Result<(), String> {
+    let path = registry_path(workspace);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
+    }
+    let json =
+        serde_json::to_string_pretty(services).map_err(|e| format!("序列化清单失败：{e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
+    Ok(())
+}
