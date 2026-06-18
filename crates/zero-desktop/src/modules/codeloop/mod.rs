@@ -183,9 +183,9 @@ impl LoopCtx {
             FinalVerdict::AbortedParse => ("aborted", "aborted_parse"),
             FinalVerdict::AbortedByUser => ("aborted", "aborted_by_user"),
         };
-        if let Err(e) =
-            self.db
-                .finalize(self.loop_id, status, Some(fv), total_rounds as i64, None)
+        if let Err(e) = self
+            .db
+            .finalize(self.loop_id, status, Some(fv), total_rounds as i64, None)
         {
             log::warn!("[codeloop] finalize 记录失败：{e:#}");
         }
@@ -427,12 +427,8 @@ async fn drive(ctx: &LoopCtx) -> Result<()> {
 
         // 5. Claude 据意见修订（含 ASK_USER 挂起）。
         // Claude 仅在 NEEDS_WORK 时被发起，其首次发送恒为第 1 轮 → n==1 即首轮。
-        let mut claude_prompt = prompt::render_claude_prompt(
-            prompt::DEFAULT_CLAUDE_TEMPLATE,
-            &target,
-            &review,
-            n == 1,
-        );
+        let mut claude_prompt =
+            prompt::render_claude_prompt(prompt::DEFAULT_CLAUDE_TEMPLATE, &target, &review, n == 1);
         // worktree 模式且尚未建立：追加指令，让 Claude 自己用 worktree + 子 agent 实现并回报路径。
         if ctx.use_worktree && !worktree_established {
             claude_prompt.push_str(prompt::WORKTREE_INSTRUCTION);
@@ -830,10 +826,7 @@ pub async fn codeloop_loop_messages(
 
 /// 删除一条记录（连带其消息）。
 #[tauri::command]
-pub async fn codeloop_delete_loop(
-    state: State<'_, AppState>,
-    loop_id: i64,
-) -> Result<(), String> {
+pub async fn codeloop_delete_loop(state: State<'_, AppState>, loop_id: i64) -> Result<(), String> {
     state
         .codeloop
         .db

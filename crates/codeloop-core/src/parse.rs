@@ -74,7 +74,8 @@ pub fn parse_worktree_path(reply: &str) -> Option<String> {
     for line in reply.lines() {
         let t = line.trim();
         const PFX: usize = "WORKTREE:".len();
-        if t.len() < PFX || !t.is_char_boundary(PFX) || !t[..PFX].eq_ignore_ascii_case("WORKTREE:") {
+        if t.len() < PFX || !t.is_char_boundary(PFX) || !t[..PFX].eq_ignore_ascii_case("WORKTREE:")
+        {
             continue;
         }
         let path = t[PFX..].trim();

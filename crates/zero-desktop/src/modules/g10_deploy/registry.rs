@@ -102,7 +102,7 @@ pub fn builtin() -> Vec<ServiceDef> {
             web_url: String::new(),
             host: default_host(),
             ports: vec![], // 网关端口待确认
-            deploy: None, // 待接入：脚本在 scripts/ 下、远端编译形态，需单独适配
+            deploy: None,  // 待接入：脚本在 scripts/ 下、远端编译形态，需单独适配
         },
         ServiceDef {
             name: "english".into(),

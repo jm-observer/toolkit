@@ -201,8 +201,12 @@ pub async fn send(s: &SessionRef, prompt: &str) -> Result<TurnResult> {
 pub async fn create_codex_session(cwd: &Path, prompt: &str) -> Result<String> {
     let argv = codex_create_argv(cwd, prompt);
     let stdout = run_capture("codex", &argv, Some(cwd)).await?;
-    parse_codex_thread_id(&stdout)
-        .ok_or_else(|| anyhow!("codex 新建会话未返回 thread_id；stdout 末段：{}", tail(&stdout)))
+    parse_codex_thread_id(&stdout).ok_or_else(|| {
+        anyhow!(
+            "codex 新建会话未返回 thread_id；stdout 末段：{}",
+            tail(&stdout)
+        )
+    })
 }
 
 /// 起子进程并捕获 stdout；非零退出码视为基础设施错误（`Err`）。
@@ -236,9 +240,7 @@ async fn run_capture(program: &str, argv: &[String], cwd: Option<&Path>) -> Resu
         Ok(r) => r.with_context(|| format!("等待 {program} 子进程退出失败"))?,
         // 超时：child future 在此被丢弃，kill_on_drop 触发子进程终止。
         Err(_) => {
-            log::warn!(
-                "[driver] {program} 单轮执行超时（{TURN_TIMEOUT:?}），已终止子进程",
-            );
+            log::warn!("[driver] {program} 单轮执行超时（{TURN_TIMEOUT:?}），已终止子进程",);
             return Err(anyhow!(
                 "{program} 单轮执行超时（{TURN_TIMEOUT:?}），已终止子进程",
             ));

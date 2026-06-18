@@ -16,7 +16,7 @@ cwd = "crates/zero-desktop/ui"
 command = "npm"
 args = ["install"]
 
-[tasks.zero-desktop-release]
+[tasks.release]
 description = "release 编译 zero-desktop（cargo tauri build：前端构建 + Rust release + 安装包）"
 cwd = "crates/zero-desktop"
 command = "cargo"

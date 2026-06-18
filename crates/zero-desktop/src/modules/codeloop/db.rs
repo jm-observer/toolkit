@@ -274,7 +274,10 @@ impl Db {
     pub fn delete_loop(&self, loop_id: i64) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM loop_messages WHERE loop_id=?1", params![loop_id])?;
+        tx.execute(
+            "DELETE FROM loop_messages WHERE loop_id=?1",
+            params![loop_id],
+        )?;
         tx.execute("DELETE FROM loops WHERE id=?1", params![loop_id])?;
         tx.commit()?;
         Ok(())

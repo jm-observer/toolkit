@@ -608,7 +608,11 @@ fn codex_response_item_to_msg(e: &Value) -> Option<SessionMessage> {
                 }
                 ("user", body, String::new())
             }
-            "assistant" => ("assistant", codex_content_text(p, "output_text"), String::new()),
+            "assistant" => (
+                "assistant",
+                codex_content_text(p, "output_text"),
+                String::new(),
+            ),
             _ => return None,
         },
         "reasoning" => {
@@ -622,7 +626,10 @@ fn codex_response_item_to_msg(e: &Value) -> Option<SessionMessage> {
         }
         "function_call" => {
             let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = p.get("arguments").map(codex_detail_text).unwrap_or_default();
+            let args = p
+                .get("arguments")
+                .map(codex_detail_text)
+                .unwrap_or_default();
             let detail = if args.is_empty() {
                 String::new()
             } else {
@@ -797,8 +804,8 @@ fn claude_content_to_text(content: &Value) -> (String, String) {
                 let name = b.get("name").and_then(Value::as_str).unwrap_or("");
                 parts.push(format!("[tool_use: {name}]"));
                 if let Some(input) = b.get("input") {
-                    let pretty = serde_json::to_string_pretty(input)
-                        .unwrap_or_else(|_| input.to_string());
+                    let pretty =
+                        serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
                     details.push(format!("[tool_use: {name}] 入参\n{pretty}"));
                 }
             }
