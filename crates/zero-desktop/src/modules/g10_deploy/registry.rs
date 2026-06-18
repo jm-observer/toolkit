@@ -107,7 +107,7 @@ pub fn builtin() -> Vec<ServiceDef> {
         ServiceDef {
             name: "english".into(),
             label: "english（学习后端）".into(),
-            note: "Actix-web 学习平台；走 LinuxService 自更新（无 deploy-g10.ps1）".into(),
+            note: "Actix-web 学习平台；deploy-g10.ps1 交叉编译部署，端口经 ENGLISH_BIND 注入".into(),
             repo_dir: r"D:\git\english".into(),
             health_url: "http://192.168.0.68:28080/health".into(),
             remote_service: Some("english.service".into()),
@@ -117,7 +117,12 @@ pub fn builtin() -> Vec<ServiceDef> {
                 port: 28080,
                 note: "HTTP API".into(),
             }],
-            deploy: None, // 待接入：部署机制不同（自更新）
+            // 面板按 ports[0] 自动追加 `-Bind 0.0.0.0:28080`，脚本据此
+            // `english install -e ENGLISH_BIND=<bind>` 注入端口。
+            deploy: Some(DeployDef {
+                script: "deploy-g10.ps1".into(),
+                args: vec!["-Service".into(), "english".into()],
+            }),
         },
         ServiceDef {
             name: "trace-hub".into(),
